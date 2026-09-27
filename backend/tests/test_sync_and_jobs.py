@@ -205,3 +205,10 @@ def test_returned_order_refunds_commission_and_restocks_by_default(conn):
     from app.services.finance_service import recalculate_order
     recalculate_order(conn, conn.execute(text("SELECT id FROM orders")).scalar())
     assert conn.execute(text("SELECT net_profit FROM orders")).scalar() == Decimal("-55.00")
+
+
+def test_scheduler_uses_configured_max_attempts(conn):
+    s = Settings(database_url="postgresql://x@y/z", trendyol_seller_id="1", trendyol_api_key="k",
+                 trendyol_api_secret="s", job_max_attempts=3)
+    sync_service.schedule_due_jobs(conn, 15, s)
+    assert {r[0] for r in conn.execute(text("SELECT max_attempts FROM sync_jobs"))} == {3}

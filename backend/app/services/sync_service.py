@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ..connectors.base import CAP_ORDERS_READ, CAP_PRODUCTS_READ, NotConfigured, NotSupported
+from ..config import get_settings
 from ..connectors.registry import all_connectors, get_connector
 from . import jobs
 from .events import record_event, resolve_fingerprint
@@ -134,6 +135,7 @@ def schedule_due_jobs(conn, interval_minutes: int, settings=None) -> list[int]:
     Aynı tip iş son `aralık` içinde oluşturulduysa veya hâlâ bekliyor/çalışıyorsa
     yeni iş eklenmez. Connector'ın desteklemediği işler hiç planlanmaz."""
     created = []
+    max_attempts = (settings or get_settings()).job_max_attempts
     for c in all_connectors(settings):
         if not c.is_configured():
             continue
@@ -150,7 +152,7 @@ def schedule_due_jobs(conn, interval_minutes: int, settings=None) -> list[int]:
             if recent:
                 continue
             job_id = jobs.enqueue(conn, job_type, marketplace=c.code, payload={},
-                                  idempotency_key=f"{job_type}:{c.code}")
+                                  idempotency_key=f"{job_type}:{c.code}", max_attempts=max_attempts)
             if job_id:
                 created.append(job_id)
     return created

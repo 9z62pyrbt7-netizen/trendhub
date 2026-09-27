@@ -104,7 +104,8 @@ def trigger_sync(code: str, request: Request, body: SyncIn | None = None, user: 
     if body.lookback_days and body.kind == "orders":
         payload["lookback_days"] = body.lookback_days
     key = f"{job_type}:{c.code}"
-    job_id = jobs.enqueue(conn, job_type, marketplace=c.code, payload=payload, idempotency_key=key)
+    job_id = jobs.enqueue(conn, job_type, marketplace=c.code, payload=payload, idempotency_key=key,
+                          max_attempts=get_settings().job_max_attempts)
     if job_id is None:
         existing = row(conn, "SELECT id FROM sync_jobs WHERE idempotency_key = :k AND status IN ('queued','running')", k=key)
         return {"queued": False, "job_id": existing and existing["id"], "message": "Zaten kuyrukta bekleyen bir iş var"}

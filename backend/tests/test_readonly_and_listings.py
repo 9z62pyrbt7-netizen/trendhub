@@ -213,3 +213,20 @@ def test_keepalive_refreshes_lock_during_long_job(engine, monkeypatch):
         time.sleep(0.3)
     with engine.connect() as c:
         assert c.execute(text("SELECT locked_at > NOW() - INTERVAL '1 minute' FROM sync_jobs")).scalar()
+
+
+def test_listing_import_requires_operator_and_sync_kind_validation(client_factory, engine):
+    from app.security import hash_password
+    client, login = client_factory
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO users(username, password_hash, role) VALUES ('izle', :h, 'viewer')"),
+                  {"h": hash_password("Viewer-Password-1")})
+    login("izle", "Viewer-Password-1")
+    H = {"X-Requested-With": "TrendHub"}
+    assert client.get("/api/listings").status_code == 200
+    assert client.post("/api/listings/import-products", headers=H).status_code == 403
+    assert client.post("/api/integrations/trendyol/sync", json={"kind": "listings"}, headers=H).status_code == 403
+    login("admin", "Admin-Password-123")
+    assert client.post("/api/integrations/trendyol/sync", json={"kind": "stok-yaz"}, headers=H).status_code == 422
+    r = client.post("/api/integrations/hepsiburada/sync", json={"kind": "listings"}, headers=H)
+    assert r.status_code == 409   # bağlı değil
