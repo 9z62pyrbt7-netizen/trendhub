@@ -27,7 +27,7 @@ SORTS = {"date_desc": "o.order_date DESC NULLS LAST, o.id DESC", "date_asc": "o.
 def meta(_: CurrentUser = Depends(viewer)):
     return {
         "statuses": [{"code": c, "label": S.LABELS_TR[c]} for c in S.ALL_STATUSES],
-        "manual_transitions": {k: sorted(v) for k, v in S.MANUAL_TRANSITIONS.items()},
+        "manual_transitions": {k: [c for c in S.ALL_STATUSES if c in v] for k, v in S.MANUAL_TRANSITIONS.items()},
         "finance_components": COMPONENT_LABELS_TR,
     }
 
@@ -88,7 +88,7 @@ def get_order(order_id: int, _: CurrentUser = Depends(viewer), conn: Connection 
     o.pop("payload_hash", None)
     o["status_label"] = S.LABELS_TR.get(o["internal_status"], o["internal_status"])
     o["allowed_transitions"] = [{"code": c, "label": S.LABELS_TR[c]}
-                                for c in sorted(S.MANUAL_TRANSITIONS.get(o["internal_status"], ()))]
+                                for c in S.ALL_STATUSES if c in S.MANUAL_TRANSITIONS.get(o["internal_status"], ())]
     o["items"] = rows(conn, "SELECT * FROM order_items WHERE order_id = :id ORDER BY id", id=order_id)
     for it in o["items"]:
         revenue = Decimal(it["unit_price"] or 0) * (it["quantity"] or 0)

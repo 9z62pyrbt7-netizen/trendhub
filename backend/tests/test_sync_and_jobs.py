@@ -178,3 +178,19 @@ def test_worker_marks_auth_error_as_failed_without_retry(engine, monkeypatch):
     assert w.run_once()
     with engine.connect() as c:
         assert c.execute(text("SELECT status FROM sync_jobs")).scalar() == "failed"
+
+
+def test_returned_order_refunds_commission_and_restocks_by_default(conn):
+    conn.execute(text("INSERT INTO products(sku, name, cost) VALUES ('SKU-1', 'Çanta', 40)"))
+    conn.execute(text("UPDATE app_settings SET value = '15' WHERE key = 'finance.default_shipping_cost'"))
+    store = ensure_store(conn, "trendyol", "999", "Trendyol")
+    upsert_orders(conn, store, [order(S.RETURNED, "Returned")])
+    o = conn.execute(text("SELECT gross_revenue, refund_cost, commission, product_cost, net_profit FROM orders")).mappings().one()
+    assert o["refund_cost"] == o["gross_revenue"] == Decimal("100.00")
+    assert o["commission"] == 0 and o["product_cost"] == 0
+    assert o["net_profit"] == Decimal("-15.00")   # yalnızca kargo kaybı
+
+    conn.execute(text("UPDATE app_settings SET value = 'true' WHERE key = 'finance.return_product_cost_is_loss'"))
+    from app.services.finance_service import recalculate_order
+    recalculate_order(conn, conn.execute(text("SELECT id FROM orders")).scalar())
+    assert conn.execute(text("SELECT net_profit FROM orders")).scalar() == Decimal("-55.00")

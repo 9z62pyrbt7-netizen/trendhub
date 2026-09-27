@@ -96,6 +96,7 @@ def engine():
             ('finance.commission_rate.trendyol', '0.20'), ('finance.commission_rate.hepsiburada', '0.20'),
             ('finance.commission_rate.amazon_tr', '0.15'), ('finance.service_fee_per_order', '0'),
             ('finance.default_shipping_cost', '0'), ('finance.include_vat', 'true'),
+            ('finance.return_product_cost_is_loss', 'false'),
             ('stock.low_stock_threshold', '3') ON CONFLICT (key) DO NOTHING"""))
         c.execute(text("UPDATE marketplaces SET last_check_at = NULL, last_check_ok = NULL, last_check_message = NULL, last_sync_at = NULL"))
     from app.security import login_limiter

@@ -134,6 +134,7 @@ def upgrade() -> None:
         ('finance.service_fee_per_order', '0'),
         ('finance.default_shipping_cost', '0'),
         ('finance.include_vat', 'true'),
+        ('finance.return_product_cost_is_loss', 'false'),
         ('stock.low_stock_threshold', '3')
     ON CONFLICT (key) DO NOTHING""")
 

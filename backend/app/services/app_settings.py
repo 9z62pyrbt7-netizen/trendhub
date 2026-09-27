@@ -17,6 +17,7 @@ EDITABLE = {
     "finance.service_fee_per_order": ("money", "Sipariş başı hizmet bedeli (₺)"),
     "finance.default_shipping_cost": ("money", "Kargo ücreti bilinmiyorsa varsayılan (₺)"),
     "finance.include_vat": ("bool", "Tutarlar KDV dahil"),
+    "finance.return_product_cost_is_loss": ("bool", "İade edilen ürünün maliyeti zarar sayılsın (stoğa geri dönmüyorsa)"),
     "stock.low_stock_threshold": ("int", "Düşük stok eşiği"),
 }
 

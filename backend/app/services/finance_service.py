@@ -85,6 +85,11 @@ def recalculate_order(conn: Connection, order_id: int) -> Breakdown | None:
         service_fee = app_settings.get_decimal(conn, "finance.service_fee_per_order")
         estimate = True
     commission_rate = app_settings.get_decimal(conn, f"finance.commission_rate.{order['marketplace']}")
+    returned = status == S.RETURNED
+    # İadede: ciro iade tutarıyla sıfırlanır, pazaryeri komisyonu iade eder
+    # (hakedişte gerçek komisyon varsa o kullanılır), ürün varsayılan olarak
+    # stoğa döner. Kargo/hizmet bedeli gibi giderler kalır.
+    return_cost_is_loss = bool(app_settings.get(conn, "finance.return_product_cost_is_loss", False))
 
     lines: list[LineInput] = []
     missing_cost = False
@@ -105,9 +110,9 @@ def recalculate_order(conn: Connection, order_id: int) -> Breakdown | None:
         lines.append(LineInput(
             quantity=it["quantity"],
             unit_price=d(it["unit_price"]),
-            unit_cost=d(unit_cost),
+            unit_cost=ZERO if returned and not return_cost_is_loss else d(unit_cost),
             commission=item_tx.get((it["id"], "commission")),
-            commission_rate=commission_rate,
+            commission_rate=ZERO if returned else commission_rate,
             refund_amount=refund,
             advertising=item_tx.get((it["id"], "advertising"), ZERO),
             other=item_tx.get((it["id"], "other"), ZERO),
