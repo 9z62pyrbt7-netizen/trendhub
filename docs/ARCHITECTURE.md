@@ -54,12 +54,14 @@ backend/
   app/security.py        argon2, oturum, kilitleme, ilk admin
   app/deps.py            oturum/rol bağımlılıkları
   app/domain/            order_status.py, finance.py (saf mantık)
-  app/connectors/        base.py (arayüz), http.py (rate limit+retry), trendyol.py, hepsiburada.py, amazon_tr.py, registry.py
-  app/services/          orders_sync.py, finance_service.py, jobs.py, sync_service.py, audit.py, events.py, app_settings.py
+  app/connectors/        base.py (arayüz), http.py (salt okunur istemci, rate limit+retry), trendyol.py, hepsiburada.py, amazon_tr.py, registry.py
+  app/services/          orders_sync.py, listings_sync.py, finance_service.py, jobs.py, sync_service.py, audit.py, events.py, app_settings.py
   app/api/               auth, analytics (dashboard/finans/rapor), orders, catalog (ürün/kargo/tedarikçi), integrations, system
   app/worker.py          worker + zamanlayıcı
-  migrations/versions/   0001_baseline, 0002_platform_core
+  app/cli.py             healthcheck (worker/db), create-user, reset-password
+  migrations/versions/   0001_baseline, 0002_platform_core, 0003_listing_details
   tests/                 gerçek PostgreSQL ile testler
+scripts/smoke_test.sh    çalışan yığına karşı uçtan uca duman testi
 web/                     index.html, assets/app.js, assets/app.css, nginx.conf
 ```
 
@@ -68,6 +70,7 @@ web/                     index.html, assets/app.js, assets/app.css, nginx.conf
 * **Alembic.** Migration'lar API açılışında değil, `migrate` servisinde çalışır.
 * **`0001_baseline`**, eski `init_db()` şemasının birebir kopyasıdır (`IF NOT EXISTS`). Mevcut
   veritabanında hiçbir şey değiştirmez, yalnızca Alembic'in takibini başlatır.
+* **`0003_listing_details`**: `marketplace_listings` tablosuna ilan kolonları ekler (yalnızca ekleme).
 * **`0002_platform_core`** yalnızca ekleme yapar. `DROP`, `TRUNCATE`, `DELETE` ve tip
   değişikliği yoktur. Bu kural `tests/test_migrations.py` tarafından otomatik denetlenir.
   * `orders.status` **ham pazaryeri statüsü olarak kalır**. Yeni `orders.internal_status`
@@ -106,12 +109,12 @@ Yeni tablolar: `users`, `user_sessions`, `audit_logs`, `system_events`, `worker_
 | Auth | `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`, `POST /api/auth/change-password` |
 | Dashboard | `GET /api/dashboard?period=today\|7d\|30d\|90d` |
 | Siparişler | `GET /api/orders` (filtre, arama, sıralama, sayfalama), `GET /api/orders/{id}`, `POST /api/orders/{id}/status`, `POST /api/orders/{id}/adjustments`, `GET /api/orders/meta` |
-| Ürün & Stok | `GET/POST /api/products`, `PATCH /api/products/{id}`, `POST /api/products/{id}/cost`, `GET /api/products/{id}/costs` |
+| Ürün & Stok | `GET/POST /api/products`, `PATCH /api/products/{id}`, `POST /api/products/{id}/cost`, `GET /api/products/{id}/costs`, `GET /api/listings` (salt okunur pazaryeri ilanları), `POST /api/listings/import-products` |
 | Kargo | `GET /api/shipments`, `PATCH /api/shipments/{id}` |
 | Tedarikçiler | `GET/POST /api/suppliers`, `PUT /api/suppliers/{id}`, `GET /api/supplier-orders` |
 | Finans | `GET /api/finance/summary`, `GET/POST /api/finance/expenses`, `DELETE /api/finance/expenses/{id}` (yalnızca panelden girilenler) |
 | Raporlar | `GET /api/reports/sku`, `GET /api/reports/sku.csv`, `GET /api/reports/statuses`, `GET /api/reports/top-loss` |
-| Entegrasyonlar | `GET /api/integrations`, `POST /api/integrations/{code}/check`, `POST /api/integrations/{code}/sync` |
+| Entegrasyonlar | `GET /api/integrations`, `POST /api/integrations/{code}/check`, `POST /api/integrations/{code}/sync` (`{"kind": "orders"\|"listings", "lookback_days"?}`) |
 | Sistem | `GET /api/health` (herkese açık, minimal), `GET /api/system/health`, `GET /api/system/jobs`, `POST /api/system/jobs/{id}/retry`, `GET /api/system/events`, `POST /api/system/events/{id}/resolve`, `GET /api/system/audit` |
 | Ayarlar | `GET/PUT /api/settings`, `GET/POST /api/users`, `PATCH /api/users/{id}` |
 
@@ -180,22 +183,37 @@ kar_marji = net_kar / ciro
 `MarketplaceConnector` arayüzü (`app/connectors/base.py`):
 
 * `credential_fields` / `credential_values()` / `missing_credentials()` / `is_configured()`
-* `capabilities` (`orders.read`, `products.read`, `stock.write`, …)
-* `test_connection()`, `fetch_orders(since, until) -> list[NormalizedOrder]`
-* `update_stock()`, `update_price()`: `CONNECTOR_WRITE_ENABLED=false` iken `WriteDisabled` verir
+* `capabilities` (`orders.read`, `products.read`) ve `incremental` (değişen siparişleri döndürür mü)
+* `test_connection()`, `fetch_orders(since, until) -> list[NormalizedOrder]`, `fetch_listings() -> list[NormalizedListing]`
+* `update_stock()` / `update_price()`: `CONNECTOR_WRITE_ENABLED=false` iken `WriteDisabled` verir. `true` olsa bile **hiçbir connector'da yazma uygulanmadı**.
 
-Her connector bağımsızdır. Birinin hatası diğerini etkilemez ve her iş ayrı kuyruk
-kaydıdır. Yeni bir pazaryeri eklemek için bir sınıf yazıp `registry.py`'ye bir satır
-eklemek yeterlidir.
+**Salt okunurluk iki katmanda garanti edilir:**
+1. Connector'larda yazma metodu uygulanmadı.
+2. `ResilientClient` varsayılan olarak `read_only=True` çalışır. GET/HEAD dışındaki her istek ağa hiç çıkmadan reddedilir.
+
+Tek istisna Amazon LWA token isteğidir (`POST api.amazon.com/auth/o2/token`). Bu istek oturum belirteci alır, pazaryeri verisini değiştirmez ve ayrı bir istemciyle yapılır. Testler, tam bir senkron boyunca giden tüm pazaryeri isteklerinin GET olduğunu doğrular.
+
+Her connector bağımsızdır. Birinin hatası diğerini etkilemez ve her iş ayrı kuyruk kaydıdır. Yeni bir pazaryeri eklemek için bir sınıf yazıp `registry.py`'ye bir satır eklemek yeterlidir.
 
 | Connector | Durum |
 |---|---|
-| Trendyol | Sipariş okuma **uygulandı** (sayfalama, 14 günlük pencereler, paket birleştirme). Alan eşlemesi dokümantasyona göre yapıldı; **canlı hesapla doğrulanmadı.** |
-| Hepsiburada | Credential algılama ve statü eşlemesi hazır. **Sipariş senkronizasyonu uygulanmadı.** |
-| Amazon.com.tr | Credential algılama ve statü eşlemesi hazır. **SP-API senkronizasyonu uygulanmadı.** |
+| Trendyol | **Sipariş okuma:** sayfalama, 14 günlük pencereler, paket birleştirme, günlük 60 günlük derin tarama. **İlan okuma:** ürün filtreleme servisi → `marketplace_listings`. Alan eşlemesi dokümantasyona göre yapıldı; **canlı hesapla doğrulanmadı.** |
+| Amazon.com.tr | **Sipariş okuma:** LWA token + Orders API v0 (`getOrders`, `getOrderItems`), SP-API rate limitleri, `LastUpdatedAfter` ile artımlı (watermark − 1 saat). Kargo takibi, müşteri adı ve komisyon bu API'de yok. **Canlı hesapla doğrulanmadı.** |
+| Hepsiburada | Credential algılama ve statü eşlemesi hazır. **Sipariş/ilan okuma uygulanmadı.** API sözleşmesi doğrulanmadan tahminle kod yazılmadı. |
 
-Credential yoksa entegrasyon **"Bağlı değil"** görünür ve hiçbir veri üretilmez. Credential
-değerleri API'den hiçbir zaman dönmez; yalnızca "Tanımlı / Eksik" bilgisi gösterilir.
+Credential yoksa entegrasyon **"Bağlı değil"** görünür, hiçbir iş planlanmaz ve hiçbir veri üretilmez. Credential değerleri API'den hiçbir zaman dönmez; yalnızca "Tanımlı / Eksik" bilgisi gösterilir.
+
+### Zamanlayıcı
+
+Yalnızca bilgisi tanımlı ve ilgili yeteneği olan connector'lar için çalışır. Lider worker
+`pg_try_advisory_lock` ile seçilir.
+
+| İş | Aralık | Not |
+|---|---|---|
+| `orders.sync` | `SYNC_INTERVAL_MINUTES` (15 dk) | Son 14 gün; artımlı connector'da watermark |
+| `orders.deep_sync` | 24 saat | Son 60 gün; geç iade/teslim statüleri için. Artımlı connector'da atlanır |
+| `listings.sync` | 6 saat | Yalnızca `products.read` yeteneği olanlar |
+| `integration.check` | 60 dk | Entegrasyon ekranındaki bağlantı durumu |
 
 ## 9. Güvenilirlik
 
@@ -212,11 +230,16 @@ değerleri API'den hiçbir zaman dönmez; yalnızca "Tanımlı / Eksik" bilgisi 
   * 401/403 tekrar denenmez (`AuthError`).
   * İş katmanında `max_attempts`'a kadar üstel geri çekilme uygulanır; sonra `dead` olur ve sistem olayı yazılır.
 * **Rate limit:** connector başına token bucket (`TRENDYOL_RATE_PER_MINUTE`, varsayılan 60/dk). Bunun dışında nginx'te giriş limiti vardır.
-* **Kurtarma:** 15 dakikadan uzun süre `running` kalan işler yeniden kuyruğa alınır. Worker SIGTERM ile temiz kapanır.
+* **Kurtarma:**
+  * Çalışan iş boyunca bir arka plan thread'i her 30 sn'de iş kilidini (`locked_at`) ve worker heartbeat'ini tazeler.
+  * 5 dakikadan uzun süre tazelenmeyen `running` iş yeniden kuyruğa alınır.
+  * Sonuç (`complete`/`fail`) yalnızca işi hâlâ tutan worker tarafından yazılabilir.
+  * Worker SIGTERM ile mevcut işi bitirip temiz kapanır.
 * **Sağlık izleme:**
   * `/api/health`: liveness
   * `/api/system/health`: DB, şema sürümü, worker heartbeat, kuyruk, açık hatalar
-  * compose healthcheck
+  * compose healthcheck: api (`/api/health`), worker (`python -m app.cli healthcheck worker`), web (nginx üzerinden)
+  * `python -m app.cli healthcheck db`: şema en güncel sürümde mi
   * `system_events`: fingerprint ile tekrar sayacı tutar, ekranı doldurmaz
 
 ## 10. Kurulum / yükseltme (production)
@@ -231,27 +254,46 @@ değerleri API'den hiçbir zaman dönmez; yalnızca "Tanımlı / Eksik" bilgisi 
    * `CONNECTOR_WRITE_ENABLED=false`
 3. `docker compose build && docker compose up -d`. Önce `migrate` çalışır, başarılı olursa `api` ve `worker` açılır.
 4. `docker compose logs migrate` çıktısında `0002_platform_core` görülmelidir.
-5. Panele admin ile girin → Entegrasyonlar → "Bağlantıyı test et".
+5. `docker compose ps` çıktısında `api`, `worker` ve `web` servisleri `healthy` görünmelidir.
+6. `ADMIN_USER=… ADMIN_PASSWORD=… BASE_URL=http://sunucu:8081 scripts/smoke_test.sh` çalıştırılır.
+7. Panele admin ile girin → Entegrasyonlar → "Bağlantıyı test et".
+
+Parola sıfırlama:
+`docker compose exec api python -m app.cli reset-password --username admin`
+(parola etkileşimli sorulur).
 
 Geri dönüş: migration'lar yalnızca ekleme yaptığı için eski imaj yeni şemayla çalışmaya
 devam eder. Gerekirse 1. adımdaki yedekten `pg_restore` ile dönülebilir.
 
-## 11. Bilinen sınırlamalar / kalan işler
+## 11. Test ve CI
 
-* Trendyol eşlemesi (özellikle `price`/`discount` anlamı ve `orderDate` saat dilimi)
-  **canlı veriyle doğrulanmalı**.
-* Tarih filtresi sipariş oluşturma tarihine göre çalışıyorsa, 14 günden eski siparişlerin
-  sonraki statü değişiklikleri (geç iade vb.) yakalanmaz. Bu durumda açık siparişler için
-  ayrı bir "yenileme" işi gerekir.
-* Trendyol hakediş (settlement/finance) API'si bağlanmadı; komisyon şu an **tahmini**.
-  Gerçek tutarlar manuel girilebilir.
-* Hepsiburada ve Amazon SP-API senkronizasyonu yok.
-* Ürün kataloğu ve stok pazaryerinden çekilmiyor (`marketplace_listings` tablosu hazır).
-  Stok/fiyat gönderimi bilinçli olarak kapalı.
-* Tedarikçi (Çanta Bayim) aktarım kayıtları production sisteminden okunmuyor. Entegrasyon
-  yöntemi (salt okunur DB/replika, dosya veya API) kararlaştırılmalı.
+* `backend/tests`: gerçek PostgreSQL 16 ile çalışır.
+  * migration (legacy veri korunumu, yıkıcı ifade taraması)
+  * domain (statü, finans)
+  * connector'lar: mock HTTP, salt okunurluk garantisi, retry/401/429, Amazon LWA + sayfalama
+  * idempotent sipariş/ilan senkronu
+  * iş kuyruğu (sahiplik, stale kurtarma, keepalive)
+  * uçtan uca worker
+  * API (auth, CSRF, RBAC, kilitleme, finans, raporlar, CSV)
+  * CLI
+* **CI (`.github/workflows/ci.yml`):**
+  * pytest
+  * `node --check`
+  * `nginx -t`
+  * `.env` commit koruması
+  * Docker işi: `compose config`, imaj build, tüm yığını ayağa kaldırma, duman testi, ikinci `migrate` çalıştırması
+
+## 12. Bilinen sınırlamalar / kalan işler
+
+* Trendyol ve Amazon alan eşlemeleri **canlı veriyle doğrulanmalı**. Özellikle Trendyol `price`/`discount` anlamı ve `orderDate` saat dilimi, Amazon `ItemPrice` ve `PromotionDiscount` KDV davranışı.
+* 60 günden eski siparişlerin statü değişiklikleri Trendyol'da yakalanmaz.
+* Trendyol hakediş (settlement) API'si bağlanmadı; komisyon şu an **tahmini**. Gerçek tutar manuel girilebilir.
+* Amazon Finances API (gerçek ücretler) ve Amazon ilan okuma (Reports API) yok.
+* Hepsiburada sipariş/ilan okuma yok.
+* Stok/fiyat gönderimi bilinçli olarak kapalı ve uygulanmadı.
+* Tedarikçi (Çanta Bayim) aktarım kayıtları production sisteminden okunmuyor. Entegrasyon yöntemi (salt okunur DB/replika, dosya veya API) kararlaştırılmalı.
 * KDV ayrımı: tutarlar KDV dahil tutuluyor, KDV hariç kâr raporu yok.
 * Rate limit süreç içindedir. Birden fazla worker çalıştırılırsa limit worker başına uygulanır.
-* Credential'lar yalnızca env'de, tek mağaza/hesap destekleniyor. Çoklu mağaza için
-  şifreli credential deposu gerekir.
+* Credential'lar yalnızca env'de, tek mağaza/hesap destekleniyor. Çoklu mağaza için şifreli credential deposu gerekir.
 * HTTPS nginx önünde bir TLS sonlandırıcı (ör. Caddy, Traefik, certbot) ile sağlanmalıdır.
+* Docker imajı ve CI Docker işi bu geliştirme ortamında (Docker yok) çalıştırılamadı. Yığın Docker'sız olarak (uvicorn + worker + nginx 1.24 + PostgreSQL 16) duman testinden geçti.
