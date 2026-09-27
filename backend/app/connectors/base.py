@@ -97,6 +97,23 @@ class NormalizedOrder:
 
 
 @dataclass
+class NormalizedListing:
+    """Pazaryerindeki bir ürün ilanının salt okunur görüntüsü."""
+    external_product_id: str
+    barcode: str | None
+    sku: str | None
+    title: str
+    price: Decimal | None = None
+    list_price: Decimal | None = None
+    stock: int | None = None
+    status: str | None = None          # on_sale / not_on_sale / archived / pending / rejected
+    brand: str | None = None
+    category: str | None = None
+    vat_rate: Decimal | None = None
+    image_url: str | None = None
+
+
+@dataclass
 class CredentialField:
     env: str
     label: str
@@ -114,6 +131,9 @@ class MarketplaceConnector(abc.ABC):
     name: str
     credential_fields: list[CredentialField]
     capabilities: frozenset[str] = frozenset()
+    # True ise `fetch_orders(since, ...)` "since'ten sonra DEĞİŞEN" siparişleri
+    # döner; servis son senkron zamanını (watermark) kullanır, derin tarama gerekmez.
+    incremental: bool = False
     # Uygulama henüz doğrulanmadıysa arayüzde gösterilecek not.
     implementation_note: str | None = None
 
@@ -146,6 +166,9 @@ class MarketplaceConnector(abc.ABC):
 
     def fetch_orders(self, since: datetime, until: datetime) -> list[NormalizedOrder]:
         raise NotSupported(f"{self.name}: sipariş senkronizasyonu henüz uygulanmadı")
+
+    def fetch_listings(self) -> list[NormalizedListing]:
+        raise NotSupported(f"{self.name}: ürün/ilan okuma henüz uygulanmadı")
 
     def update_stock(self, barcode: str, quantity: int) -> None:
         self._require_write()

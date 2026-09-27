@@ -126,9 +126,20 @@ def test_scheduler_only_for_configured_connectors(conn):
     s = Settings(**base, trendyol_seller_id="1", trendyol_api_key="k", trendyol_api_secret="s",
                  hepsiburada_merchant_id="m", hepsiburada_username="u", hepsiburada_password="p")
     created = sync_service.schedule_due_jobs(conn, 15, s)
-    assert len(created) == 1   # Hepsiburada senkronizasyonu uygulanmadığı için planlanmaz
+    # Hepsiburada senkronizasyonu uygulanmadığı için hiç iş planlanmaz
+    planned = {tuple(r) for r in conn.execute(text("SELECT marketplace, job_type FROM sync_jobs"))}
+    assert planned == {("trendyol", "orders.sync"), ("trendyol", "orders.deep_sync"),
+                       ("trendyol", "listings.sync"), ("trendyol", "integration.check")}
+    assert len(created) == 4
     assert sync_service.schedule_due_jobs(conn, 15, s) == []   # interval dolmadan tekrar yok
-    assert conn.execute(text("SELECT marketplace FROM sync_jobs")).scalar() == "trendyol"
+
+    # Artımlı connector (Amazon) için derin tarama planlanmaz
+    conn.execute(text("DELETE FROM sync_jobs"))
+    a = Settings(**base, amazon_sp_seller_id="S", amazon_sp_client_id="c", amazon_sp_client_secret="x",
+                 amazon_sp_refresh_token="r")
+    sync_service.schedule_due_jobs(conn, 15, a)
+    assert {r[0] for r in conn.execute(text("SELECT job_type FROM sync_jobs WHERE marketplace = 'amazon_tr'"))} == {
+        "orders.sync", "integration.check"}
 
 
 def test_worker_runs_orders_sync_end_to_end(engine, monkeypatch):
@@ -151,7 +162,7 @@ def test_worker_runs_orders_sync_end_to_end(engine, monkeypatch):
     w.schedule()
     assert w.run_once() is True
     with engine.connect() as c:
-        job = c.execute(text("SELECT status, result FROM sync_jobs")).mappings().one()
+        job = c.execute(text("SELECT status, result FROM sync_jobs WHERE job_type = 'orders.sync'")).mappings().one()
         assert job["status"] == "succeeded" and job["result"]["created"] == 1
         assert c.execute(text("SELECT internal_status FROM orders")).scalar() == S.AWAITING_SHIPMENT
         assert c.execute(text("SELECT last_sync_at IS NOT NULL FROM marketplaces WHERE code='trendyol'")).scalar()

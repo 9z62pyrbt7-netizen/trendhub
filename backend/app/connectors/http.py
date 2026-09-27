@@ -8,9 +8,10 @@ from collections.abc import Callable
 
 import httpx
 
-from .base import AuthError, ConnectorError, RetryableError
+from .base import AuthError, ConnectorError, RetryableError, WriteDisabled
 
 RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
+READ_METHODS = frozenset({"GET", "HEAD"})
 
 
 class RateLimiter:
@@ -61,17 +62,28 @@ def _retry_after(resp: httpx.Response) -> float | None:
 
 
 class ResilientClient:
+    """Pazaryeri API istemcisi.
+
+    Varsayılan olarak SALT OKUNURDUR: GET/HEAD dışındaki her istek ağa hiç
+    çıkmadan `WriteDisabled` ile reddedilir. Yazma yapabilen bir istemci ancak
+    `read_only=False` ile açıkça oluşturulabilir (şu an yalnızca OAuth token
+    uç noktası için kullanılır; o istek de pazaryeri verisini değiştirmez).
+    """
+
     def __init__(self, base_url: str, *, headers: dict | None = None, auth=None,
                  rate_limiter: RateLimiter | None = None, max_attempts: int = 4,
                  timeout: float = 30.0, transport: httpx.BaseTransport | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, read_only: bool = True):
         self.client = httpx.Client(base_url=base_url, headers=headers or {}, auth=auth,
                                    timeout=timeout, transport=transport)
         self.rate_limiter = rate_limiter
         self.max_attempts = max_attempts
         self.sleep = sleep
+        self.read_only = read_only
 
     def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        if self.read_only and method.upper() not in READ_METHODS:
+            raise WriteDisabled(f"Salt okunur istemci {method.upper()} isteği gönderemez: {url}")
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
             if self.rate_limiter:

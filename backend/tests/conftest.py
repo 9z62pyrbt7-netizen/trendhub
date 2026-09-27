@@ -108,3 +108,16 @@ def engine():
 def conn(engine):
     with engine.begin() as c:
         yield c
+
+
+@pytest.fixture
+def client_factory(engine):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    with TestClient(app) as c:
+        def login(username, password):
+            r = c.post("/api/auth/login", json={"username": username, "password": password},
+                       headers={"X-Requested-With": "TrendHub"})
+            assert r.status_code == 200, r.text
+        yield c, login

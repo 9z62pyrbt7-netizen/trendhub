@@ -81,7 +81,7 @@ def create_product(body: ProductIn, request: Request, user: CurrentUser = Depend
         conn.execute(text("INSERT INTO product_costs(product_id, cost, source, created_by) VALUES (:p, :c, 'manual', :u)"),
                      {"p": pid, "c": body.cost, "u": user.id})
     # Bu SKU ile gelmiş, ürüne bağlanmamış sipariş kalemlerini bağla.
-    conn.execute(text("UPDATE order_items SET product_id = :p WHERE product_id IS NULL AND (sku = :s OR (barcode = :b AND :b IS NOT NULL))"),
+    conn.execute(text("UPDATE order_items SET product_id = :p WHERE product_id IS NULL AND (sku = :s OR (barcode = :b AND CAST(:b AS TEXT) IS NOT NULL))"),
                  {"p": pid, "s": body.sku.strip(), "b": body.barcode})
     log_audit(conn, actor=user.username, user_id=user.id, action="product.created", entity_type="product",
               entity_id=pid, ip=client_ip(request), details=body.model_dump(mode="json"))
@@ -278,3 +278,54 @@ def list_supplier_orders(page: Page = Depends(), _: CurrentUser = Depends(viewer
          ORDER BY so.created_at DESC NULLS LAST, so.id DESC LIMIT :limit OFFSET :offset
     """, limit=page.page_size, offset=page.offset)
     return paged(items, total, page)
+
+
+# ------------------------------------------------- pazaryeri ilanları (salt okunur)
+LISTING_STATUS_TR = {"on_sale": "Satışta", "not_on_sale": "Satışta değil", "archived": "Arşivde",
+                     "pending": "Onay bekliyor", "rejected": "Reddedildi"}
+
+
+@router.get("/api/listings")
+def list_listings(page: Page = Depends(), q: str | None = Query(None, max_length=100),
+                  marketplace: str | None = None, unlinked: bool = False, stock_mismatch: bool = False,
+                  _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    where, params = ["TRUE"], {}
+    if q:
+        where.append("(l.sku ILIKE :q OR l.barcode ILIKE :q OR l.title ILIKE :q)"); params["q"] = f"%{q.strip()}%"
+    if marketplace:
+        where.append("m.code = :mp"); params["mp"] = marketplace
+    if unlinked:
+        where.append("l.product_id IS NULL")
+    if stock_mismatch:
+        where.append("p.id IS NOT NULL AND COALESCE(p.stock, 0) <> COALESCE(l.listed_stock, 0)")
+    base = f"""FROM marketplace_listings l JOIN stores s ON s.id = l.store_id
+               JOIN marketplaces m ON m.id = s.marketplace_id LEFT JOIN products p ON p.id = l.product_id
+               WHERE {' AND '.join(where)}"""
+    total = conn.execute(text(f"SELECT COUNT(*) {base}"), params).scalar()
+    items = rows(conn, f"""
+        SELECT l.id, l.external_product_id, l.barcode, l.sku, l.title, l.listed_price, l.list_price, l.listed_stock,
+               l.status, l.last_synced_at, m.code AS marketplace, m.name AS marketplace_name,
+               p.id AS product_id, p.stock AS local_stock, p.cost AS local_cost
+        {base} ORDER BY l.title LIMIT :limit OFFSET :offset
+    """, **params, limit=page.page_size, offset=page.offset)
+    for it in items:
+        it["status_label"] = LISTING_STATUS_TR.get(it["status"], it["status"])
+        price, cost = it["listed_price"], it["local_cost"]
+        it["gross_margin_hint"] = float((price - cost) / price) if price and cost else None
+    summary = row(conn, """
+        SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE product_id IS NULL) AS unlinked,
+               COUNT(*) FILTER (WHERE status = 'on_sale') AS on_sale, MAX(last_synced_at) AS last_synced_at
+          FROM marketplace_listings
+    """)
+    return {**paged(items, total, page), "summary": summary}
+
+
+@router.post("/api/listings/import-products")
+def import_listings_as_products(request: Request, user: CurrentUser = Depends(operator),
+                                conn: Connection = Depends(get_conn)):
+    """Bağlanmamış ilanlardan yerel ürün kartı oluşturur (yalnızca TrendHub DB'si)."""
+    from ..services.listings_sync import import_unlinked_as_products
+    created = import_unlinked_as_products(conn)
+    log_audit(conn, actor=user.username, user_id=user.id, action="listings.imported_as_products",
+              entity_type="product", ip=client_ip(request), details={"created": created})
+    return {"ok": True, "created": created}

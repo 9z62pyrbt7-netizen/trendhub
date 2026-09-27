@@ -14,8 +14,10 @@ import logging
 import os
 import signal
 import socket
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 
 from sqlalchemy import text
 
@@ -64,6 +66,28 @@ class Worker:
             jobs.requeue_stale(conn)
             sync_service.schedule_due_jobs(conn, self.settings.sync_interval_minutes, self.settings)
 
+    @contextmanager
+    def _keepalive(self, job_id: int):
+        """İş sürerken arka planda heartbeat + iş kilidi tazeleme."""
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(jobs.HEARTBEAT_SECONDS):
+                try:
+                    with self.engine.begin() as conn:
+                        jobs.touch(conn, job_id, self.worker_id)
+                    self.heartbeat(job_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("Heartbeat yazılamadı")
+
+        t = threading.Thread(target=beat, name=f"keepalive-{job_id}", daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
     def run_once(self) -> bool:
         """Bir iş çalıştırır. İş bulunduysa True döner."""
         with self.engine.begin() as conn:
@@ -73,7 +97,8 @@ class Worker:
         self.heartbeat(job["id"])
         log.info("İş #%s başladı: %s %s", job["id"], job["job_type"], job["marketplace"])
         try:
-            result = sync_service.execute(self.engine, job, self.settings)
+            with self._keepalive(job["id"]):
+                result = sync_service.execute(self.engine, job, self.settings)
         except ConnectorError as exc:
             retry_after = exc.retry_after if isinstance(exc, RetryableError) else None
             with self.engine.begin() as conn:
@@ -85,7 +110,8 @@ class Worker:
                 jobs.fail(conn, job, f"{exc.__class__.__name__}: {exc}", retryable=True)
         else:
             with self.engine.begin() as conn:
-                jobs.complete(conn, job["id"], result)
+                if not jobs.complete(conn, job["id"], result, worker_id=self.worker_id):
+                    log.warning("İş #%s artık bu worker'da değil; sonuç yazılmadı", job["id"])
             log.info("İş #%s tamamlandı: %s", job["id"], result)
         finally:
             self.heartbeat(None)

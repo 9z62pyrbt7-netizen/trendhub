@@ -21,8 +21,9 @@ from decimal import Decimal
 import httpx
 
 from ..domain import order_status as S
-from .base import (CAP_ORDERS_READ, ConnectionCheck, ConnectorError, CredentialField,
-                   MarketplaceConnector, NormalizedLine, NormalizedOrder, NormalizedShipment)
+from .base import (CAP_ORDERS_READ, CAP_PRODUCTS_READ, ConnectionCheck, ConnectorError, CredentialField,
+                   MarketplaceConnector, NormalizedLine, NormalizedListing, NormalizedOrder,
+                   NormalizedShipment)
 from .http import RateLimiter, ResilientClient
 
 STATUS_MAP = {
@@ -42,6 +43,8 @@ STATUS_MAP = {
 
 MAX_WINDOW = timedelta(days=14)   # Trendyol tek sorguda en fazla ~2 hafta aralık kabul eder
 PAGE_SIZE = 200
+PRODUCT_PAGE_SIZE = 100
+MAX_PRODUCT_PAGES = 500      # güvenlik sınırı: en fazla 50.000 ilan
 
 
 def map_status(raw: str | None) -> str:
@@ -81,7 +84,7 @@ def aggregate_status(statuses: list[str]) -> str:
 class TrendyolConnector(MarketplaceConnector):
     code = "trendyol"
     name = "Trendyol"
-    capabilities = frozenset({CAP_ORDERS_READ})
+    capabilities = frozenset({CAP_ORDERS_READ, CAP_PRODUCTS_READ})
     credential_fields = [
         CredentialField("TRENDYOL_SELLER_ID", "Satıcı ID (Supplier ID)", secret=False),
         CredentialField("TRENDYOL_API_KEY", "API Key"),
@@ -166,6 +169,49 @@ class TrendyolConnector(MarketplaceConnector):
 
     def fetch_orders(self, since: datetime, until: datetime) -> list[NormalizedOrder]:
         return self.normalize(self._fetch_packages(since, until))
+
+    def fetch_listings(self) -> list[NormalizedListing]:
+        """Ürün filtreleme servisi (GET). Sayfa sayfa tüm ilanları okur."""
+        path = f"/integration/product/sellers/{self.store_external_id()}/products"
+        items: list[dict] = []
+        page = 0
+        while True:
+            data = self.client.get_json(path, params={"page": page, "size": PRODUCT_PAGE_SIZE})
+            if not isinstance(data, dict) or "content" not in data:
+                raise ConnectorError("Trendyol ürün yanıtı beklenen formatta değil (content alanı yok)")
+            items.extend(data.get("content") or [])
+            page += 1
+            if page >= int(data.get("totalPages") or 0) or page >= MAX_PRODUCT_PAGES:
+                break
+        return [self.normalize_listing(p) for p in items if p.get("barcode") or p.get("id")]
+
+    @staticmethod
+    def normalize_listing(p: dict) -> NormalizedListing:
+        if p.get("archived"):
+            status = "archived"
+        elif p.get("rejected") or p.get("blacklisted"):
+            status = "rejected"
+        elif p.get("approved") is False:
+            status = "pending"
+        elif p.get("onSale") is False:
+            status = "not_on_sale"
+        else:
+            status = "on_sale"
+        images = p.get("images") or []
+        return NormalizedListing(
+            external_product_id=str(p.get("barcode") or p.get("id")),
+            barcode=p.get("barcode"),
+            sku=p.get("stockCode") or None,
+            title=p.get("title") or "",
+            price=_dec(p.get("salePrice")),
+            list_price=_dec(p.get("listPrice")),
+            stock=int(p["quantity"]) if p.get("quantity") is not None else None,
+            status=status,
+            brand=p.get("brand"),
+            category=p.get("categoryName"),
+            vat_rate=_dec(p.get("vatRate")),
+            image_url=(images[0] or {}).get("url") if images else None,
+        )
 
     # -- eşleme ---------------------------------------------------------------
     @staticmethod

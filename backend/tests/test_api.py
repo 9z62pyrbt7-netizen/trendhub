@@ -194,7 +194,7 @@ def test_finance_reports_and_csv(client, engine):
 def test_system_health_jobs_and_events(client, engine):
     login(client)
     h = client.get("/api/system/health").json()
-    assert h["database"]["migration"] == "0002_platform_core"
+    assert h["database"]["migration"] == "0003_listing_details"
     assert h["worker_alive"] is False and h["status"] == "degraded"
     assert h["config"]["connector_write_enabled"] is False
     from app.services import jobs
@@ -218,3 +218,12 @@ def test_user_management(client):
     assert r.status_code == 201
     me = client.get("/api/auth/me").json()["id"]
     assert client.patch(f"/api/users/{me}", json={"is_active": False}, headers=H).status_code == 409
+
+
+def test_create_product_with_barcode_links_existing_order_items(client, engine):
+    oid = seed_order(engine)   # kalem: sku SKU-9, barkod B9
+    login(client)
+    r = client.post("/api/products", json={"sku": "BASKA-SKU", "barcode": "B9", "name": "Barkodla eşleşen"}, headers=H)
+    assert r.status_code == 201, r.text
+    with engine.connect() as c:
+        assert c.execute(text("SELECT product_id FROM order_items WHERE order_id = :o"), {"o": oid}).scalar() == r.json()["id"]

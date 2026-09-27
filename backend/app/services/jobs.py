@@ -7,8 +7,10 @@
 * Retry: hata tekrar denenebilir ise exponential backoff + jitter ile
   yeniden kuyruğa alınır; `max_attempts` aşılınca 'dead' olur ve sistem
   olayı yazılır.
-* Kurtarma: worker çökerse 'running' kalan işler `locked_at` zaman aşımından
-  sonra yeniden kuyruğa alınır.
+* Kurtarma: çalışan iş boyunca worker `locked_at`'i her 30 sn'de yeniler;
+  worker çökerse 'running' kalan iş `STALE_AFTER` sonunda yeniden kuyruğa alınır.
+  Sonuç yazma (`complete`/`fail`) yalnızca işi hâlâ tutan worker için geçerlidir;
+  böylece kurtarılıp başka worker'a verilmiş bir işin sonucu ezilmez.
 
 Eski (legacy) sync_jobs kayıtları farklı statüler taşıyabilir; kuyruk
 yalnızca yukarıdaki statülere baktığı için onlara dokunulmaz.
@@ -25,7 +27,8 @@ from ..connectors.http import backoff_delay
 from .events import record_event
 
 QUEUED, RUNNING, SUCCEEDED, FAILED, DEAD = "queued", "running", "succeeded", "failed", "dead"
-STALE_AFTER = timedelta(minutes=15)
+STALE_AFTER = timedelta(minutes=5)
+HEARTBEAT_SECONDS = 30
 
 
 def enqueue(conn: Connection, job_type: str, *, marketplace: str | None = None,
@@ -57,36 +60,48 @@ def claim(conn: Connection, worker_id: str) -> dict | None:
            SET status = 'running', locked_by = :w, locked_at = NOW(), started_at = NOW(),
                attempts = j.attempts + 1, finished_at = NULL
           FROM next WHERE j.id = next.id
-        RETURNING j.id, j.job_type, j.marketplace, j.payload, j.attempts, j.max_attempts, j.store_id
+        RETURNING j.id, j.job_type, j.marketplace, j.payload, j.attempts, j.max_attempts, j.store_id, j.locked_by
     """), {"w": worker_id}).mappings().first()
     return dict(job) if job else None
 
 
-def complete(conn: Connection, job_id: int, result: dict, message: str = "OK") -> None:
-    conn.execute(text("""
+_OWNED = "id = :id AND status = 'running' AND (CAST(:w AS TEXT) IS NULL OR locked_by = :w)"
+
+
+def complete(conn: Connection, job_id: int, result: dict, message: str = "OK", worker_id: str | None = None) -> bool:
+    return bool(conn.execute(text(f"""
         UPDATE sync_jobs SET status = 'succeeded', result = CAST(:r AS JSONB), message = :m,
                last_error = NULL, finished_at = NOW(), locked_by = NULL
-         WHERE id = :id
-    """), {"id": job_id, "r": json.dumps(result, default=str), "m": message[:1000]})
+         WHERE {_OWNED}
+    """), {"id": job_id, "w": worker_id, "r": json.dumps(result, default=str), "m": message[:1000]}).rowcount)
+
+
+def touch(conn: Connection, job_id: int, worker_id: str) -> bool:
+    """Çalışan işin kilidini tazeler (uzun işler stale sayılmasın)."""
+    return bool(conn.execute(text(f"UPDATE sync_jobs SET locked_at = NOW() WHERE {_OWNED}"),
+                             {"id": job_id, "w": worker_id}).rowcount)
 
 
 def fail(conn: Connection, job: dict, error: str, *, retryable: bool = True,
          retry_after: float | None = None) -> str:
     """Hatayı işler; yeni statüyü döner."""
     attempts, max_attempts = int(job["attempts"]), int(job["max_attempts"] or 6)
+    owner = job.get("locked_by")
     if retryable and attempts < max_attempts:
         delay = retry_after if retry_after is not None else backoff_delay(attempts, base=30, cap=3600)
-        conn.execute(text("""
+        n = conn.execute(text(f"""
             UPDATE sync_jobs SET status = 'queued', last_error = :e, message = :e,
                    run_after = NOW() + make_interval(secs => :d), locked_by = NULL, finished_at = NOW()
-             WHERE id = :id
-        """), {"id": job["id"], "e": error[:2000], "d": delay})
-        return QUEUED
+             WHERE {_OWNED}
+        """), {"id": job["id"], "w": owner, "e": error[:2000], "d": delay}).rowcount
+        return QUEUED if n else "lost"
     status = DEAD if retryable else FAILED
-    conn.execute(text("""
+    n = conn.execute(text(f"""
         UPDATE sync_jobs SET status = :s, last_error = :e, message = :e, finished_at = NOW(), locked_by = NULL
-         WHERE id = :id
-    """), {"id": job["id"], "e": error[:2000], "s": status})
+         WHERE {_OWNED}
+    """), {"id": job["id"], "w": owner, "e": error[:2000], "s": status}).rowcount
+    if not n:
+        return "lost"
     record_event(conn, level="error", source=f"job:{job['job_type']}",
                  message=f"İş #{job['id']} başarısız ({job.get('marketplace') or '-'}): {error[:500]}",
                  details={"job_id": job["id"], "attempts": attempts},
