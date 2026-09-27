@@ -24,3 +24,6 @@ venv/
 *.bak
 *.backup
 *~
+
+# Test / tooling
+.pytest_cache/
