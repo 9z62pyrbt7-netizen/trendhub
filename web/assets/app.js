@@ -405,12 +405,18 @@ async function showOrder(id) {
 }
 
 // ---- Ürün & Stok
+const productTabs = (active) => html`<div class="seg" role="tablist" style="margin-bottom:16px">
+  <button role="tab" class="${active === 'catalog' ? 'on' : ''}" aria-selected="${active === 'catalog'}" data-ptab="#/products">Ürün kataloğu</button>
+  <button role="tab" class="${active === 'listings' ? 'on' : ''}" aria-selected="${active === 'listings'}" data-ptab="#/products?tab=listings">Pazaryeri ilanları</button></div>`;
+const bindProductTabs = () => $$('[data-ptab]').forEach((b) => b.addEventListener('click', () => { location.hash = b.dataset.ptab; }));
+
 PAGES.products = {
   title: 'Ürün & Stok', icon: '📦',
   async render(params) {
+    if (params.get('tab') === 'listings') return renderListings(params);
     const f = { q: params.get('q') || '', low_stock: params.get('low_stock') === '1', missing_cost: params.get('missing_cost') === '1' };
     setHeader('Ürün & Stok', 'Ürün kataloğu, maliyet geçmişi ve stok', can('operator') ? html`<button class="btn btn-primary" id="add-product">+ Ürün ekle</button>` : '');
-    view().innerHTML = renderVal(html`<div class="grid grid-4" id="prod-summary"></div><div class="card mt">
+    view().innerHTML = renderVal(html`${productTabs('catalog')}<div class="grid grid-4" id="prod-summary"></div><div class="card mt">
       <form class="filters" id="prod-filters"><input type="search" name="q" placeholder="SKU, barkod veya ürün adı" value="${f.q}" aria-label="Ara">
       <label class="check"><input type="checkbox" name="low_stock" value="1" ${raw(f.low_stock ? 'checked' : '')}>Düşük stok</label>
       <label class="check"><input type="checkbox" name="missing_cost" value="1" ${raw(f.missing_cost ? 'checked' : '')}>Maliyeti eksik</label>
@@ -421,6 +427,7 @@ PAGES.products = {
       const q = new URLSearchParams(Object.entries(formData(e.target)).filter(([, v]) => v));
       location.hash = '#/products' + (q.toString() ? '?' + q : '');
     });
+    bindProductTabs();
     $('#add-product')?.addEventListener('click', () => productForm());
     const load = async (page) => {
       const d = await api('/api/products', { query: { q: f.q, low_stock: f.low_stock ? 'true' : '', missing_cost: f.missing_cost ? 'true' : '', page, page_size: 25 } });
@@ -441,6 +448,52 @@ PAGES.products = {
     await load(1);
   },
 };
+async function renderListings(params) {
+  const f = { q: params.get('q') || '', marketplace: params.get('marketplace') || '', unlinked: params.get('unlinked') === '1',
+    stock_mismatch: params.get('stock_mismatch') === '1' };
+  setHeader('Ürün & Stok', 'Pazaryerlerindeki ilanlar (salt okunur)', can('operator') ? html`<button class="btn" id="import-listings">Bağlanmamış ilanlardan ürün oluştur</button>` : '');
+  const mps = await api('/api/marketplaces');
+  view().innerHTML = renderVal(html`${productTabs('listings')}
+    <div class="notice info" style="margin-bottom:16px">Bu liste pazaryerinden <b>yalnızca okunur</b>. TrendHub pazaryerine stok veya fiyat göndermez; yerel stok da bu senkronla değişmez.</div>
+    <div class="grid grid-4" id="lst-summary"></div>
+    <div class="card mt"><form class="filters" id="lst-filters">
+      <input type="search" name="q" placeholder="SKU, barkod veya başlık" value="${f.q}" aria-label="Ara">
+      <select name="marketplace" aria-label="Pazaryeri"><option value="">Tüm pazaryerleri</option>${mps.map((m) => html`<option value="${m.code}" ${raw(m.code === f.marketplace ? 'selected' : '')}>${m.name}</option>`)}</select>
+      <label class="check"><input type="checkbox" name="unlinked" value="1" ${raw(f.unlinked ? 'checked' : '')}>Ürüne bağlanmamış</label>
+      <label class="check"><input type="checkbox" name="stock_mismatch" value="1" ${raw(f.stock_mismatch ? 'checked' : '')}>Stok farkı olan</label>
+      <input type="hidden" name="tab" value="listings">
+      <button class="btn btn-primary" type="submit">Filtrele</button></form><div id="lst-list"><div class="skeleton">Yükleniyor…</div></div></div>`);
+  bindProductTabs();
+  $('#lst-filters').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = new URLSearchParams(Object.entries(formData(e.target)).filter(([, v]) => v));
+    location.hash = '#/products?' + q;
+  });
+  $('#import-listings')?.addEventListener('click', async (e) => {
+    if (!confirm('SKU\'su olan ve yerel ürüne bağlanmamış ilanlar için TrendHub\'da ürün kartı oluşturulsun mu? (Maliyet boş başlar; pazaryerine hiçbir şey gönderilmez.)')) return;
+    e.target.disabled = true;
+    try { const r = await api('/api/listings/import-products', { method: 'POST' }); toast(`${r.created} ürün kartı oluşturuldu`); refresh(); } catch (ex) { fail(ex); } finally { e.target.disabled = false; }
+  });
+  const load = async (page) => {
+    const d = await api('/api/listings', { query: { q: f.q, marketplace: f.marketplace, unlinked: f.unlinked ? 'true' : '', stock_mismatch: f.stock_mismatch ? 'true' : '', page, page_size: 25 } });
+    $('#lst-summary').innerHTML = renderVal(html`
+      <div class="card kpi"><div class="label">İlan</div><div class="value">${num(d.summary.total)}</div></div>
+      <div class="card kpi"><div class="label">Satışta</div><div class="value">${num(d.summary.on_sale)}</div></div>
+      <div class="card kpi"><div class="label">Ürüne bağlanmamış</div><div class="value ${d.summary.unlinked ? 'neg' : ''}">${num(d.summary.unlinked)}</div><div class="sub">Maliyet ve kâr takibi için bağlayın</div></div>
+      <div class="card kpi"><div class="label">Son senkron</div><div class="value small">${dateTime(d.summary.last_synced_at)}</div></div>`);
+    const tone = { on_sale: 'tone-good', not_on_sale: '', archived: '', pending: 'tone-warn', rejected: 'tone-bad' };
+    $('#lst-list').innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Pazaryeri</th><th>SKU / Barkod</th><th>Başlık</th><th>Durum</th><th class="r">Fiyat</th><th class="r">Pazaryeri stoğu</th><th class="r">Yerel stok</th><th class="r">Maliyet</th><th class="r">Brüt marj*</th></tr></thead><tbody>
+      ${d.items.map((l) => html`<tr><td>${l.marketplace_name}</td><td><b>${l.sku || '—'}</b><span class="muted small ellipsis">${l.barcode || ''}</span></td>
+        <td><span class="ellipsis">${l.title}</span>${l.product_id ? '' : html`<span class="badge plain tone-warn">Bağlanmamış</span>`}</td><td><span class="badge ${tone[l.status] || ''}">${l.status_label || '—'}</span></td>
+        <td class="r num">${money(l.listed_price)}</td><td class="r num">${num(l.listed_stock)}</td>
+        <td class="r num ${l.product_id && Number(l.local_stock) !== Number(l.listed_stock) ? 'neg' : ''}">${l.product_id ? num(l.local_stock) : '—'}</td>
+        <td class="r num">${l.local_cost && Number(l.local_cost) ? money(l.local_cost) : '—'}</td><td class="r num">${pct(l.gross_margin_hint)}</td></tr>`)}
+      </tbody></table></div>${pager(d, load)}<p class="small muted">* Brüt marj = (fiyat − maliyet) / fiyat; komisyon, kargo ve diğer giderler hariç kaba göstergedir.</p>`
+      : empty('İlan yok', 'Entegrasyonlar sayfasından “İlanları senkronize et” ile pazaryeri ilanları okunur. Pazaryeri bağlı değilse liste boş kalır.'));
+  };
+  await load(1);
+}
+
 function productForm(p) {
   const body = openModal(html`<h2>${p ? 'Ürünü düzenle' : 'Yeni ürün'}</h2><form class="form-grid" id="pform">
     ${p ? '' : html`<label>SKU<input name="sku" required maxlength="100"></label>`}
@@ -664,6 +717,7 @@ PAGES.integrations = {
   async render() {
     setHeader('Entegrasyonlar', 'Pazaryeri bağlantıları ve senkronizasyon');
     const d = await api('/api/integrations');
+    state.jobLabels = d.job_labels || {};
     const tone = { connected: 'tone-good', error: 'tone-bad', not_connected: '', configured: 'tone-warn', not_implemented: 'tone-warn' };
     view().innerHTML = renderVal(html`
       <div class="notice info" style="margin-bottom:16px">API anahtarları panelden girilmez ve veritabanında saklanmaz; sunucudaki <code>.env</code> dosyasında tanımlanır ve servis yeniden başlatılır. Bu ekran yalnızca hangi değişkenin tanımlı olduğunu gösterir. Senkronizasyon her ${d.sync_interval_minutes} dakikada bir otomatik çalışır ve <b>salt okunurdur</b>; pazaryerinde hiçbir değişiklik yapılmaz.</div>
@@ -674,8 +728,10 @@ PAGES.integrations = {
         <dl class="kv"><dt>Son test</dt><dd>${dateTime(i.last_check_at)}</dd><dt>Sonuç</dt><dd>${i.last_check_message || '—'}</dd><dt>Son senkron</dt><dd>${dateTime(i.last_sync_at)}</dd>
           <dt>Yazma</dt><dd>${i.write_enabled ? html`<span class="badge tone-warn">Açık</span>` : 'Kapalı (salt okunur)'}</dd></dl>
         ${can('operator') ? html`<div class="row mt"><button class="btn btn-sm" data-check="${i.code}">Bağlantıyı test et</button>
-          <button class="btn btn-sm btn-primary" data-sync="${i.code}" ${raw(i.capabilities.includes('orders.read') && i.state !== 'not_connected' ? '' : 'disabled')}>Şimdi senkronize et</button></div>` : ''}
-        <h3 class="mt">Son işler</h3>${i.recent_jobs.length ? html`<ul class="timeline">${i.recent_jobs.map((j) => html`<li><b>${j.job_type}</b> · ${jobBadge(j.status)} <span class="muted small">${dateTime(j.created_at)} · deneme ${j.attempts}</span>${j.message ? html`<br><span class="small ${j.status === 'succeeded' ? '' : 'neg'}">${j.message}</span>` : ''}</li>`)}</ul>` : html`<p class="muted small">Henüz iş yok.</p>`}
+          <button class="btn btn-sm btn-primary" data-sync="${i.code}" data-kind="orders" ${raw(i.capabilities.includes('orders.read') && i.state !== 'not_connected' ? '' : 'disabled')}>Siparişleri senkronize et</button>
+          ${i.capabilities.includes('products.read') ? html`<button class="btn btn-sm" data-sync="${i.code}" data-kind="listings" ${raw(i.state !== 'not_connected' ? '' : 'disabled')}>İlanları senkronize et</button>` : ''}</div>` : ''}
+        <p class="small muted">Yetenekler: ${i.capabilities.length ? i.capabilities.map((c) => CAPABILITY_LABELS[c] || c).join(', ') : 'henüz yok'}</p>
+        <h3 class="mt">Son işler</h3>${i.recent_jobs.length ? html`<ul class="timeline">${i.recent_jobs.map((j) => html`<li><b>${jobLabel(j.job_type)}</b> · ${jobBadge(j.status)} <span class="muted small">${dateTime(j.created_at)} · deneme ${j.attempts}</span>${j.message ? html`<br><span class="small ${j.status === 'succeeded' ? '' : 'neg'}">${j.message}</span>` : ''}</li>`)}</ul>` : html`<p class="muted small">Henüz iş yok.</p>`}
       </div>`)}</div>`);
     $$('[data-check]').forEach((b) => b.addEventListener('click', async () => {
       b.disabled = true;
@@ -683,11 +739,14 @@ PAGES.integrations = {
     }));
     $$('[data-sync]').forEach((b) => b.addEventListener('click', async () => {
       b.disabled = true;
-      try { const r = await api(`/api/integrations/${b.dataset.sync}/sync`, { method: 'POST', body: {} }); toast(r.message); refresh(); } catch (e) { fail(e); b.disabled = false; }
+      try { const r = await api(`/api/integrations/${b.dataset.sync}/sync`, { method: 'POST', body: { kind: b.dataset.kind } }); toast(r.message); refresh(); } catch (e) { fail(e); b.disabled = false; }
     }));
   },
 };
 const JOB_LABELS = { queued: ['Kuyrukta', 'tone-info'], running: ['Çalışıyor', 'tone-warn'], succeeded: ['Başarılı', 'tone-good'], failed: ['Başarısız', 'tone-bad'], dead: ['Deneme bitti', 'tone-bad'] };
+const CAPABILITY_LABELS = { 'orders.read': 'sipariş okuma', 'products.read': 'ilan okuma' };
+const DEFAULT_JOB_LABELS = { 'orders.sync': 'Sipariş senkronizasyonu', 'orders.deep_sync': 'Derin sipariş senkronizasyonu (60 gün)', 'listings.sync': 'Ürün/ilan senkronizasyonu', 'integration.check': 'Bağlantı testi' };
+const jobLabel = (t) => (state.jobLabels && state.jobLabels[t]) || DEFAULT_JOB_LABELS[t] || t || '—';
 const jobBadge = (s) => { const [l, t] = JOB_LABELS[s] || [s || '—', '']; return html`<span class="badge ${t}">${l}</span>`; };
 
 // ---- Sistem / Hatalar
@@ -710,7 +769,7 @@ PAGES.system = {
           <td><code>${e.source}</code></td><td>${e.message}</td><td class="r num">${num(e.occurrences)}</td><td class="r">${can('operator') ? html`<button class="btn btn-sm" data-resolve="${e.id}">Çözüldü</button>` : ''}</td></tr>`)}</tbody></table></div>` : empty('Açık hata yok', 'Sistem olayları burada listelenir.')}</div>
       <div class="card mt"><div class="card-head"><h2>Senkronizasyon işleri</h2></div>
         ${jobs.items.length ? html`<div class="table-wrap"><table><thead><tr><th>#</th><th>Tür</th><th>Pazaryeri</th><th>Durum</th><th class="r">Deneme</th><th>Oluşturma</th><th>Bitiş</th><th>Mesaj</th><th></th></tr></thead><tbody>
-        ${jobs.items.map((j) => html`<tr><td>${j.id}</td><td>${j.job_type || '—'}</td><td>${j.marketplace || '—'}</td><td>${jobBadge(j.status)}</td><td class="r">${j.attempts ?? 0}/${j.max_attempts ?? '—'}</td>
+        ${jobs.items.map((j) => html`<tr><td>${j.id}</td><td>${jobLabel(j.job_type)}</td><td>${j.marketplace || '—'}</td><td>${jobBadge(j.status)}</td><td class="r">${j.attempts ?? 0}/${j.max_attempts ?? '—'}</td>
           <td>${dateTime(j.created_at || j.started_at)}</td><td>${dateTime(j.finished_at)}</td><td><span class="ellipsis small" title="${j.last_error || j.message || ''}">${j.last_error || j.message || ''}</span></td>
           <td class="r">${can('operator') && ['failed', 'dead'].includes(j.status) ? html`<button class="btn btn-sm" data-retry="${j.id}">Tekrar dene</button>` : ''}</td></tr>`)}</tbody></table></div>` : empty('İş yok', 'Pazaryeri bağlandığında senkronizasyon işleri burada görünür.')}</div>
       ${audit ? html`<div class="card mt"><div class="card-head"><h2>Denetim kaydı</h2><p>Son 30 işlem</p></div><div class="table-wrap"><table><thead><tr><th>Zaman</th><th>Kullanıcı</th><th>İşlem</th><th>Kayıt</th><th>IP</th></tr></thead><tbody>

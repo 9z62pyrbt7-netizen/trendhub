@@ -131,6 +131,7 @@ nav a .count { margin-left: auto; background: var(--bad); color: #fff; font-size
 .kpi .label { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .03em; }
 .kpi .value { font-size: 26px; font-weight: 750; margin-top: 6px; font-variant-numeric: tabular-nums; }
 .kpi .sub { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+.kpi .value.small { font-size: 16px; font-weight: 650; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--border);
