@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrendHub</title>
+
+<style>
+*{box-sizing:border-box}
+
+body{
+margin:0;
+font-family:Inter,Arial,sans-serif;
+background:#f5f7fb;
+color:#19202c
+}
+
+.layout{
+display:grid;
+grid-template-columns:240px 1fr;
+min-height:100vh
+}
+
+.sidebar{
+background:#111827;
+color:white;
+padding:25px 18px
+}
+
+.logo{
+font-size:23px;
+font-weight:800;
+margin-bottom:35px
+}
+
+.logo span{
+font-size:11px;
+display:block;
+color:#8d97a8;
+margin-top:4px;
+font-weight:400
+}
+
+.menu{
+padding:12px 14px;
+border-radius:9px;
+margin:5px 0;
+color:#cbd5e1
+}
+
+.menu.active{
+background:#1f2937;
+color:white
+}
+
+.main{
+padding:28px
+}
+
+.top{
+display:flex;
+justify-content:space-between;
+align-items:center;
+margin-bottom:25px
+}
+
+h1{
+margin:0;
+font-size:25px
+}
+
+.online{
+font-size:13px
+}
+
+.dot{
+display:inline-block;
+width:9px;
+height:9px;
+background:#22c55e;
+border-radius:50%;
+margin-right:6px
+}
+
+.marketplaces{
+display:flex;
+gap:8px;
+margin-bottom:20px;
+flex-wrap:wrap
+}
+
+.market{
+background:white;
+border:1px solid #e5e7eb;
+padding:9px 15px;
+border-radius:20px;
+font-size:13px
+}
+
+.cards{
+display:grid;
+grid-template-columns:repeat(4,1fr);
+gap:15px
+}
+
+.card{
+background:white;
+border-radius:14px;
+padding:19px;
+box-shadow:0 1px 3px #0000000c
+}
+
+.label{
+font-size:12px;
+color:#7b8494
+}
+
+.value{
+font-size:27px;
+font-weight:800;
+margin-top:8px
+}
+
+.green{color:#15803d}
+.red{color:#dc2626}
+
+.section{
+margin-top:25px
+}
+
+.section h2{
+font-size:17px
+}
+
+.status-grid{
+display:grid;
+grid-template-columns:repeat(5,1fr);
+gap:12px
+}
+
+.status{
+background:white;
+padding:17px;
+border-radius:13px
+}
+
+.status b{
+font-size:23px;
+display:block;
+margin-bottom:5px
+}
+
+.table{
+background:white;
+padding:20px;
+border-radius:14px
+}
+
+.empty{
+padding:35px;
+text-align:center;
+color:#8a93a2
+}
+
+@media(max-width:900px){
+.layout{grid-template-columns:1fr}
+.sidebar{display:none}
+.cards{grid-template-columns:1fr 1fr}
+.status-grid{grid-template-columns:1fr 1fr}
+.main{padding:15px}
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="layout">
+
+<aside class="sidebar">
+
+<div class="logo">
+TrendHub
+<span>E-Ticaret Yönetim Merkezi</span>
+</div>
+
+<div class="menu active">▦ Dashboard</div>
+<div class="menu">🛒 Siparişler</div>
+<div class="menu">📦 Ürün & Stok</div>
+<div class="menu">🚚 Kargo</div>
+<div class="menu">🏭 Tedarikçiler</div>
+<div class="menu">₺ Finans</div>
+<div class="menu">📊 Raporlar</div>
+<div class="menu">⚙ Entegrasyonlar</div>
+
+</aside>
+
+<main class="main">
+
+<div class="top">
+
+<div>
+<h1>Genel Bakış</h1>
+<div style="color:#7b8494;font-size:13px;margin-top:5px">
+Tüm mağazaların merkezi yönetimi
+</div>
+</div>
+
+<div class="online">
+<span class="dot"></span>
+Sistem aktif
+</div>
+
+</div>
+
+<div class="marketplaces" id="markets"></div>
+
+<div class="cards">
+
+<div class="card">
+<div class="label">BUGÜNKÜ CİRO</div>
+<div class="value" id="revenue">₺0</div>
+</div>
+
+<div class="card">
+<div class="label">SİPARİŞ</div>
+<div class="value" id="orders">0</div>
+</div>
+
+<div class="card">
+<div class="label">TOPLAM GİDER</div>
+<div class="value red" id="expenses">₺0</div>
+</div>
+
+<div class="card">
+<div class="label">NET KÂR</div>
+<div class="value green" id="profit">₺0</div>
+</div>
+
+</div>
+
+<div class="section">
+
+<h2>Sipariş Durumu</h2>
+
+<div class="status-grid">
+
+<div class="status">
+<b id="waiting">0</b>
+Kargoya Verilmeyi Bekliyor
+</div>
+
+<div class="status">
+<b id="shipped">0</b>
+Kargoda
+</div>
+
+<div class="status">
+<b id="delivered">0</b>
+Teslim Edildi
+</div>
+
+<div class="status">
+<b id="cancelled">0</b>
+İptal / İade
+</div>
+
+<div class="status">
+<b id="other">0</b>
+Diğer
+</div>
+
+</div>
+
+</div>
+
+<div class="section">
+
+<h2>Son Siparişler</h2>
+
+<div class="table">
+<div class="empty">
+Merkezi veritabanına sipariş senkronizasyonu bağlandığında
+siparişler burada görünecek.
+</div>
+</div>
+
+</div>
+
+</main>
+</div>
+
+<script>
+
+const money = n =>
+new Intl.NumberFormat(
+'tr-TR',
+{style:'currency',currency:'TRY'}
+).format(n || 0);
+
+async function load(){
+
+try{
+
+const d =
+await fetch('/api/dashboard').then(r=>r.json());
+
+revenue.innerText = money(d.today.revenue);
+orders.innerText = d.today.orders;
+expenses.innerText =
+money(
+d.today.product_cost +
+d.today.commission +
+d.today.service_fee +
+d.today.shipping +
+d.today.refund +
+d.today.expenses
+);
+
+profit.innerText = money(d.today.profit);
+
+const s=d.statuses || {};
+
+waiting.innerText =
+(s.Created||0)+(s.Picking||0)+(s.Invoiced||0);
+
+shipped.innerText=s.Shipped||0;
+delivered.innerText=s.Delivered||0;
+
+cancelled.innerText =
+(s.Cancelled||0)+(s.Returned||0)+(s.Undelivered||0);
+
+other.innerText=0;
+
+const m =
+await fetch('/api/marketplaces').then(r=>r.json());
+
+markets.innerHTML =
+'<div class="market">✓ Tümü</div>' +
+m.map(x =>
+`<div class="market">${x.enabled?'●':'○'} ${x.name}</div>`
+).join('');
+
+}catch(e){
+
+console.error(e);
+
+}
+
+}
+
+load();
+
+setInterval(load,60000);
+
+</script>
+
+</body>
+</html>
