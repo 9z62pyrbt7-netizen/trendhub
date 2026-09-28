@@ -133,3 +133,30 @@ def test_orders_api_returns_backend_computed_plan_without_side_effects(client_fa
     finally:
         with engine.begin() as c:
             c.execute(text("DELETE FROM app_settings WHERE key = 'shipping_plan.default_supplier_code'"))
+
+
+def test_cutoff_is_configurable_from_settings(client_factory, engine):
+    client, login = client_factory
+    login("admin", "Admin-Password-123")
+    s = {i["key"]: i for i in client.get("/api/settings").json()["items"]}
+    assert s["shipping.same_day_before"]["value"] == "11:00" and s["shipping.next_day_from"]["value"] == "12:00"
+    assert s["shipping.same_day_before"]["group"] == "Kargo planı"
+    now = datetime.now(timezone.utc)
+    d = now.astimezone(TR).date()
+    _seed(engine, "TY-1130", datetime(d.year, d.month, d.day, 11, 30, tzinfo=TR).astimezone(timezone.utc))
+    get = lambda: {o["external_order_id"]: o for o in client.get("/api/orders").json()["items"]}["TY-1130"]["shipping_plan"]  # noqa: E731
+    assert get()["code"] == "unknown"
+    # Kesim saati 12:00 seçilirse belirsiz aralık kalmaz: 11:30 -> bugün
+    r = client.put("/api/settings", json={"values": {"shipping.same_day_before": "12:00"}}, headers=H)
+    assert r.status_code == 200
+    p = get()
+    assert p["date"] == d.isoformat() and "12:00 öncesi aynı gün" in p["rule_note"] and "doğrulanmış" not in p["rule_note"]
+    # Kesim 11:00, ertesi gün 11:00 -> 11:30 yarın
+    client.put("/api/settings", json={"values": {"shipping.same_day_before": "11:00", "shipping.next_day_from": "11:00"}}, headers=H)
+    assert get()["window"] == "after_cutoff"
+    # Geçersiz: kesim saati > ertesi gün saati; bozuk saat biçimi
+    assert client.put("/api/settings", json={"values": {"shipping.same_day_before": "13:00"}}, headers=H).status_code == 422
+    assert client.put("/api/settings", json={"values": {"shipping.next_day_from": "25:00"}}, headers=H).status_code == 422
+    with engine.begin() as c:
+        assert "shipping.same_day_before" in str(c.execute(text(
+            "SELECT details FROM audit_logs WHERE action = 'settings.updated' ORDER BY id DESC LIMIT 1")).scalar())

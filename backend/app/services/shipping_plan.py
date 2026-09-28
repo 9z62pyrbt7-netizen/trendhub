@@ -42,6 +42,14 @@ def attach(conn: Connection, orders: list[dict], now: datetime | None = None) ->
     """Her sipariş sözlüğüne `shipping_plan` ekler (backend'de, Türkiye saatiyle hesaplanır)."""
     now = now or datetime.now(timezone.utc)
     suppliers = resolve_suppliers(conn, [o["id"] for o in orders])
+    same = app_settings.get(conn, "shipping.same_day_before", "11:00")
+    nxt = app_settings.get(conn, "shipping.next_day_from", "12:00")
+    names = {r["code"]: r["name"] for r in rows(conn, "SELECT code, name FROM suppliers WHERE code = ANY(:c)",
+                                                 c=[c for c in set(suppliers.values()) if c])}
+    rules = {code: SP.rule_from_settings(code, names.get(code) or ("Çanta Bayim" if code == "canta_bayim" else code),
+                                         same, nxt)
+             for code in set(suppliers.values()) if code}
     for o in orders:
+        code = suppliers.get(o["id"])
         o["shipping_plan"] = SP.plan(o.get("order_date"), now, status=o.get("internal_status"),
-                                     supplier_code=suppliers.get(o["id"]))
+                                     supplier_code=code, rule=rules.get(code))

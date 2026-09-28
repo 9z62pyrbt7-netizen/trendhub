@@ -1482,30 +1482,42 @@ PAGES.reports = {
 PAGES.integrations = {
   title: 'Entegrasyonlar', icon: 'integrations',
   async render() {
-    setHeader('Entegrasyonlar', 'Pazaryeri bağlantıları ve senkronizasyon');
+    setHeader('Entegrasyonlar', 'Pazaryeri mağaza bağlantıları ve senkronizasyon', can('admin') ? html`<button class="btn btn-primary" id="add-store">+ Mağaza Ekle</button>` : '');
     const d = await api('/api/integrations');
     state.jobLabels = d.job_labels || {};
-    const tone = { connected: 'tone-good', error: 'tone-bad', not_connected: '', configured: 'tone-warn', not_implemented: 'tone-warn' };
+    const pill = (i) => i.state === 'connected' ? html`<span class="badge tone-good">🟢 Bağlı</span>`
+      : i.state === 'error' ? html`<span class="badge tone-bad">🔴 Bağlantı başarısız</span>`
+      : i.state === 'not_connected' ? html`<span class="badge">⚪ Bağlı değil</span>` : html`<span class="badge tone-warn">${i.state_label}</span>`;
+    const src = { panel: 'Panelden eklendi', server: 'Sunucu ayarından (eski kurulum)', removed: 'Bağlantı kaldırıldı', none: 'Eklenmedi' };
     view().innerHTML = renderVal(html`
-      <div class="notice info" style="margin-bottom:16px">API anahtarları panelden girilmez ve veritabanında saklanmaz; sunucudaki <code>.env</code> dosyasında tanımlanır ve servis yeniden başlatılır. Bu ekran yalnızca hangi değişkenin tanımlı olduğunu gösterir. Senkronizasyon her ${d.sync_interval_minutes} dakikada bir otomatik çalışır ve <b>salt okunurdur</b>; pazaryerinde hiçbir değişiklik yapılmaz.</div>
+      <div class="notice info" style="margin-bottom:16px">Mağaza bağlantıları bu ekrandan eklenir; API bilgileri <b>şifreli</b> saklanır ve bir daha açık gösterilmez. Senkronizasyon her ${d.sync_interval_minutes} dakikada bir otomatik çalışır ve <b>salt okunurdur</b>; pazaryerinde hiçbir değişiklik yapılmaz.</div>
       <div class="grid grid-3">${d.items.map((i) => html`<div class="card integration-card">
-        <div class="card-head"><h2>${i.name}</h2><span class="badge ${tone[i.state]}">${i.state_label}</span></div>
+        <div class="card-head"><h2>${i.name}</h2>${pill(i)}</div>
+        <p class="small muted" style="margin-top:0">${src[i.source] || ''}${i.last_check_message ? html` · ${i.last_check_message}` : ''}</p>
         ${i.implementation_note ? html`<p class="notice warn small">${i.implementation_note}</p>` : ''}
-        <ul class="cred-list">${i.credentials.map((c) => html`<li><span>${c.label}<br><code>${c.env}</code></span><span class="badge plain ${c.is_set ? 'tone-good' : ''}">${c.is_set ? 'Tanımlı' : 'Eksik'}</span></li>`)}</ul>
-        ${i.optional_settings?.length ? html`<ul class="cred-list">${i.optional_settings.map((o) => html`<li><span>${o.label}<br><code>${o.env}</code></span><span class="badge plain">${o.value}</span></li>`)}</ul>` : ''}
+        <ul class="cred-list">${i.credentials.map((c) => html`<li><span>${c.label}</span><span class="badge plain ${c.is_set ? 'tone-good' : ''}">${c.is_set ? 'Tanımlı' : 'Eksik'}</span></li>`)}</ul>
+        ${i.optional_settings?.length ? html`<ul class="cred-list">${i.optional_settings.map((o) => html`<li><span>${o.label}</span><span class="badge plain">${o.value}</span></li>`)}</ul>` : ''}
         <div class="counts"><div><b class="num">${num(i.counts?.orders)}</b><span class="muted small">sipariş</span></div><div><b class="num">${num(i.counts?.listings)}</b><span class="muted small">ilan</span></div><div><b class="num">${num(i.counts?.ready_drafts)}</b><span class="muted small">yayına hazır taslak</span></div></div>
-        <p class="small"><b>Ürün yayını:</b> ${i.publish?.can_publish ? 'açık' : 'kapalı'} — <span class="muted">${i.publish?.reason || ''}</span> <a href="#/transfer?tab=rules">Kurallar →</a></p>
-        <dl class="kv"><dt>Son test</dt><dd>${dateTime(i.last_check_at)}</dd><dt>Sonuç</dt><dd>${i.last_check_message || '—'}</dd><dt>Son senkron</dt><dd>${dateTime(i.last_sync_at)}</dd>
-          <dt>Yazma</dt><dd>${i.write_enabled ? html`<span class="badge tone-warn">Açık</span>` : 'Kapalı (salt okunur)'}</dd></dl>
-        ${can('operator') ? html`<div class="row mt"><button class="btn btn-sm" data-check="${i.code}">Bağlantıyı test et</button>
-          <button class="btn btn-sm btn-primary" data-sync="${i.code}" data-kind="orders" ${raw(i.capabilities.includes('orders.read') && i.state !== 'not_connected' ? '' : 'disabled')}>Siparişleri senkronize et</button>
-          ${i.capabilities.includes('products.read') ? html`<button class="btn btn-sm" data-sync="${i.code}" data-kind="listings" ${raw(i.state !== 'not_connected' ? '' : 'disabled')}>İlanları senkronize et</button>` : ''}</div>` : ''}
-        <p class="small muted">Yetenekler: ${i.capabilities.length ? i.capabilities.map((c) => CAPABILITY_LABELS[c] || c).join(', ') : 'henüz yok'}</p>
-        <h3 class="mt">Son işler</h3>${i.recent_jobs.length ? html`<ul class="timeline">${i.recent_jobs.map((j) => html`<li><b>${jobLabel(j.job_type)}</b> · ${jobBadge(j.status)} <span class="muted small">${dateTime(j.created_at)} · deneme ${j.attempts}</span>${j.message ? html`<br><span class="small ${j.status === 'succeeded' ? '' : 'neg'}">${j.message}</span>` : ''}</li>`)}</ul>` : html`<p class="muted small">Henüz iş yok.</p>`}
+        <p class="small"><b>Ürün yayını:</b> <span class="badge plain tone-warn">Yayınlama henüz doğrulanmadı</span> <span class="muted">${i.publish?.reason || ''}</span></p>
+        <dl class="kv"><dt>Son test</dt><dd>${dateTime(i.last_check_at)}</dd><dt>Son senkron</dt><dd>${dateTime(i.last_sync_at)}</dd>
+          <dt>Mod</dt><dd>${i.write_enabled ? html`<span class="badge tone-warn">Yazma açık</span>` : 'Salt okunur'}</dd></dl>
+        <div class="row mt">
+          ${can('admin') ? html`<button class="btn btn-sm btn-primary" data-edit-store="${i.code}">${i.source === 'panel' ? 'Bilgileri düzenle' : 'Bağla'}</button>` : ''}
+          ${can('operator') ? html`<button class="btn btn-sm" data-check="${i.code}" ${raw(i.state !== 'not_connected' ? '' : 'disabled')}>Bağlantıyı test et</button>
+          <button class="btn btn-sm" data-sync="${i.code}" data-kind="orders" ${raw(i.capabilities.includes('orders.read') && i.state !== 'not_connected' ? '' : 'disabled')}>Siparişleri çek</button>
+          ${i.capabilities.includes('products.read') ? html`<button class="btn btn-sm" data-sync="${i.code}" data-kind="listings" ${raw(i.state !== 'not_connected' ? '' : 'disabled')}>İlanları çek</button>` : ''}` : ''}
+          ${can('admin') && i.source === 'panel' ? html`<button class="btn btn-sm btn-danger-text" data-remove-store="${i.code}" data-name="${i.name}">Bağlantıyı kaldır</button>` : ''}</div>
+        <details class="mt"><summary class="small">Son işler</summary>${i.recent_jobs.length ? html`<ul class="timeline">${i.recent_jobs.map((j) => html`<li><b>${jobLabel(j.job_type)}</b> · ${jobBadge(j.status)} <span class="muted small">${dateTime(j.created_at)} · deneme ${j.attempts}</span>${j.message ? html`<br><span class="small ${j.status === 'succeeded' ? '' : 'neg'}">${j.message}</span>` : ''}</li>`)}</ul>` : html`<p class="muted small">Henüz iş yok.</p>`}</details>
       </div>`)}</div>`);
+    $('#add-store')?.addEventListener('click', () => storeWizard(d.items));
+    $$('[data-edit-store]').forEach((b) => b.addEventListener('click', () => storeWizard(d.items, b.dataset.editStore)));
+    $$('[data-remove-store]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm(`${b.dataset.name} bağlantısı kaldırılsın mı?\n\nKayıtlı API bilgileri silinir; siparişler, ilanlar ve finans kayıtları korunur. Pazaryerinde hiçbir şey değişmez.`)) return;
+      try { await api(`/api/integrations/${b.dataset.removeStore}/connection`, { method: 'DELETE' }); toast('Bağlantı kaldırıldı'); refresh(); } catch (e) { fail(e); }
+    }));
     $$('[data-check]').forEach((b) => b.addEventListener('click', async () => {
       b.disabled = true;
-      try { const r = await api(`/api/integrations/${b.dataset.check}/check`, { method: 'POST' }); toast(r.message, !r.ok); refresh(); } catch (e) { fail(e); } finally { b.disabled = false; }
+      try { const r = await api(`/api/integrations/${b.dataset.check}/check`, { method: 'POST' }); toast(r.ok ? '🟢 Bağlantı doğrulandı' : `🔴 ${r.message}`, !r.ok); refresh(); } catch (e) { fail(e); } finally { b.disabled = false; }
     }));
     $$('[data-sync]').forEach((b) => b.addEventListener('click', async () => {
       b.disabled = true;
@@ -1513,6 +1525,54 @@ PAGES.integrations = {
     }));
   },
 };
+
+// Mağaza Ekle sihirbazı: 1 Pazaryeri · 2 Bağlantı · 3 Doğrulama/Tamamlandı
+async function storeWizard(items, code) {
+  const steps = (n) => html`<ol class="steps" style="margin-bottom:14px">${['Pazaryeri', 'Bağlantı', 'Tamamlandı'].map((l, i) => html`<li class="${i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''}">${i + 1}. ${l}</li>`)}</ol>`;
+  if (!code) {
+    const body = openModal(html`<h2>Mağaza Ekle</h2>${steps(1)}<p class="muted small">Bağlamak istediğiniz pazaryerini seçin.</p>
+      <div class="stack" style="gap:8px">${items.map((i) => html`<button class="btn mp-choice" data-pick-mp="${i.code}"><b>${i.name}</b><span class="muted small">${i.state === 'connected' ? 'Bağlı — bilgileri güncelle' : 'Bağla'}</span></button>`)}</div>`);
+    $$('[data-pick-mp]', body).forEach((b) => b.addEventListener('click', () => storeWizard(items, b.dataset.pickMp)));
+    return;
+  }
+  const name = items.find((i) => i.code === code)?.name || code;
+  const v = await api(`/api/integrations/${code}/connection`);
+  const field = (f) => html`<label>${f.label}${f.required ? '' : html` <span class="muted small">(isteğe bağlı)</span>`}
+    ${f.secret ? html`<input name="${f.key}" type="password" autocomplete="new-password" maxlength="4000" placeholder="${f.is_set ? '•••••••• (kayıtlı — değiştirmek için yeni değer girin)' : ''}" ${raw(f.required && !f.is_set ? 'required' : '')}>`
+      : html`<input name="${f.key}" maxlength="500" value="${f.value || ''}" placeholder="${f.default || ''}" ${raw(f.required ? 'required' : '')}>`}
+    ${f.help ? html`<span class="small muted">${f.help}</span>` : ''}</label>`;
+  const basic = v.fields.filter((f) => !f.advanced), adv = v.fields.filter((f) => f.advanced);
+  const body = openModal(html`<h2>${name} bağlantısı</h2>${steps(2)}
+    ${v.source === 'server' ? html`<div class="notice info small" style="margin-bottom:10px">Bu mağaza şu an sunucu ayarından çalışıyor. Buradan kaydederseniz panel bilgileri geçerli olur.</div>` : ''}
+    <form class="stack" id="storeform" autocomplete="off">${basic.map(field)}
+      ${adv.length ? html`<details><summary class="small">Gelişmiş ayarlar</summary><div class="stack mt">${adv.map(field)}</div></details>` : ''}
+      <p class="small muted">Bilgiler şifreli saklanır; kaydettikten sonra açık gösterilmez. Test yalnızca okuma isteği yapar, mağazanızda hiçbir şey değiştirmez.</p>
+      <div id="store-test" class="small"></div>
+      <p class="form-error"></p>
+      <div class="row"><button class="btn" type="button" data-close>Vazgeç</button><span class="spacer"></span>
+        <button class="btn" type="button" id="store-test-btn">Bağlantıyı Test Et</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>`);
+  const form = $('#storeform', body);
+  const values = () => Object.fromEntries(v.fields.map((f) => [f.key, form.elements.namedItem(f.key).value.trim() || null]));
+  const show = (r) => { $('#store-test', body).innerHTML = renderVal(html`<div class="notice ${r.ok ? 'info' : 'bad'}">${r.ok ? '🟢 Bağlı' : '🔴 Bağlantı başarısız'} — ${r.message}</div>`); };
+  $('#store-test-btn', body).addEventListener('click', async (e) => {
+    e.target.disabled = true; $('#store-test', body).textContent = 'Test ediliyor…';
+    try { show(await api(`/api/integrations/${code}/connection/test`, { method: 'POST', body: { values: values() } })); }
+    catch (ex) { $('#store-test', body).innerHTML = renderVal(html`<div class="notice bad">🔴 ${ex.message}</div>`); }
+    finally { e.target.disabled = false; }
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(form, async () => {
+      const r = await api(`/api/integrations/${code}/connection`, { method: 'PUT', body: { values: values() } });
+      const done = openModal(html`<h2>${name} bağlantısı</h2>${steps(3)}
+        <div class="notice ${r.ok ? 'info' : 'warn'}">${r.ok ? html`🟢 <b>Bağlı.</b>` : html`🔴 <b>Kaydedildi ancak bağlantı doğrulanamadı.</b>`} ${r.message}</div>
+        <p class="small muted mt">Senkronizasyon salt okunurdur. Ürün yayını bu pazaryeri için henüz doğrulanmadığından kapalıdır.</p>
+        <div class="row mt"><span class="spacer"></span><button class="btn btn-primary" data-close>Tamam</button></div>`);
+      done.querySelector('[data-close]').addEventListener('click', refresh);
+      refresh();
+    });
+  });
+}
 const JOB_LABELS = { queued: ['Kuyrukta', 'tone-info'], running: ['Çalışıyor', 'tone-warn'], succeeded: ['Başarılı', 'tone-good'], failed: ['Başarısız', 'tone-bad'], dead: ['Deneme bitti', 'tone-bad'] };
 const CAPABILITY_LABELS = { 'orders.read': 'sipariş okuma', 'products.read': 'ilan okuma' };
 const DEFAULT_JOB_LABELS = { 'orders.sync': 'Sipariş senkronizasyonu', 'orders.deep_sync': 'Derin sipariş senkronizasyonu (30 gün)', 'listings.sync': 'Ürün/ilan senkronizasyonu', 'integration.check': 'Bağlantı testi' };
@@ -1567,12 +1627,16 @@ PAGES.settings = {
       const dis = can('admin') ? '' : 'disabled';
       if (it.type === 'bool') return html`<label class="check"><input type="checkbox" name="${it.key}" ${raw(it.value ? 'checked' : '')} ${raw(dis)}>${it.label}</label>`;
       if (it.type === 'rate') return html`<label>${it.label} (%)<input name="${it.key}" type="number" step="0.1" min="0" max="100" value="${it.value === null ? '' : +(Number(it.value) * 100).toFixed(2)}" ${raw(dis)}></label>`;
+      if (it.type === 'time') return html`<label>${it.label}<input name="${it.key}" type="time" step="60" value="${it.value || ''}" ${raw(dis)}></label>`;
+      if (it.type === 'code') return html`<label>${it.label}<input name="${it.key}" maxlength="50" pattern="[a-z0-9_\\-]*" value="${it.value || ''}" ${raw(dis)}></label>`;
+      if (it.type === 'percent') return html`<label>${it.label}<input name="${it.key}" type="number" step="1" min="0" max="1000" value="${it.value ?? ''}" ${raw(dis)}></label>`;
       return html`<label>${it.label}<input name="${it.key}" type="number" step="${it.type === 'int' ? 1 : 0.01}" min="0" value="${it.value ?? ''}" ${raw(dis)}></label>`;
     };
     view().innerHTML = renderVal(html`
       <div class="grid grid-2">
-        <form class="card" id="set-form"><div class="card-head"><div><h2>Finans ve stok varsayılanları</h2><p>Pazaryeri gerçek tutarı bildirmediğinde kullanılan tahminler. Bu değerlerle hesaplanan tutarlar raporlarda “TAHMİNİ” olarak işaretlenir.</p></div></div>
-          <div class="form-grid">${s.items.map((it) => html`<div class="${it.type === 'bool' ? 'full' : ''}">${input(it)}</div>`)}</div>
+        <form class="card" id="set-form"><div class="card-head"><div><h2>İşletme ayarları</h2><p>Tüm ayarlar buradan yönetilir; sunucu dosyası düzenlemek gerekmez. Finans varsayılanlarıyla hesaplanan tutarlar raporlarda “TAHMİNİ” olarak işaretlenir.</p></div></div>
+          ${[...new Set(s.items.map((it) => it.group))].map((g) => html`<fieldset class="fieldset mt"><legend>${g}</legend><div class="form-grid">${s.items.filter((it) => it.group === g).map((it) => html`<div class="${it.type === 'bool' || it.type === 'time' ? 'full' : ''}">${input(it)}</div>`)}</div>
+            ${g === 'Kargo planı' ? html`<p class="small muted">Varsayılan: 11:00 öncesi bugün, 12:00 ve sonrası yarın; aradaki saatler “Kargo günü belirsiz” gösterilir. İki saati aynı yaparsanız belirsiz aralık kalmaz. Hafta sonu/tatil takvimi tanımlı değildir; tarih tahminidir.</p>` : ''}</fieldset>`)}
           ${can('admin') ? html`<p class="form-error"></p><button class="btn btn-primary mt" type="submit">Kaydet</button>` : html`<p class="muted small mt">Ayarları yalnızca yöneticiler değiştirebilir.</p>`}</form>
         <div class="stack">
           <form class="card" id="pw-form"><div class="card-head"><h2>Parola değiştir</h2></div><div class="stack">
@@ -1592,6 +1656,7 @@ PAGES.settings = {
         s.items.forEach((it) => {
           const el = e.target.elements[it.key];
           if (it.type === 'bool') values[it.key] = el.checked;
+          else if (it.type === 'time' || it.type === 'code') values[it.key] = el.value.trim();
           else if (el.value !== '') values[it.key] = it.type === 'rate' ? Number(el.value) / 100 : it.type === 'int' ? parseInt(el.value, 10) : Number(el.value);
         });
         const r = await api('/api/settings', { method: 'PUT', body: { values } });

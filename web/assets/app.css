@@ -313,6 +313,9 @@ td .price-in, td .cat-in { min-height: 32px; padding: 4px 8px; }
 .ship-plan-card { display: flex; flex-direction: column; gap: 4px; }
 .ship-plan-title { font-size: 15px; }
 
+.btn-danger-text { color: var(--bad); }
+.mp-choice { display: flex; justify-content: space-between; align-items: center; width: 100%; text-align: left; min-height: 48px; }
+
 /* Duyarlı */
 @media (max-width: 1200px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }

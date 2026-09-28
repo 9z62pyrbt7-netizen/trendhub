@@ -159,7 +159,7 @@ def marketplaces(_: CurrentUser = Depends(viewer), conn: Connection = Depends(ge
 @router.get("/api/settings")
 def get_app_settings(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
     values = app_settings.get_all(conn)
-    return {"items": [{"key": k, "type": t, "label": label, "value": values.get(k)}
+    return {"items": [{"key": k, "type": t, "label": label, "value": values.get(k), "group": app_settings.group_of(k)}
                       for k, (t, label) in app_settings.EDITABLE.items()]}
 
 
@@ -172,11 +172,18 @@ def put_app_settings(body: SettingsIn, request: Request, user: CurrentUser = Dep
                      conn: Connection = Depends(get_conn)):
     before = app_settings.get_all(conn)
     changed = {}
+    labels = {k: label for k, (_, label) in app_settings.EDITABLE.items()}
+    validated = {}
     for key, value in body.values.items():
         try:
-            v = app_settings.validate(key, value)
+            validated[key] = app_settings.validate(key, value)
         except (ValueError, TypeError) as exc:
-            raise HTTPException(422, f"{key}: {exc}") from None
+            raise HTTPException(422, f"{labels.get(key, key)}: {exc}") from None
+    same = validated.get("shipping.same_day_before", before.get("shipping.same_day_before", "11:00"))
+    nxt = validated.get("shipping.next_day_from", before.get("shipping.next_day_from", "12:00"))
+    if same > nxt:
+        raise HTTPException(422, "Kargo kesim saati, 'yarın kargoya verilir' saatinden sonra olamaz")
+    for key, v in validated.items():
         if before.get(key) != v:
             app_settings.set_value(conn, key, v, user.id)
             changed[key] = {"from": before.get(key), "to": v}

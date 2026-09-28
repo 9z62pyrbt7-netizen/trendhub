@@ -54,8 +54,29 @@ def to_tr(dt: datetime) -> datetime:
     return dt.astimezone(TR_TZ)
 
 
+def parse_hhmm(v: str | None, default: time) -> time:
+    try:
+        h, m = str(v).split(":")
+        return time(int(h), int(m))
+    except (ValueError, AttributeError):
+        return default
+
+
+def rule_from_settings(supplier_code: str, supplier_name: str, same_day_before: str | None,
+                       next_day_from: str | None) -> CutoffRule:
+    """Ayarlar ekranındaki kargo kesim saatlerinden kural (varsayılan 11:00 / 12:00)."""
+    return CutoffRule(supplier_code, supplier_name, parse_hhmm(same_day_before, time(11, 0)),
+                      parse_hhmm(next_day_from, time(12, 0)))
+
+
+def is_shipping_day(d: date) -> bool:
+    """İş takvimi kancası. Doğrulanmış bir tedarikçi/iş takvimi olmadığı için her gün kargo günü sayılır;
+    ileride tatil/hafta sonu takvimi buraya bağlanır (tahmin UYDURULMAZ)."""
+    return True
+
+
 def plan(order_date: datetime | None, now: datetime, *, status: str | None = None,
-         supplier_code: str | None = None) -> dict:
+         supplier_code: str | None = None, rule: CutoffRule | None = None) -> dict:
     """Siparişin tahmini kargoya verilme günü.
 
     Dönen `code`: today | tomorrow | later | past | unknown | not_applicable | no_rule | no_date
@@ -64,8 +85,8 @@ def plan(order_date: datetime | None, now: datetime, *, status: str | None = Non
             "window": None, "rule_note": None, "weekend_note": None}
     if status is not None and status not in PENDING_STATUSES:
         return {**base, "code": "not_applicable", "label": "—"}
-    rule = RULES.get(supplier_code or "")
-    if rule is None:
+    rule = rule or RULES.get(supplier_code or "")
+    if rule is None or not supplier_code:
         return {**base, "code": "no_rule", "label": "Kargo planı tanımlı değil"}
     base["rule_note"] = rule.note
     if order_date is None:
