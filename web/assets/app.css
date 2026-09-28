@@ -310,8 +310,11 @@ pre.json { white-space: pre-wrap; word-break: break-word; font-size: 12px; backg
   .bars .bar-row { grid-template-columns: 100px minmax(0, 1fr) 90px; }
 }
 @media (max-width: 520px) {
-  .grid-4 { grid-template-columns: minmax(0, 1fr); }
-  .kpi .value { font-size: 22px; }
+  .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .grid-4 .card.kpi { padding: 14px; }
+  .kpi .label { font-size: 11px; }
+  .kpi .value { font-size: 20px; word-break: break-word; }
+  .kpi .sub { font-size: 11px; }
   .filters input[type="search"] { min-width: 0; flex: 1 1 100%; }
   .drawer-panel { padding: 18px 16px; }
 }

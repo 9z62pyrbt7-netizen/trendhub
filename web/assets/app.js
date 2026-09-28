@@ -160,7 +160,7 @@ async function submitting(form, fn) {
 
 // ---------------------------------------------------------------- grafik (SVG)
 function lineChart(points, series) {
-  if (!points.length) return empty('Veri yok', 'Seçilen dönemde sipariş bulunmuyor.');
+  if (!points.length || points.every((p) => series.every((sr) => !Number(p[sr.key])))) return empty('Veri yok', 'Seçilen dönemde satış kaydı bulunmuyor.');
   const W = 720, H = 240, L = 64, R = 12, T = 12, B = 28;
   const vals = points.flatMap((p) => series.map((s) => Number(p[s.key]) || 0));
   let min = Math.min(0, ...vals), max = Math.max(0, ...vals);
