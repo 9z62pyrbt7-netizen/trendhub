@@ -251,3 +251,19 @@ def test_dashboard_and_finance_expose_estimated_tax_today_top_products(client, e
     sku = client.get("/api/reports/sku?period=7d").json()["items"][0]
     # iade edilen T2'nin ürünü stoğa döner -> maliyet yalnızca T1'den (60)
     assert float(sku["product_cost"]) == 60.0 and float(sku["tax_estimate"]) == 30.0
+
+
+def test_system_health_reports_connectors_and_heartbeat(client, engine):
+    from app.services import jobs
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO worker_heartbeats(worker_id, hostname) VALUES ('w1', 'h')"))
+        jobs.enqueue(c, "orders.sync", marketplace="trendyol", idempotency_key="k", max_attempts=1)
+        j = jobs.claim(c, "w1")
+        jobs.fail(c, j, "hata")
+    login(client)
+    h = client.get("/api/system/health").json()
+    assert h["worker_alive"] is True and h["last_heartbeat_at"]
+    by = {c["code"]: c for c in h["connectors"]}
+    assert set(by) == {"trendyol", "hepsiburada", "amazon_tr"}
+    assert by["trendyol"]["state"] == "not_connected" and by["trendyol"]["failed_24h"] == 1
+    assert "credentials" not in by["trendyol"]
