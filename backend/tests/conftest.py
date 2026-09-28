@@ -68,12 +68,15 @@ os.environ.update({
     "ADMIN_PASSWORD": "Admin-Password-123",
     "COOKIE_SECURE": "false",
     "APP_ENV": "test",
+    # Tedarikçi secret şifrelemesi için (yalnızca test)
+    "APP_SECRET": "test-app-secret-0123456789abcdef",
     # Testlerde pazaryeri bilgileri kesinlikle boş
     "TRENDYOL_SELLER_ID": "", "TRENDYOL_API_KEY": "", "TRENDYOL_API_SECRET": "",
 })
 run_migrations(_APP_DB)
 
-DATA_TABLES = ["financial_transactions", "order_status_history", "supplier_orders", "shipments", "order_items",
+DATA_TABLES = ["listing_drafts", "marketplace_category_mappings", "marketplace_rules", "supplier_product_changes",
+               "supplier_sync_runs", "supplier_field_mappings", "supplier_connections", "financial_transactions", "order_status_history", "supplier_orders", "shipments", "order_items",
                "orders", "marketplace_listings", "product_costs", "supplier_products", "suppliers", "products",
                "expenses", "sync_state", "sync_jobs", "system_events", "worker_heartbeats", "audit_logs",
                "user_sessions", "users", "stores"]
@@ -98,6 +101,7 @@ def engine():
             ('finance.default_shipping_cost', '0'), ('finance.include_vat', 'true'),
             ('finance.return_product_cost_is_loss', 'false'),
             ('stock.low_stock_threshold', '3') ON CONFLICT (key) DO NOTHING"""))
+        c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
         c.execute(text("UPDATE marketplaces SET last_check_at = NULL, last_check_ok = NULL, last_check_message = NULL, last_sync_at = NULL"))
     from app.security import login_limiter
     login_limiter.hits.clear()

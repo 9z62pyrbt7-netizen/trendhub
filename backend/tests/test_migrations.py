@@ -1,11 +1,15 @@
 """Migration'ların mevcut (legacy) veriyi korumasını doğrular."""
 import importlib.util
 import os
+import re
 import subprocess
 
 from sqlalchemy import create_engine, text
 
 from .conftest import _sa, create_database, drop_database, run_migrations
+
+# Tedarikçi ürünü kataloğa bağlanmadan havuzda durabilsin (0004).
+ALLOWED_NOT_NULL_RELAXATIONS = {("SUPPLIER_PRODUCTS", "PRODUCT_ID")}
 
 LEGACY_INIT = os.path.join(os.path.dirname(__file__), "fixtures", "legacy_main.py")
 
@@ -29,7 +33,7 @@ def test_fresh_database_migrates():
         run_migrations(url)  # ikinci çalıştırma no-op olmalı
         eng = create_engine(_sa(url))
         with eng.connect() as c:
-            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0003_listing_details"
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0004_supplier_management"
             assert c.execute(text("SELECT COUNT(*) FROM marketplaces")).scalar() == 3
         eng.dispose()
     finally:
@@ -86,5 +90,48 @@ def test_migrations_contain_no_destructive_statements():
         src = open(os.path.join(here, name), encoding="utf-8").read()
         # Yalnızca çalıştırılan kod (upgrade fonksiyonu ve SQL sabitleri), açıklamalar hariç
         src = src[src.index('"""', src.index('"""') + 3) + 3:].upper().replace("ON DELETE CASCADE", "")
+        # Tek izinli istisna: NOT NULL kısıtını gevşetmek (veri silmez/değiştirmez). Her kullanım
+        # aşağıdaki listede açıkça onaylı olmalı; DROP TABLE/COLUMN/INDEX/CONSTRAINT hâlâ yasak.
+        relaxed = re.findall(r"ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL", src)
+        assert set(relaxed) <= ALLOWED_NOT_NULL_RELAXATIONS, f"{name}: onaysız NOT NULL gevşetme {relaxed}"
+        src = re.sub(r"ALTER TABLE \w+ ALTER COLUMN \w+ DROP NOT NULL", "", src)
         for bad in ("DROP ", "TRUNCATE", "DELETE", "ALTER COLUMN TYPE", " TYPE "):
             assert bad not in src, f"{name} içinde yıkıcı ifade: {bad}"
+
+
+def test_supplier_migration_preserves_existing_supplier_rows():
+    """0004 öncesi tedarikçi/ürün bağları korunur; product_id artık boş olabilir."""
+    from alembic import command
+    from alembic.config import Config
+
+    from app.config import get_settings
+    url = create_database("sup")
+    try:
+        old = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = url
+        get_settings.cache_clear()
+        cfg = Config(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
+        cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), "..", "migrations"))
+        try:
+            command.upgrade(cfg, "0003_listing_details")
+        finally:
+            os.environ["DATABASE_URL"] = old
+            get_settings.cache_clear()
+        eng = create_engine(_sa(url))
+        with eng.begin() as c:
+            c.execute(text("INSERT INTO suppliers(code, name, integration_type) VALUES ('eski', 'Eski Tedarikçi', 'external')"))
+            c.execute(text("INSERT INTO products(sku, name, cost) VALUES ('P1', 'Ürün', 10)"))
+            c.execute(text("INSERT INTO supplier_products(supplier_id, product_id, supplier_sku, cost) VALUES (1, 1, 'E-1', 9.5)"))
+        run_migrations(url)
+        with eng.begin() as c:
+            r = c.execute(text("SELECT supplier_id, product_id, supplier_sku, cost, status FROM supplier_products")).one()
+            assert (r[0], r[1], r[2], float(r[3]), r[4]) == (1, 1, "E-1", 9.5, "active")
+            assert c.execute(text("SELECT integration_type, priority FROM suppliers")).one() == ("external", 100)
+            nullable = c.execute(text("""SELECT is_nullable FROM information_schema.columns
+                                         WHERE table_name = 'supplier_products' AND column_name = 'product_id'""")).scalar()
+            assert nullable == "YES"
+            # Her pazaryeri için varsayılan kural satırı
+            assert c.execute(text("SELECT COUNT(*) FROM marketplace_rules")).scalar() == 3
+        eng.dispose()
+    finally:
+        drop_database(url)

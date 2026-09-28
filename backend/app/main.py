@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import analytics, auth, catalog, integrations, orders, system
+from .api import analytics, auth, catalog, integrations, orders, suppliers, system, transfer
 from .config import get_settings
 from .db import transaction
 from .logging_setup import configure_logging
@@ -64,7 +64,8 @@ def create_app() -> FastAPI:
             response.headers.setdefault("Cache-Control", "no-store")
         return response
 
-    for r in (auth.router, analytics.router, orders.router, catalog.router, integrations.router, system.router):
+    for r in (auth.router, analytics.router, orders.router, catalog.router, suppliers.router,
+              transfer.router, integrations.router, system.router):
         app.include_router(r)
     return app
 
