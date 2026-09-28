@@ -305,6 +305,28 @@ yazmaz, pazaryerine istek göndermez; `will_send` her zaman `false`.
 iç ağ adresleri engellidir (`SUPPLIER_ALLOW_PRIVATE_URLS`); XML DTD/dış varlık reddedilir;
 bağlantı değişikliği yalnızca yönetici, eşleştirme/senkron/yükleme operatör yetkisindedir.
 
+## 8b. Kargo planı tahmini (Çanta Bayim)
+
+`app/domain/shipping_plan.py` + `app/services/shipping_plan.py`. Siparişler listesinde **Kargo Planı**
+sütunu ve sipariş detayında belirgin bir kutu olarak gösterilir. Tamamen **bilgilendirme amaçlı
+TrendHub tahminidir**: sipariş statüsünü değiştirmez, veritabanına yazmaz, pazaryerine veya
+tedarikçiye istek göndermez, canlı otomasyonu etkilemez.
+
+* Hesap backend'de, `Europe/Istanbul` saat dilimiyle yapılır (tarayıcı saatine bırakılmaz;
+  Docker imajında `tzdata` paketi var).
+* Çanta Bayim kuralı: 11:00'dan **önce** → aynı gün; 12:00 ve **sonrası** → ertesi gün.
+  **11:00:00–11:59:59 → "Kargo günü belirsiz"**: repoda veya erişilebilen kaynaklarda doğrulanmış
+  kural yok, varsayım yapılmadı.
+* Hafta sonu/resmî tatil için doğrulanmış kural yok: iş günü hesabı yapılmaz, sonuç tarihi hafta
+  sonuna düşerse uyarı notu gösterilir.
+* Metin güncel güne göredir: "Bugün kargoya verilecek · 28 Eyl", "Yarın kargoya verilecek · 29 Eyl",
+  plan günü geçmişse "Planlanan kargo günü geçti · 27 Eyl". Yalnızca kargoya verilmemiş siparişlerde
+  (yeni, hazırlanıyor, tedarikçiye aktarıldı, kargo bekliyor) gösterilir.
+* Kural tedarikçi koduna göre seçilir: sipariş için tedarikçi siparişi kaydı → kalemlerdeki ürünlerin
+  tercih edilen tedarikçisi → `shipping_plan.default_supplier_code` ayarı (varsayılan `canta_bayim`,
+  çünkü canlı Trendyol siparişleri Çanta Bayim'e aktarılıyor). Kuralı olmayan tedarikçide
+  "Kargo planı tanımlı değil" görünür.
+
 ## 9. Güvenilirlik
 
 * **Idempotency**

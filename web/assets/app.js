@@ -97,7 +97,9 @@ function openLayer(id, content) {
   $(`#${id}-body`).innerHTML = renderVal(content);
   layer.hidden = false;
   const f = layer.querySelector('input, select, textarea, button:not([data-close])');
-  (f || layer.querySelector('[data-close]')).focus();
+  // Odak klavye erişimi için verilir ama panel en üstten açılır (mobilde üstteki bilgi görünür kalsın)
+  (f || layer.querySelector('[data-close]')).focus({ preventScroll: true });
+  layer.querySelector('.drawer-panel, .modal-panel')?.scrollTo(0, 0);
   return $(`#${id}-body`);
 }
 function closeLayer(id) {
@@ -412,10 +414,10 @@ PAGES.orders = {
     const load = async (page) => {
       const d = await api('/api/orders', { query: { ...f, loss_only: f.loss_only ? 'true' : '', page, page_size: 25 } });
       $('#order-list').innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr>
-        <th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Müşteri</th><th>Durum</th><th class="r">Adet</th><th class="r">Ciro</th><th class="r">Net kâr</th><th class="r">Marj</th></tr></thead><tbody>
+        <th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Müşteri</th><th>Durum</th><th>Kargo Planı</th><th class="r">Adet</th><th class="r">Ciro</th><th class="r">Net kâr</th><th class="r">Marj</th></tr></thead><tbody>
         ${d.items.map((o) => html`<tr class="click" data-order="${o.id}"><td><b>${o.external_order_id}</b>${o.review_reason ? html`<span class="ellipsis small neg" title="${o.review_reason}">${o.review_reason}</span>` : ''}</td>
           <td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td><span class="ellipsis">${o.customer_name || '—'}</span><span class="muted small">${o.customer_city || ''}</span></td>
-          <td>${statusBadge(o.internal_status, o.status_label)}</td><td class="r num">${num(o.item_count)}</td><td class="r num">${money(o.gross_revenue)}</td>
+          <td>${statusBadge(o.internal_status, o.status_label)}</td><td>${shipPlanBadge(o.shipping_plan)}</td><td class="r num">${num(o.item_count)}</td><td class="r num">${money(o.gross_revenue)}</td>
           <td class="r num ${signClass(o.net_profit)}">${money(o.net_profit)}${estimateBadge(o.finance_is_estimate)}</td><td class="r num">${pct(o.margin)}</td></tr>`)}
         </tbody></table></div>${pager(d, load)}` : empty('Sipariş bulunamadı', 'Filtreleri değiştirin veya pazaryeri senkronizasyonunu bekleyin.'));
       $$('#order-list [data-order]').forEach((r) => r.addEventListener('click', () => showOrder(r.dataset.order)));
@@ -424,6 +426,22 @@ PAGES.orders = {
   },
 };
 
+// Kargo planı: backend'de Türkiye saatiyle hesaplanan TAHMİN (sipariş durumunu değiştirmez)
+const SHIP_TONE = { today: 'tone-good', tomorrow: 'tone-info', later: 'tone-info', past: 'tone-warn', unknown: 'tone-warn', no_rule: '', no_date: '' };
+function shipPlanBadge(sp) {
+  if (!sp || sp.code === 'not_applicable') return html`<span class="muted">—</span>`;
+  return html`<span class="badge ship-plan ${SHIP_TONE[sp.code] || ''}" title="${[sp.rule_note, sp.weekend_note, 'TrendHub tahmini'].filter(Boolean).join(' · ')}">${sp.label}</span>`;
+}
+function shipPlanCard(sp) {
+  if (!sp || sp.code === 'not_applicable') return '';
+  const tone = { today: 'info', tomorrow: 'info', later: 'info', past: 'warn', unknown: 'warn' }[sp.code] || '';
+  return html`<div class="notice ${tone} ship-plan-card" style="margin-bottom:16px">
+    <div class="row"><b class="ship-plan-title">Kargo planı: ${sp.label}</b> ${TAHMINI}</div>
+    <span class="small">${sp.order_time_tr ? `Sipariş saati (TR): ${sp.order_time_tr}. ` : ''}${sp.rule_note || ''}</span>
+    ${sp.code === 'unknown' ? html`<span class="small" style="display:block"><b>11:00–11:59 arası</b> için doğrulanmış Çanta Bayim kuralı olmadığından kargo günü belirlenmedi.</span>` : ''}
+    ${sp.weekend_note ? html`<span class="small" style="display:block">${sp.weekend_note}</span>` : ''}
+    <span class="small muted" style="display:block">TrendHub'ın kendi tahminidir; sipariş durumunu değiştirmez, pazaryerine veya tedarikçiye bildirilmez.</span></div>`;
+}
 async function showOrder(id) {
   let o;
   try { o = await api(`/api/orders/${id}`); } catch (e) { fail(e); return; }
@@ -435,6 +453,7 @@ async function showOrder(id) {
     <div class="row" style="margin-bottom:16px">${statusBadge(o.internal_status, o.status_label)}<span class="badge plain">${o.marketplace_name || '—'}</span>
       ${o.status ? html`<span class="muted small">Pazaryeri durumu: ${o.status}</span>` : ''}</div>
     ${o.review_reason ? html`<div class="notice bad" style="margin-bottom:16px">${o.review_reason}</div>` : ''}
+    ${shipPlanCard(o.shipping_plan)}
     <div class="grid grid-2">
       <div class="card"><h3>Bilgiler</h3><dl class="kv mt">
         <dt>Sipariş tarihi</dt><dd>${dateTime(o.order_date)}</dd><dt>Müşteri</dt><dd>${o.customer_name || '—'} ${o.customer_city ? `(${o.customer_city})` : ''}</dd>
