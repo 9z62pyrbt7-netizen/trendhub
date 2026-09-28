@@ -29,6 +29,7 @@ from ..connectors.base import ConnectorError
 from ..db import row, rows
 from ..suppliers.connectors import FetchResult, SupplierConnectorError, get_supplier_connector
 from ..suppliers.mapping import apply_mapping
+from . import alerts
 from .events import record_event, resolve_fingerprint
 from .supplier_catalog import link_by_barcode, refresh_catalog
 
@@ -115,7 +116,7 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
         items[sku] = m.values
 
     existing = {r["supplier_sku"]: r for r in rows(conn, """
-        SELECT id, supplier_sku, cost, stock, status, content_hash, product_id
+        SELECT id, supplier_sku, cost, stock, status, content_hash, product_id, barcode, name
           FROM supplier_products WHERE supplier_id = :s AND supplier_sku IS NOT NULL FOR UPDATE
     """, s=sid)}
     touched_products: set[int] = set()
@@ -161,6 +162,11 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
         if price_changed:
             stats.price_changed += 1
             _change(conn, sid, sp_id, run_id, "price", old["cost"], v["purchase_price"])
+            if old["cost"] is not None and v["purchase_price"] is not None:
+                alerts.price_change_event(conn, {**old, "name": v["name"] or old["name"]}, Decimal(old["cost"]),
+                                          v["purchase_price"], sup)
+        if old["barcode"] and (old["barcode"] or None) != (v["barcode"] or None):
+            alerts.barcode_change_event(conn, {**old, "name": v["name"] or old["name"]}, old["barcode"], v["barcode"], sup)
         if stock_changed:
             stats.stock_changed += 1
             _change(conn, sid, sp_id, run_id, "stock", old["stock"], v["stock"])

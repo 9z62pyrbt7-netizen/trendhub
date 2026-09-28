@@ -319,7 +319,8 @@ PAGES.dashboard = {
     const draw = async () => {
       setHeader('Genel Bakış', 'Tüm pazaryerlerinin merkezi özeti', periodSeg(state.period, draw));
       loading();
-      const d = await api('/api/dashboard', { query: { period: state.period } });
+      const [d, al] = await Promise.all([api('/api/dashboard', { query: { period: state.period } }),
+        api('/api/alerts', { query: { status: 'open', page_size: 5 } }).catch(() => null)]);
       const s = d.summary, t = s.orders;
       const connected = d.integrations.filter((i) => i.state === 'connected').length;
       const hasMarketplaceOrders = d.by_marketplace.some((m) => Number(m.orders));
@@ -327,6 +328,9 @@ PAGES.dashboard = {
         <div class="chips" style="margin-bottom:16px">${d.integrations.map((i) => html`
           <a class="chip" href="#/integrations"><span class="dot ${i.state === 'connected' ? 'good' : i.state === 'error' ? 'bad' : i.state === 'not_connected' ? '' : 'warn'}"></span>${i.name}
           <span class="muted small">${i.state_label}</span></a>`)}</div>
+        ${al && al.total ? html`<a class="attention-box ${al.items.some((a) => a.severity === 'critical') ? 'bad' : 'warn'}" href="#/alerts">
+          <span class="big num">${num(al.total)}</span><span><b>konu ilgilenmeni bekliyor</b>
+          <span class="small">${al.items.slice(0, 3).map((a) => `${SEV_ICON[a.severity]} ${a.title}: ${a.description || ''}`).join(' · ')}</span></span><span class="go">Uyarılar →</span></a>` : ''}
         ${connected === 0 ? html`<div class="notice info" style="margin-bottom:16px">Henüz bağlı bir pazaryeri yok. Sipariş verisi, <a href="#/integrations">Entegrasyonlar</a> sayfasındaki API bilgileri sunucuya tanımlanıp senkronizasyon çalıştığında görünecek. Aşağıdaki değerler gerçek kayıtlardan hesaplanır; veri yoksa 0 gösterilir.</div>` : ''}
         <div class="grid grid-4">
           ${kpi('Bugünkü satış', money0(d.today.revenue), `${num(d.today.orders)} sipariş`)}
@@ -386,6 +390,68 @@ function alertRow(n, text, href, tone) {
   return html`<a class="notice ${tone}" href="${href}"><b class="num">${num(n)}</b> ${text} →</a>`;
 }
 
+// ---- Uyarılar / Sorunlar merkezi
+const SEV_ICON = { critical: '🔴', warning: '🟠', info: '🔵' };
+const SEV_LABEL = { critical: 'Kritik', warning: 'Uyarı', info: 'Bilgi' };
+const ALERT_CATS = [['', 'Tüm kaynaklar'], ['supplier', 'Tedarikçi'], ['marketplace', 'Pazaryeri'], ['order', 'Sipariş'], ['shipping', 'Kargo'], ['product', 'Ürün'], ['system', 'Sistem']];
+function alertCard(a) {
+  const refs = [a.product_name && ['Ürün', a.product_name], a.external_order_id && ['Sipariş', a.external_order_id],
+    a.marketplace_name && ['Mağaza', a.marketplace_name], a.supplier_name && ['Tedarikçi', a.supplier_name]].filter(Boolean);
+  return html`<article class="alert-card sev-${a.severity} ${a.status === 'resolved' ? 'resolved' : ''}">
+    <div class="alert-head"><span class="badge sev sev-${a.severity}">${SEV_ICON[a.severity]} ${SEV_LABEL[a.severity]}</span>
+      <span class="badge plain">${a.category_label}</span>${a.occurrences > 1 ? html`<span class="muted small">${num(a.occurrences)} kez görüldü</span>` : ''}</div>
+    <h3>${a.title}</h3><p>${a.description || ''}</p>
+    ${refs.length ? html`<dl class="kv small">${refs.map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl>` : ''}
+    <div class="alert-foot small muted"><span>Tespit: ${dateTime(a.first_detected_at)}</span><span>Son kontrol: ${dateTime(a.last_checked_at)}</span>
+      ${a.status === 'resolved' ? html`<span>Çözüldü: ${dateTime(a.resolved_at)} · ${a.resolution === 'system' ? 'sorun ortadan kalktı (otomatik)' : (a.resolved_by_name || 'kullanıcı')}</span>` : ''}</div>
+    <div class="row">${a.link ? html`<a class="btn btn-sm" href="${a.link}">İlgili kayda git →</a>` : ''}
+      ${a.status === 'open' && can('operator') ? html`<button class="btn btn-sm btn-primary" data-resolve="${a.id}">Çözüldü olarak işaretle</button>` : ''}</div>
+  </article>`;
+}
+PAGES.alerts = {
+  title: 'Uyarılar', icon: 'alerts',
+  async render(params) {
+    const f = { status: params.get('status') || 'open', severity: params.get('severity') || '', category: params.get('category') || '', q: params.get('q') || '' };
+    setHeader('Uyarılar', 'Tedarikçi, pazaryeri ve kargo sorunları — yalnızca gerçek veriden',
+      can('operator') ? html`<button class="btn" id="scan-now">Şimdi tara</button>` : '');
+    const sum = await api('/api/alerts/summary');
+    const go = (patch) => {
+      const q = new URLSearchParams(Object.entries({ ...f, ...patch }).filter(([k, v]) => v && !(k === 'status' && v === 'open')));
+      location.hash = '#/alerts' + (q.toString() ? '?' + q : '');
+    };
+    view().innerHTML = renderVal(html`
+      <div class="grid grid-4">
+        <button class="card kpi sev-tile ${f.severity === 'critical' ? 'on' : ''}" data-sev="critical"><div class="label">🔴 Kritik</div><div class="value ${sum.critical ? 'neg' : ''}">${num(sum.critical)}</div></button>
+        <button class="card kpi sev-tile ${f.severity === 'warning' ? 'on' : ''}" data-sev="warning"><div class="label">🟠 Uyarı</div><div class="value ${sum.warning ? 'warn-text' : ''}">${num(sum.warning)}</div></button>
+        <button class="card kpi sev-tile ${f.severity === 'info' ? 'on' : ''}" data-sev="info"><div class="label">🔵 Bilgi</div><div class="value">${num(sum.info)}</div></button>
+        <div class="card kpi"><div class="label">Son kontrol</div><div class="value small">${dateTime(sum.last_checked_at)}</div><div class="sub">Otomatik tarama 15 dk'da bir ve her senkrondan sonra</div></div>
+      </div>
+      <div class="card mt"><form class="filters" id="alert-filters">
+        <input type="search" name="q" placeholder="Ürün, sipariş, açıklama…" value="${f.q}" aria-label="Ara">
+        <select name="category" aria-label="Kaynak">${ALERT_CATS.map(([v, l]) => html`<option value="${v}" ${raw(v === f.category ? 'selected' : '')}>${l}${v && sum.by_category[v] ? ` (${sum.by_category[v]})` : ''}</option>`)}</select>
+        <select name="severity" aria-label="Seviye"><option value="">Tüm seviyeler</option>${Object.entries(SEV_LABEL).map(([v, l]) => html`<option value="${v}" ${raw(v === f.severity ? 'selected' : '')}>${l}</option>`)}</select>
+        <select name="status" aria-label="Durum">${[['open', 'Açık'], ['resolved', 'Çözülenler'], ['all', 'Tümü']].map(([v, l]) => html`<option value="${v}" ${raw(v === f.status ? 'selected' : '')}>${l}</option>`)}</select>
+        <button class="btn btn-primary" type="submit">Filtrele</button></form>
+        <div id="alert-list"><div class="skeleton">Yükleniyor…</div></div></div>`);
+    $$('[data-sev]').forEach((b) => b.addEventListener('click', () => go({ severity: f.severity === b.dataset.sev ? '' : b.dataset.sev })));
+    $('#alert-filters').addEventListener('submit', (e) => { e.preventDefault(); go(formData(e.target)); });
+    $('#scan-now')?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { const r = await api('/api/alerts/scan', { method: 'POST' }); toast(`Tarama tamamlandı: ${r.detected} açık sorun, ${r.new} yeni, ${r.auto_resolved} çözüldü`); refresh(); } catch (ex) { fail(ex); e.target.disabled = false; }
+    });
+    const load = async (page) => {
+      const d = await api('/api/alerts', { query: { ...f, page, page_size: 20 } });
+      $('#alert-list').innerHTML = renderVal(d.items.length ? html`<div class="alert-list">${d.items.map(alertCard)}</div>${pager(d, load)}`
+        : empty(f.status === 'open' ? 'Açık sorun yok' : 'Kayıt yok', f.status === 'open' ? 'Tedarikçi, pazaryeri ve kargo tarafında ilgilenmeni bekleyen bir konu bulunmuyor.' : 'Seçilen filtrelere uyan uyarı yok.'));
+      $$('[data-resolve]').forEach((b) => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await api(`/api/alerts/${b.dataset.resolve}/resolve`, { method: 'POST', body: {} }); toast('Çözüldü olarak işaretlendi'); refreshBell(); load(page); } catch (ex) { fail(ex); b.disabled = false; }
+      }));
+    };
+    await load(1);
+  },
+};
+
 // ---- Siparişler
 PAGES.orders = {
   title: 'Siparişler', icon: 'orders',
@@ -393,6 +459,7 @@ PAGES.orders = {
     const f = { status: params.get('status') || '', marketplace: params.get('marketplace') || '', q: params.get('q') || '',
       date_from: params.get('date_from') || '', date_to: params.get('date_to') || '', sort: params.get('sort') || 'date_desc',
       loss_only: params.get('loss_only') === '1', page: Number(params.get('page') || 1) };
+    if (params.get('open')) setTimeout(() => showOrder(params.get('open')));
     setHeader('Siparişler', 'Tüm pazaryerlerinden gelen siparişler');
     const mps = await api('/api/marketplaces');
     view().innerHTML = renderVal(html`<div class="card">
@@ -1713,7 +1780,7 @@ PAGES.users = {
 };
 
 // ------------------------------------------------------------------- yönlendirme
-const NAV = ['dashboard', 'orders', 'products', 'suppliers', 'transfer', 'shipping', 'finance', 'reports', 'integrations', 'system', 'settings', 'users'];
+const NAV = ['dashboard', 'alerts', 'orders', 'products', 'suppliers', 'transfer', 'shipping', 'finance', 'reports', 'integrations', 'system', 'settings', 'users'];
 // Sade çizgi ikonlar (24x24, currentColor)
 const ICONS = {
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -1726,6 +1793,7 @@ const ICONS = {
   reports: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   integrations: '<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/>',
   system: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  alerts: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
 };
@@ -1736,7 +1804,21 @@ function parseHash() {
   return { page: PAGES[path] ? path : 'dashboard', params: new URLSearchParams(qs || '') };
 }
 function renderNav(active) {
-  $('#nav').innerHTML = renderVal(NAV.filter((k) => !PAGES[k].admin || can('admin')).map((k) => html`<a href="#/${k}" class="${k === active ? 'active' : ''}" ${raw(k === active ? 'aria-current="page"' : '')}><span class="ico">${icon(PAGES[k].icon)}</span>${PAGES[k].nav || PAGES[k].title}</a>`));
+  $('#nav').innerHTML = renderVal(NAV.filter((k) => !PAGES[k].admin || can('admin')).map((k) => html`<a href="#/${k}" class="${k === active ? 'active' : ''}" ${raw(k === active ? 'aria-current="page"' : '')}><span class="ico">${icon(PAGES[k].icon)}</span>${PAGES[k].nav || PAGES[k].title}${k === 'alerts' && state.alertCount ? html`<span class="nav-count">${num(state.alertCount)}</span>` : ''}</a>`));
+}
+// ---- Bildirim zili: açık uyarı sayısı (panel içi bildirim kanalı)
+async function refreshBell() {
+  try {
+    const s = await api('/api/alerts/summary');
+    state.alertSummary = s; state.alertCount = s.total;
+    const b = $('#bell');
+    b.hidden = false;
+    b.classList.toggle('has-critical', !!s.critical);
+    $('#bell-count').textContent = s.total ? (s.total > 99 ? '99+' : String(s.total)) : '';
+    b.setAttribute('aria-label', s.total ? `${s.total} uyarı ilgilenmeni bekliyor` : 'Uyarı yok');
+    b.title = s.total ? `${s.total} konu ilgilenmeni bekliyor (${s.critical} kritik)` : 'Açık uyarı yok';
+    renderNav(parseHash().page);
+  } catch { /* zil kritik değil */ }
 }
 let routeSeq = 0;
 async function route() {
@@ -1746,6 +1828,7 @@ async function route() {
   renderNav(page);
   document.body.classList.remove('nav-open');
   if (!$('#drawer').hidden) closeLayer('drawer');
+  refreshBell();
   try {
     await PAGES[page].render(params);
   } catch (e) {
@@ -1795,6 +1878,8 @@ $('#theme-toggle').addEventListener('click', () => {
   applyTheme(next); localSet('th.theme', next);
 });
 window.addEventListener('hashchange', route);
+$('#bell').addEventListener('click', () => { location.hash = '#/alerts'; });
+setInterval(() => { if (state.user && !document.hidden) refreshBell(); }, 120000);
 
 (async () => {
   try { await startApp(await api('/api/auth/me')); } catch (e) { if (e.status !== 401) { showLogin(); $('#login-error').textContent = e.message; } }
