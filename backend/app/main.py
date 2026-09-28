@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from .api import analytics, auth, catalog, integrations, orders, system
 from .config import get_settings
 from .db import transaction
+from .logging_setup import configure_logging
 from .security import bootstrap_admin
 
 log = logging.getLogger("trendhub.api")
@@ -23,6 +24,7 @@ CSRF_VALUE = "TrendHub"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_logging()
     settings = get_settings()
     try:
         with transaction() as conn:
