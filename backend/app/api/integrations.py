@@ -48,6 +48,8 @@ def integration_state(c: MarketplaceConnector, mp: dict | None) -> dict:
         "last_check_at": mp.get("last_check_at"), "last_check_ok": mp.get("last_check_ok"),
         "last_check_message": mp.get("last_check_message"), "last_sync_at": mp.get("last_sync_at"),
         "write_enabled": bool(get_settings().connector_write_enabled),
+        "optional_settings": c.optional_settings(),
+        "publish": c.publish_status(),
     }
 
 
@@ -67,6 +69,14 @@ def list_integrations(_: CurrentUser = Depends(viewer), conn: Connection = Depen
             SELECT id, job_type, status, attempts, message, created_at, started_at, finished_at, result
               FROM sync_jobs WHERE marketplace = :m ORDER BY id DESC LIMIT 5
         """, m=c.code)
+        # TrendHub'daki gerçek kayıt sayıları (pazaryerinden okunmuş veri; üretilmiş veri yok)
+        item["counts"] = row(conn, """
+            SELECT (SELECT COUNT(*) FROM orders o JOIN stores s ON s.id = o.store_id WHERE s.marketplace_id = m.id) AS orders,
+                   (SELECT COUNT(*) FROM marketplace_listings l JOIN stores s ON s.id = l.store_id
+                     WHERE s.marketplace_id = m.id) AS listings,
+                   (SELECT COUNT(*) FROM listing_drafts d WHERE d.marketplace_id = m.id AND d.status = 'ready') AS ready_drafts
+              FROM marketplaces m WHERE m.code = :m
+        """, m=c.code) or {"orders": 0, "listings": 0, "ready_drafts": 0}
         out.append(item)
     return {"items": out, "sync_interval_minutes": get_settings().sync_interval_minutes,
             "job_labels": sync_service.JOB_LABELS_TR}

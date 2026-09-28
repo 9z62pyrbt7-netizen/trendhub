@@ -53,8 +53,19 @@ def _existing_listing(conn: Connection, marketplace_id: int, product: dict) -> i
     """), {"m": marketplace_id, "p": product["id"], "b": product.get("barcode") or None}).scalar()
 
 
+def category_mapping(conn: Connection, marketplace_id: int, source_category: str | None) -> dict:
+    return row(conn, """SELECT target_category_id, target_category_name, attributes, required_attributes
+                          FROM marketplace_category_mappings WHERE marketplace_id = :m AND source_category = :c""",
+               m=marketplace_id, c=source_category or "") or {}
+
+
 def compute(conn: Connection, product: dict, marketplace: dict, offers, rule: PricingRule, extra: dict,
-            manual_price: Decimal | None = None, category_override: dict | None = None) -> dict:
+            manual_price: Decimal | None = None, manual_category: dict | None = None,
+            manual_attributes: dict | None = None) -> dict:
+    """Taslağın fiyat/stok/kategori/özellik ve doğrulama sonucunu hesaplar.
+
+    Kategori: elle girilmişse o, yoksa pazaryeri kategori eşleştirmesi. Özellikler: eşleştirmedeki
+    varsayılanlar + taslakta elle girilenler (elle girilen üstün). Zorunlu özellikler eşleştirmeden gelir."""
     strategy = product.get("supplier_strategy") or "manual"
     offer = select_offer(offers, strategy, product.get("preferred_supplier_id"))
     if offer is None and strategy == "manual" and not product.get("preferred_supplier_id"):
@@ -68,17 +79,16 @@ def compute(conn: Connection, product: dict, marketplace: dict, offers, rule: Pr
         price = suggest_price(cost, rule)
     estimate = estimate_profit(price, cost, rule, Decimal(str(product.get("vat_rate") or 20))) \
         if price is not None and cost is not None else None
-    if category_override is not None:
-        cat = category_override
-    else:
-        cat = row(conn, """SELECT target_category_id, target_category_name, attributes FROM marketplace_category_mappings
-                            WHERE marketplace_id = :m AND source_category = :c""",
-                  m=marketplace["id"], c=product.get("category") or "") or {}
+    mapping = category_mapping(conn, marketplace["id"], product.get("category"))
+    cat = manual_category if manual_category is not None else mapping
+    attributes = {**(mapping.get("attributes") or {}), **(manual_attributes or {})}
+    required_attrs = list(mapping.get("required_attributes") or []) if manual_category is None else []
     existing = _existing_listing(conn, marketplace["id"], product)
     check = validate_draft(product=product, price=price, stock=stock, cost=cost,
                            category_id=cat.get("target_category_id"), estimate=estimate, rule=rule,
                            required_fields=list(extra["required_fields"]), title_max_length=extra["title_max_length"],
-                           min_stock=int(extra["min_stock"] or 0), existing_listing=bool(existing))
+                           min_stock=int(extra["min_stock"] or 0), existing_listing=bool(existing),
+                           attributes=attributes, required_attributes=required_attrs)
     if offer is None:
         check.errors.insert(0, "Kullanılabilir tedarikçi teklifi yok (stokta ve fiyatı olan)")
     return {"supplier_product_id": offer.supplier_product_id if offer else None,
@@ -87,8 +97,9 @@ def compute(conn: Connection, product: dict, marketplace: dict, offers, rule: Pr
             "estimated_profit": estimate.profit if estimate else None,
             "estimated_margin": estimate.margin if estimate else None,
             "category_id": cat.get("target_category_id"), "category_name": cat.get("target_category_name"),
-            "attributes": cat.get("attributes") or {}, "existing_listing_id": existing,
-            "errors": check.errors, "warnings": check.warnings}
+            "attributes": attributes, "required_attributes": required_attrs, "existing_listing_id": existing,
+            "category_is_manual": manual_category is not None, "attributes_override": manual_attributes or {},
+            "estimate": estimate, "errors": check.errors, "warnings": check.warnings}
 
 
 def _products(conn: Connection, ids: list[int]) -> list[dict]:
@@ -103,9 +114,11 @@ def _save(conn: Connection, product_id: int, marketplace_id: int, c: dict, *, pr
     return conn.execute(text("""
         INSERT INTO listing_drafts(product_id, marketplace_id, supplier_product_id, price, price_is_manual, stock,
                cost_basis, commission_rate, estimated_profit, estimated_margin, category_id, category_name, attributes,
-               status, errors, warnings, existing_listing_id, created_by, validated_at, updated_at)
+               status, errors, warnings, existing_listing_id, created_by, validated_at, updated_at,
+               category_is_manual, attributes_override)
         VALUES (:p, :m, :sp, :price, :manual, :stock, :cost, :comm, :profit, :margin, :cat_id, :cat_name,
-                CAST(:attrs AS JSONB), :status, CAST(:errors AS JSONB), CAST(:warnings AS JSONB), :existing, :u, NOW(), NOW())
+                CAST(:attrs AS JSONB), :status, CAST(:errors AS JSONB), CAST(:warnings AS JSONB), :existing, :u, NOW(), NOW(),
+                :cat_manual, CAST(:attrs_override AS JSONB))
         ON CONFLICT (product_id, marketplace_id) DO UPDATE SET
                supplier_product_id = EXCLUDED.supplier_product_id, price = EXCLUDED.price,
                price_is_manual = EXCLUDED.price_is_manual, stock = EXCLUDED.stock, cost_basis = EXCLUDED.cost_basis,
@@ -115,6 +128,7 @@ def _save(conn: Connection, product_id: int, marketplace_id: int, c: dict, *, pr
                status = CASE WHEN EXCLUDED.status = 'draft' AND :keep AND listing_drafts.status = 'ready'
                              THEN 'ready' ELSE EXCLUDED.status END,
                errors = EXCLUDED.errors, warnings = EXCLUDED.warnings, existing_listing_id = EXCLUDED.existing_listing_id,
+               category_is_manual = EXCLUDED.category_is_manual, attributes_override = EXCLUDED.attributes_override,
                validated_at = NOW(), updated_at = NOW()
         RETURNING id
     """), {"p": product_id, "m": marketplace_id, "sp": c["supplier_product_id"], "price": c["price"],
@@ -123,7 +137,8 @@ def _save(conn: Connection, product_id: int, marketplace_id: int, c: dict, *, pr
            "cat_name": c["category_name"], "attrs": json.dumps(c["attributes"], ensure_ascii=False),
            "status": status, "errors": json.dumps(c["errors"], ensure_ascii=False),
            "warnings": json.dumps(c["warnings"], ensure_ascii=False), "existing": c["existing_listing_id"],
-           "u": user_id, "keep": keep_ready}).scalar()
+           "u": user_id, "keep": keep_ready, "cat_manual": c["category_is_manual"],
+           "attrs_override": json.dumps(c["attributes_override"], ensure_ascii=False)}).scalar()
 
 
 def marketplaces_by_code(conn: Connection, codes: list[str]) -> list[dict]:
@@ -140,7 +155,8 @@ def build_drafts(conn: Connection, product_ids: list[int], marketplace_codes: li
     products = _products(conn, product_ids)
     offers = load_offers(conn, [p["id"] for p in products])
     existing = {(r["product_id"], r["marketplace_id"]): r for r in rows(conn, """
-        SELECT product_id, marketplace_id, price, price_is_manual FROM listing_drafts
+        SELECT product_id, marketplace_id, price, price_is_manual, category_id, category_name, category_is_manual,
+               attributes, attributes_override FROM listing_drafts
          WHERE product_id = ANY(:p) AND marketplace_id = ANY(:m)
     """, p=[p["id"] for p in products], m=[m["id"] for m in mps])}
     ids, valid, invalid = [], 0, 0
@@ -149,7 +165,9 @@ def build_drafts(conn: Connection, product_ids: list[int], marketplace_codes: li
         for p in products:
             prev = existing.get((p["id"], mp["id"]))
             manual = Decimal(prev["price"]) if prev and prev["price_is_manual"] and prev["price"] is not None else None
-            c = compute(conn, p, mp, offers.get(p["id"], []), rule, extra, manual_price=manual)
+            mcat, mattr = _manual_parts(prev)
+            c = compute(conn, p, mp, offers.get(p["id"], []), rule, extra, manual_price=manual,
+                        manual_category=mcat, manual_attributes=mattr)
             ids.append(_save(conn, p["id"], mp["id"], c, price_is_manual=manual is not None, user_id=user_id,
                              keep_ready=True))
             valid += 0 if c["errors"] else 1
@@ -157,10 +175,22 @@ def build_drafts(conn: Connection, product_ids: list[int], marketplace_codes: li
     return {"draft_ids": ids, "valid": valid, "invalid": invalid}
 
 
+def _manual_parts(d: dict | None) -> tuple[dict | None, dict | None]:
+    if not d:
+        return None, None
+    mcat = ({"target_category_id": d["category_id"], "target_category_name": d["category_name"]}
+            if d.get("category_is_manual") and d.get("category_id") else None)
+    mattr = d.get("attributes_override") or None
+    return mcat, mattr
+
+
 def revalidate(conn: Connection, draft_ids: list[int], *, price: Decimal | None = None,
-               reset_price: bool = False, category: dict | None = None) -> list[int]:
+               reset_price: bool = False, category: dict | None = None, reset_category: bool = False,
+               attributes: dict | None = None, reset_attributes: bool = False) -> list[int]:
+    # Sabit sırayla kilitle: eşzamanlı doğrulamalar birbirini bekler, kilitlenme (deadlock) olmaz.
     drafts = rows(conn, """SELECT d.*, m.code AS marketplace_code FROM listing_drafts d
-                             JOIN marketplaces m ON m.id = d.marketplace_id WHERE d.id = ANY(:ids)""", ids=list(draft_ids))
+                             JOIN marketplaces m ON m.id = d.marketplace_id WHERE d.id = ANY(:ids)
+                            ORDER BY d.id FOR UPDATE OF d""", ids=list(draft_ids))
     products = {p["id"]: p for p in _products(conn, [d["product_id"] for d in drafts])}
     offers = load_offers(conn, list(products))
     out = []
@@ -169,11 +199,19 @@ def revalidate(conn: Connection, draft_ids: list[int], *, price: Decimal | None 
         rule, extra = marketplace_rule(conn, mp)
         manual = price if price is not None else (
             None if reset_price or not d["price_is_manual"] else Decimal(d["price"]) if d["price"] is not None else None)
-        cat = category if category is not None else (
-            {"target_category_id": d["category_id"], "target_category_name": d["category_name"],
-             "attributes": d["attributes"]} if d["category_id"] else None)
+        mcat, mattr = _manual_parts(d)
+        if category is not None:
+            mcat = category
+        if reset_category:
+            mcat = None
+        if attributes is not None:
+            # Verilen değerler mevcut elle girilenlerin üstüne yazılır; boş değer o özelliği kaldırır.
+            merged = {**(mattr or {}), **attributes}
+            mattr = {k: v for k, v in merged.items() if v} or None
+        if reset_attributes:
+            mattr = None
         c = compute(conn, products[d["product_id"]], mp, offers.get(d["product_id"], []), rule, extra,
-                    manual_price=manual, category_override=cat)
+                    manual_price=manual, manual_category=mcat, manual_attributes=mattr)
         out.append(_save(conn, d["product_id"], d["marketplace_id"], c, price_is_manual=manual is not None,
                          user_id=None, keep_ready=True))
     return out

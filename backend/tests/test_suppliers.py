@@ -550,3 +550,105 @@ def test_category_attributes_are_per_marketplace_and_copied_to_drafts(client):
     assert got["hepsiburada"] == ("HB-77", {"Cinsiyet": "Unisex"})
     assert client.put("/api/category-mappings", json={"marketplace": "trendyol", "source_category": "x", "target_category_id": "1",
                                                       "attributes": {f"k{i}": "v" for i in range(60)}}, headers=H).status_code == 422
+
+
+def _draft(client, barcode, marketplace):
+    return next(d for d in client.get("/api/listing-drafts", params={"marketplace": marketplace, "page_size": 200}).json()["items"]
+                if d["barcode"] == barcode)
+
+
+def test_required_category_attributes_and_draft_attribute_editing(client):
+    a = make_supplier(client, "A", MAP_A)
+    upload(client, a, XML_A)
+    pids = _catalog(client, a)
+    client.put("/api/category-mappings", json={"marketplace": "trendyol", "source_category": "Çanta > Sırt Çantası",
+                                               "target_category_id": "1001", "attributes": {"Renk": "Kahverengi"},
+                                               "required_attributes": ["Renk", "Materyal"]}, headers=H)
+    client.post("/api/transfer/drafts", json={"product_ids": pids, "marketplaces": ["trendyol"]}, headers=H)
+    d = _draft(client, "8690000000017", "trendyol")
+    assert d["status"] == "invalid" and any("Materyal" in e for e in d["errors"])
+    # Taslakta eksik özelliği doldur -> geçerli; yeniden doğrulamada elle girilen korunur
+    r = client.patch(f"/api/listing-drafts/{d['id']}", json={"attributes": {"Materyal": "Deri"}}, headers=H).json()
+    assert r["status"] == "draft" and r["attributes"] == {"Renk": "Kahverengi", "Materyal": "Deri"}
+    assert r["attributes_override"] == {"Materyal": "Deri"}
+    client.post("/api/listing-drafts/validate", json={"ids": [d["id"]]}, headers=H)
+    assert _draft(client, "8690000000017", "trendyol")["status"] == "draft"
+    # Eşleştirmede varsayılan değişirse elle girilmeyen özellikler güncellenir
+    client.put("/api/category-mappings", json={"marketplace": "trendyol", "source_category": "Çanta > Sırt Çantası",
+                                               "target_category_id": "1009", "attributes": {"Renk": "Siyah"}}, headers=H)
+    client.post("/api/listing-drafts/validate", json={"ids": [d["id"]]}, headers=H)
+    d2 = _draft(client, "8690000000017", "trendyol")
+    assert d2["category_id"] == "1009" and d2["attributes"] == {"Renk": "Siyah", "Materyal": "Deri"}
+    # Zorunlu listesi korunur (required_attributes gönderilmedi) ve özellik sıfırlanınca yine hata
+    r = client.patch(f"/api/listing-drafts/{d['id']}", json={"reset_attributes": True}, headers=H).json()
+    assert r["status"] == "invalid" and r["attributes_override"] == {}
+    # Elle kategori: eşleştirmeyi ezer, "" ile eşleştirmeye döner
+    r = client.patch(f"/api/listing-drafts/{d['id']}", json={"category_id": "5555"}, headers=H).json()
+    assert r["category_id"] == "5555" and r["category_is_manual"]
+    r = client.patch(f"/api/listing-drafts/{d['id']}", json={"category_id": ""}, headers=H).json()
+    assert r["category_id"] == "1009" and not r["category_is_manual"]
+    assert client.patch(f"/api/listing-drafts/{d['id']}", json={"attributes": {f"k{i}": "v" for i in range(60)}},
+                        headers=H).status_code == 422
+
+
+def test_publish_preview_is_read_only_and_explains_status(client, engine):
+    a = make_supplier(client, "A", MAP_A)
+    upload(client, a, XML_A)
+    pids = _catalog(client, a)
+    client.put("/api/category-mappings", json={"marketplace": "hepsiburada", "source_category": "Çanta > Sırt Çantası",
+                                               "target_category_id": "HB-1"}, headers=H)
+    client.post("/api/transfer/drafts", json={"product_ids": pids, "marketplaces": ["hepsiburada"]}, headers=H)
+    d = _draft(client, "8690000000017", "hepsiburada")
+    with engine.begin() as c:
+        before = c.execute(text("SELECT updated_at, status FROM listing_drafts WHERE id = :i"), {"i": d["id"]}).one()
+    p = client.get(f"/api/listing-drafts/{d['id']}/preview").json()
+    assert p["publish"]["will_send"] is False and p["publish"]["can_publish"] is False
+    assert "CONNECTOR_WRITE_ENABLED=false" in p["publish"]["message"]
+    assert p["valid"] and p["payload"]["barcode"] == "8690000000017" and p["payload"]["category_id"] == "HB-1"
+    pr = p["pricing"]
+    D = lambda k: Decimal(str(pr[k]))  # noqa: E731 - JSON sayıları
+    assert pr["is_estimate"] and D("price") == Decimal(str(p["payload"]["price"]))
+    assert D("price") - D("commission") - D("shipping") - D("fixed") - D("cost") - D("vat") == D("profit")
+    with engine.begin() as c:
+        after = c.execute(text("SELECT updated_at, status FROM listing_drafts WHERE id = :i"), {"i": d["id"]}).one()
+    assert before == after   # önizleme yazmaz
+    assert client.get("/api/listing-drafts/999999/preview").status_code == 404
+
+
+def test_integrations_show_publish_status_optional_settings_and_counts(client):
+    items = {i["code"]: i for i in client.get("/api/integrations").json()["items"]}
+    assert set(items) == {"trendyol", "hepsiburada", "amazon_tr"}
+    for i in items.values():
+        assert i["state"] == "not_connected" and i["publish"]["can_publish"] is False
+        assert i["counts"] == {"orders": 0, "listings": 0, "ready_drafts": 0}
+    hb = {o["env"]: o["value"] for o in items["hepsiburada"]["optional_settings"]}
+    assert hb == {"HEPSIBURADA_USER_AGENT": "kullanıcı adı kullanılır", "HEPSIBURADA_LISTINGS_ENABLED": "kapalı"}
+    assert items["trendyol"]["optional_settings"][0]["value"] == "kapalı"
+
+
+def test_concurrent_revalidation_does_not_deadlock(client, engine):
+    """Panelde art arda yapılan kategori düzenlemeleri aynı taslakları eşzamanlı doğrular."""
+    import threading
+
+    from app.services.listing_drafts import revalidate
+    a = make_supplier(client, "A", MAP_A)
+    upload(client, a, XML_A)
+    pids = _catalog(client, a)
+    ids = client.post("/api/transfer/drafts", json={"product_ids": pids, "marketplaces": ["trendyol", "hepsiburada"]},
+                      headers=H).json()["draft_ids"]
+    errors = []
+
+    def worker(order):
+        try:
+            for _ in range(5):
+                with engine.begin() as c:
+                    revalidate(c, order)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+    threads = [threading.Thread(target=worker, args=(o,)) for o in (sorted(ids), sorted(ids, reverse=True),
+                                                                     sorted(ids), sorted(ids, reverse=True))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert errors == []

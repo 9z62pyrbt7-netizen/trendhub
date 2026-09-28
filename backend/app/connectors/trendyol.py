@@ -138,6 +138,10 @@ class TrendyolConnector(MarketplaceConnector):
             "İlan senkronu: " + ("AÇIK (doğrulanmamış V1 servisi)" if CAP_PRODUCTS_READ in self.capabilities
                                  else "kapalı — Ürün V2 şeması doğrulanmadı"))
 
+    def optional_settings(self) -> list[dict]:
+        return [{"env": "TRENDYOL_LISTINGS_ENABLED", "label": "İlan okuma (Ürün V2 doğrulanmadı)",
+                 "value": "açık" if CAP_PRODUCTS_READ in self.capabilities else "kapalı"}]
+
     def credential_values(self) -> dict[str, str]:
         s = self.settings
         return {

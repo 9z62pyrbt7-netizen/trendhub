@@ -75,6 +75,8 @@ web/                     index.html, assets/app.js, assets/app.css, nginx.conf
   `supplier_products.product_id` NOT NULL kısıtı kaldırılır (tedarikçi ürünü kataloğa bağlanmadan
   havuzda durabilsin); veri değişmez. Bu istisna `test_migrations.py` içinde açık izin listesiyle
   sınırlıdır; başka hiçbir `DROP` kabul edilmez.
+* **`0005_listing_attributes`**: kategori eşleştirmesine zorunlu özellik listesi, taslağa elle girilen
+  kategori bayrağı ve elle girilen özellikler (`attributes_override`) eklenir (yalnızca ekleme).
 * **`0002_platform_core`** yalnızca ekleme yapar. `DROP`, `TRUNCATE`, `DELETE` ve tip
   değişikliği yoktur. Bu kural `tests/test_migrations.py` tarafından otomatik denetlenir.
   * `orders.status` **ham pazaryeri statüsü olarak kalır**. Yeni `orders.internal_status`
@@ -287,6 +289,16 @@ ve adet başı olası tasarruf.
 eklenebilir (`POST /api/marketplaces`); connector'ı yoksa "Connector yok" görünür. Her connector
 `publish_status()` ile yayın durumunu bildirir; `publish_listing()` hiçbir connector'da uygulanmadı ve
 `CONNECTOR_WRITE_ENABLED=false` iken `WriteDisabled` verir.
+
+**Kategori/özellik doğrulaması:** her pazaryeri kategori eşleştirmesi varsayılan özellikleri ve
+zorunlu özellik adlarını tutar. Taslakta elle girilen özellikler varsayılanların üstüne yazılır ve
+yeniden doğrulamada korunur; eşleştirme değişirse elle girilmeyenler güncellenir. Zorunlu özellik
+boşsa taslak "Hatalı" olur.
+
+**Yayın önizleme** (`GET /api/listing-drafts/{id}/preview`, panelde taslak satırında **Önizle**):
+fiyat/komisyon/kargo/maliyet/KDV/kâr dökümü (TAHMİNİ), doğrulama sonucu, gönderilecek alanlar
+(TrendHub'ın nötr alan adları — pazaryeri API şeması değildir) ve yayın durumu. Veritabanına
+yazmaz, pazaryerine istek göndermez; `will_send` her zaman `false`.
 
 **Güvenlik:** URL ve secret'lar API yanıtlarında asla dönmez (yalnızca maskeli URL ve
 "tanımlı mı"); denetim kaydına değer yazılmaz; çözülen secret'lar log maskeleyicisine eklenir;
