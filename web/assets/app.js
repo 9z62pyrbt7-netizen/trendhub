@@ -122,7 +122,7 @@ document.addEventListener('keydown', (e) => {
 const statusBadge = (code, label) => html`<span class="badge st-${code}">${label || statusLabel(code)}</span>`;
 const statusLabel = (code) => state.meta?.statuses.find((s) => s.code === code)?.label || code;
 const empty = (title, text) => html`<div class="empty"><b>${title}</b>${text}</div>`;
-const estimateBadge = (flag) => (flag ? html` <span class="badge plain tone-warn" title="Komisyon/kargo/hizmet bedeli veya ürün maliyeti tahmini ya da eksik">Tahmini</span>` : '');
+const estimateBadge = (flag) => (flag ? html` <span class="badge plain tone-warn est" title="Komisyon/kargo/hizmet bedeli veya ürün maliyeti tahmini ya da eksik">TAHMİNİ</span>` : '');
 
 function pager(p, onGo) {
   if (!p.total) return '';
@@ -227,18 +227,73 @@ const COMPONENTS = [
   ['product_cost', 'Ürün maliyeti'], ['commission', 'Komisyon'], ['service_fee', 'Hizmet bedeli'],
   ['shipping', 'Kargo'], ['advertising', 'Reklam'], ['refund', 'İade'], ['other', 'Diğer'],
 ];
-function profitBars(t, periodExpenses) {
+const TAHMINI = html`<span class="badge plain tone-warn est" title="Gerçek pazaryeri hakediş verisi bağlanmadı; komisyon, kargo, hizmet bedeli ve vergi tahmini hesaplanır.">TAHMİNİ</span>`;
+// Net değer arka uçta Decimal ile hesaplanır; burada yeniden toplanmaz (float hatası olmasın).
+function profitBars(t, { periodExpenses, net, tax, netAfterTax } = {}) {
   const revenue = Number(t.revenue) || 0;
   const rows = COMPONENTS.map(([k, l]) => [l, Number(t[k]) || 0]);
   if (periodExpenses !== undefined) rows.push(['Dönem giderleri', Number(periodExpenses) || 0]);
-  const net = revenue - rows.reduce((a, [, v]) => a + v, 0);
   const scale = Math.max(revenue, 1);
-  const bar = (v, cls = '') => html`<div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(100, (Math.abs(v) / scale) * 100).toFixed(2)}%"></div></div>`;
+  const bar = (v, cls = '') => html`<div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(100, (Math.abs(Number(v) || 0) / scale) * 100).toFixed(2)}%"></div></div>`;
   return html`<div class="bars">
-    <div class="bar-row"><span>Ciro</span>${bar(revenue, 'rev')}<span class="r num">${money(revenue)}</span></div>
+    <div class="bar-row"><span>Ciro</span>${bar(revenue, 'rev')}<span class="r num">${money(t.revenue)}</span></div>
     ${rows.map(([l, v]) => html`<div class="bar-row"><span>− ${l}</span>${bar(v)}<span class="r num">${money(v)}</span></div>`)}
     <div class="bar-row total"><span>Net kâr</span>${bar(net, 'profit')}<span class="r num ${signClass(net)}">${money(net)}</span></div>
+    ${tax !== undefined ? html`<div class="bar-row"><span>− Tahmini KDV</span>${bar(tax)}<span class="r num">${money(tax)}</span></div>
+      <div class="bar-row total"><span>Net kâr (KDV sonrası)</span>${bar(netAfterTax, 'profit')}<span class="r num ${signClass(netAfterTax)}">${money(netAfterTax)}</span></div>` : ''}
+    ${t.discount !== undefined && Number(t.discount) ? html`<p class="small muted">Satıcı indirimi ${money(t.discount)} ciroya zaten yansımıştır; ayrıca düşülmez.</p>` : ''}
   </div>`;
+}
+
+// Kâr/zarar sütun grafiği: pozitif ve negatif günler ayrı renk + etiket (yalnızca renge dayanmaz)
+function barChart(points, key, { label }) {
+  if (!points.length || points.every((p) => !Number(p[key]))) return empty('Veri yok', 'Seçilen dönemde kâr/zarar kaydı bulunmuyor.');
+  const W = 720, H = 220, L = 64, R = 12, T = 12, B = 28;
+  const vals = points.map((p) => Number(p[key]) || 0);
+  let min = Math.min(0, ...vals), max = Math.max(0, ...vals);
+  if (max === min) max = min + 1;
+  const step = niceStep((max - min) / 4);
+  min = Math.floor(min / step) * step; max = Math.ceil(max / step) * step;
+  const y = (v) => T + ((max - v) * (H - T - B)) / (max - min);
+  const slot = (W - L - R) / points.length, bw = Math.max(2, Math.min(24, slot - 2));
+  const ticks = []; for (let v = min; v <= max + step / 2; v += step) ticks.push(v);
+  const every = Math.max(1, Math.ceil(points.length / 8));
+  const id = 'b' + Math.random().toString(36).slice(2, 8);
+  const svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
+    ${ticks.map((v) => `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke-width="${v === 0 ? 1.5 : 1}"/>
+      <g class="axis"><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${esc(compactMoney(v))}</text></g>`).join('')}
+    ${points.map((p, i) => {
+      const v = vals[i], x = L + i * slot + (slot - bw) / 2, top = Math.min(y(v), y(0)), h = Math.max(1, Math.abs(y(v) - y(0)));
+      return `<rect x="${x}" y="${top}" width="${bw}" height="${h}" rx="3" fill="${v < 0 ? 'var(--bad)' : 'var(--series-3)'}"/>`;
+    }).join('')}
+    ${points.map((p, i) => (i % every === 0 ? `<g class="axis"><text x="${L + i * slot + slot / 2}" y="${H - 8}" text-anchor="middle">${esc(p.day.slice(8, 10) + '.' + p.day.slice(5, 7))}</text></g>` : '')).join('')}
+    <rect id="${id}-hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>
+  </svg>`;
+  setTimeout(() => {
+    const hit = document.getElementById(`${id}-hit`);
+    if (!hit) return;
+    const box = hit.closest('.chart'), tip = box.querySelector('.tip'), svgEl = hit.ownerSVGElement;
+    hit.addEventListener('pointermove', (ev) => {
+      const r = svgEl.getBoundingClientRect();
+      const i = Math.max(0, Math.min(points.length - 1, Math.floor(((((ev.clientX - r.left) / r.width) * W) - L) / slot)));
+      const p = points[i];
+      tip.hidden = false;
+      tip.innerHTML = renderVal(html`<b>${date(p.day)}</b><div><span>${label}</span><b class="num ${signClass(p[key])}">${money(p[key])}</b></div><div><span>Sipariş</span><b class="num">${num(p.orders)}</b></div>`);
+      tip.style.left = Math.min(Math.max(0, ((L + i * slot) / W) * r.width + 12), r.width - tip.offsetWidth) + 'px';
+      tip.style.top = '28px';
+    });
+    hit.addEventListener('pointerleave', () => { tip.hidden = true; });
+  });
+  return html`<div class="chart"><div class="legend"><span><i style="background:var(--series-3)"></i>Kâr</span><span><i style="background:var(--bad)"></i>Zarar</span></div>${raw(svg)}<div class="tip" hidden></div></div>`;
+}
+
+function shareBars(items, valueKey, labelFn, fmt = money) {
+  const total = items.reduce((a, it) => a + (Number(it[valueKey]) || 0), 0);
+  const max = Math.max(...items.map((it) => Number(it[valueKey]) || 0), 1);
+  return html`<div class="bars">${items.map((it) => html`<div class="bar-row">
+    <span class="ellipsis" title="${labelFn(it)}">${labelFn(it)}</span>
+    <div class="bar-track"><div class="bar-fill rev" style="width:${(((Number(it[valueKey]) || 0) / max) * 100).toFixed(2)}%"></div></div>
+    <span class="r num">${fmt(it[valueKey])}${total ? html` <span class="muted small">${pct((Number(it[valueKey]) || 0) / total)}</span>` : ''}</span></div>`)}</div>`;
 }
 
 // ------------------------------------------------------------------ sayfalar
@@ -251,10 +306,11 @@ function setHeader(title, subtitle, actions = '') {
   document.title = `${title} · TrendHub`;
 }
 const loading = () => { view().innerHTML = '<div class="skeleton">Yükleniyor…</div>'; };
+const kpi = (label, value, sub = '', cls = '', extra = '') => html`<div class="card kpi"><div class="label">${label} ${extra}</div><div class="value ${cls}">${value}</div>${sub ? html`<div class="sub">${sub}</div>` : ''}</div>`;
 
 // ---- Dashboard
 PAGES.dashboard = {
-  title: 'Genel Bakış', icon: '▦', nav: 'Dashboard',
+  title: 'Genel Bakış', icon: 'dashboard', nav: 'Dashboard',
   async render() {
     const draw = async () => {
       setHeader('Genel Bakış', 'Tüm pazaryerlerinin merkezi özeti', periodSeg(state.period, draw));
@@ -262,23 +318,39 @@ PAGES.dashboard = {
       const d = await api('/api/dashboard', { query: { period: state.period } });
       const s = d.summary, t = s.orders;
       const connected = d.integrations.filter((i) => i.state === 'connected').length;
+      const hasMarketplaceOrders = d.by_marketplace.some((m) => Number(m.orders));
       view().innerHTML = renderVal(html`
         <div class="chips" style="margin-bottom:16px">${d.integrations.map((i) => html`
           <a class="chip" href="#/integrations"><span class="dot ${i.state === 'connected' ? 'good' : i.state === 'error' ? 'bad' : i.state === 'not_connected' ? '' : 'warn'}"></span>${i.name}
           <span class="muted small">${i.state_label}</span></a>`)}</div>
-        ${connected === 0 ? html`<div class="notice info" style="margin-bottom:16px">Henüz bağlı bir pazaryeri yok. Sipariş verisi, <a href="#/integrations">Entegrasyonlar</a> sayfasındaki API bilgileri sunucu ortamına tanımlanıp senkronizasyon çalıştığında görünecek.</div>` : ''}
+        ${connected === 0 ? html`<div class="notice info" style="margin-bottom:16px">Henüz bağlı bir pazaryeri yok. Sipariş verisi, <a href="#/integrations">Entegrasyonlar</a> sayfasındaki API bilgileri sunucuya tanımlanıp senkronizasyon çalıştığında görünecek. Aşağıdaki değerler gerçek kayıtlardan hesaplanır; veri yoksa 0 gösterilir.</div>` : ''}
         <div class="grid grid-4">
-          <div class="card kpi"><div class="label">Ciro</div><div class="value">${money0(t.revenue)}</div><div class="sub">İptaller hariç</div></div>
-          <div class="card kpi"><div class="label">Sipariş</div><div class="value">${num(t.orders)}</div><div class="sub">${t.orders ? `Sepet ort. ${money0(t.revenue / t.orders)}` : 'Dönemde sipariş yok'}</div></div>
-          <div class="card kpi"><div class="label">Net kâr</div><div class="value ${signClass(s.net_profit_after_expenses)}">${money0(s.net_profit_after_expenses)}</div><div class="sub">Dönem giderleri (${money0(s.expenses.total)}) düşülmüş${estimateBadge(t.estimated_orders > 0)}</div></div>
-          <div class="card kpi"><div class="label">Kâr marjı</div><div class="value">${pct(s.margin_after_expenses)}</div><div class="sub">Sipariş marjı: ${pct(s.margin)}</div></div>
+          ${kpi('Bugünkü satış', money0(d.today.revenue), `${num(d.today.orders)} sipariş`)}
+          ${kpi('Toplam ciro', money0(t.revenue), `${date(d.range.from)} – ${date(d.range.to)} · iptaller hariç`)}
+          ${kpi('Tahmini net kâr', money0(s.net_profit_after_expenses), `Marj ${pct(s.margin_after_expenses)} · KDV sonrası ${money0(s.net_profit_after_tax)}`, signClass(s.net_profit_after_expenses), TAHMINI)}
+          ${kpi('Sipariş sayısı', num(t.orders), 'Seçili dönem, iptaller hariç')}
         </div>
-        <div class="grid grid-main mt">
-          <div class="card"><div class="card-head"><div><h2>Günlük ciro ve net kâr</h2><p>${date(d.range.from)} – ${date(d.range.to)}</p></div></div>
-            ${lineChart(d.daily, [{ key: 'revenue', label: 'Ciro', color: 'var(--series-1)' }, { key: 'net_profit', label: 'Net kâr', color: 'var(--series-2)' }])}</div>
-          <div class="card"><div class="card-head"><h2>Kâr dökümü</h2><a href="#/finance" class="small">Finans →</a></div>${profitBars(t, s.expenses.total)}</div>
+        <div class="grid grid-4 mt">
+          ${kpi('Bekleyen sipariş', num(d.pending_orders), 'Yeni · hazırlanıyor · tedarikçide · kargo bekliyor', d.pending_orders ? 'warn-text' : '')}
+          ${kpi('İade', num(d.returns.period), `Dönem içi · toplam ${num(d.returns.open_total)}`, d.returns.period ? 'neg' : '')}
+          ${kpi('Ortalama sipariş tutarı', t.average_order_value === null ? '—' : money(t.average_order_value), 'Ciro / sipariş')}
+          ${kpi('Tahmini KDV', money0(s.tax_estimate), 'Satış KDV − maliyet KDV', '', TAHMINI)}
         </div>
-        <div class="card mt"><div class="card-head"><div><h2>Sipariş durumları</h2><p>Tüm açık kayıtlar · parantez içinde seçili dönem</p></div></div>
+        <div class="grid grid-2 mt">
+          <div class="card"><div class="card-head"><div><h2>Satış grafiği</h2><p>Günlük ciro · ${date(d.range.from)} – ${date(d.range.to)}</p></div></div>
+            ${lineChart(d.daily, [{ key: 'revenue', label: 'Ciro', color: 'var(--series-1)' }])}</div>
+          <div class="card"><div class="card-head"><div><h2>Kâr grafiği ${TAHMINI}</h2><p>Günlük net kâr / zarar</p></div></div>
+            ${barChart(d.daily, 'net_profit', { label: 'Net kâr' })}</div>
+        </div>
+        <div class="grid grid-3 mt">
+          <div class="card"><div class="card-head"><h2>En çok satan ürünler</h2><a href="#/reports" class="small">Raporlar →</a></div>
+            ${d.top_products.length ? shareBars(d.top_products, 'revenue', (p) => `${p.sku} · ${num(p.quantity)} adet`) : empty('Satış yok', 'Seçilen dönemde satılan ürün bulunmuyor.')}</div>
+          <div class="card"><div class="card-head"><h2>Pazaryeri dağılımı</h2></div>
+            ${hasMarketplaceOrders ? shareBars(d.by_marketplace, 'revenue', (m) => `${m.name} · ${num(m.orders)} sip.`) : empty('Veri yok', 'Pazaryeri siparişi geldiğinde ciro dağılımı burada görünür.')}</div>
+          <div class="card"><div class="card-head"><h2>Kâr dökümü ${TAHMINI}</h2><a href="#/finance" class="small">Finans →</a></div>
+            ${profitBars(t, { periodExpenses: s.expenses.total, net: s.net_profit_after_expenses })}</div>
+        </div>
+        <div class="card mt"><div class="card-head"><div><h2>Sipariş durumları</h2><p>Tüm kayıtlar · parantez içinde seçili dönem</p></div></div>
           <div class="status-grid">${d.statuses.map((st) => html`
             <button class="status-tile ${st.code === 'needs_review' && st.count ? 'alert' : ''}" data-status="${st.code}">
               ${statusBadge(st.code, st.label)}<b>${num(st.count)}</b><span class="muted small">(${num(st.period_count)})</span></button>`)}</div></div>
@@ -293,6 +365,7 @@ PAGES.dashboard = {
             ${alertRow(d.alerts.open_errors, 'açık sistem hatası', '#/system', 'bad')}
             ${alertRow(d.queue.failed_24h, 'başarısız iş (24 saat)', '#/system', 'warn')}
             <div class="row nowrap"><span class="dot ${d.alerts.live_workers ? 'good' : 'bad'}"></span>${d.alerts.live_workers ? 'Worker çalışıyor' : 'Worker çalışmıyor — senkronizasyon yapılamaz'}</div>
+            ${!d.alerts.needs_review && !d.alerts.missing_cost_orders && !d.alerts.open_errors && !d.queue.failed_24h ? html`<p class="muted small">Dikkat gerektiren bir durum yok.</p>` : ''}
           </div></div>
         </div>`);
       $$('[data-status]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/orders?status=${b.dataset.status}`; }));
@@ -308,7 +381,7 @@ function alertRow(n, text, href, tone) {
 
 // ---- Siparişler
 PAGES.orders = {
-  title: 'Siparişler', icon: '🛒',
+  title: 'Siparişler', icon: 'orders',
   async render(params) {
     const f = { status: params.get('status') || '', marketplace: params.get('marketplace') || '', q: params.get('q') || '',
       date_from: params.get('date_from') || '', date_to: params.get('date_to') || '', sort: params.get('sort') || 'date_desc',
@@ -361,7 +434,7 @@ async function showOrder(id) {
       <div class="card"><h3>Bilgiler</h3><dl class="kv mt">
         <dt>Sipariş tarihi</dt><dd>${dateTime(o.order_date)}</dd><dt>Müşteri</dt><dd>${o.customer_name || '—'} ${o.customer_city ? `(${o.customer_city})` : ''}</dd>
         <dt>Mağaza</dt><dd>${o.store_name || '—'}</dd><dt>Son senkron</dt><dd>${dateTime(o.last_synced_at)}</dd><dt>Kaynak</dt><dd>${o.source || '—'}</dd></dl></div>
-      <div class="card"><h3>Kârlılık ${estimateBadge(o.finance_is_estimate)}</h3><div class="mt">${profitBars(t)}</div>
+      <div class="card"><h3>Kârlılık ${TAHMINI}</h3><div class="mt">${profitBars({ ...t, discount: o.discount }, { net: o.net_profit, tax: o.tax_estimate, netAfterTax: o.net_profit_after_tax })}</div>
         <p class="small muted">Marj: <b>${pct(o.margin)}</b></p></div>
     </div>
     <div class="card mt"><h3>Ürünler</h3><div class="table-wrap mt"><table><thead><tr><th>SKU / Ürün</th><th class="r">Adet</th><th class="r">Birim fiyat</th><th class="r">Birim maliyet</th><th class="r">Komisyon</th><th class="r">Kargo</th><th class="r">Net</th><th class="r">Marj</th></tr></thead><tbody>
@@ -411,7 +484,7 @@ const productTabs = (active) => html`<div class="seg" role="tablist" style="marg
 const bindProductTabs = () => $$('[data-ptab]').forEach((b) => b.addEventListener('click', () => { location.hash = b.dataset.ptab; }));
 
 PAGES.products = {
-  title: 'Ürün & Stok', icon: '📦',
+  title: 'Ürün & Stok', icon: 'products',
   async render(params) {
     if (params.get('tab') === 'listings') return renderListings(params);
     const f = { q: params.get('q') || '', low_stock: params.get('low_stock') === '1', missing_cost: params.get('missing_cost') === '1' };
@@ -536,7 +609,7 @@ async function costForm(p) {
 
 // ---- Kargo
 PAGES.shipping = {
-  title: 'Kargo', icon: '🚚',
+  title: 'Kargo', icon: 'shipping',
   async render(params) {
     const f = { status: params.get('status') || '', carrier: params.get('carrier') || '', q: params.get('q') || '' };
     setHeader('Kargo', 'Paketler, takip numaraları ve kargo maliyetleri');
@@ -577,7 +650,7 @@ PAGES.shipping = {
 
 // ---- Tedarikçiler
 PAGES.suppliers = {
-  title: 'Tedarikçiler', icon: '🏭',
+  title: 'Tedarikçiler', icon: 'suppliers',
   async render() {
     setHeader('Tedarikçiler', 'Tedarikçi kartları ve tedarikçi siparişleri', can('operator') ? html`<button class="btn btn-primary" id="add-sup">+ Tedarikçi ekle</button>` : '');
     const [sups, sos] = await Promise.all([api('/api/suppliers'), api('/api/supplier-orders', { query: { page_size: 25 } })]);
@@ -623,7 +696,7 @@ PAGES.suppliers = {
 // ---- Finans
 const EXPENSE_LABELS = { advertising: 'Reklam', shipping: 'Kargo', packaging: 'Ambalaj', personnel: 'Personel', rent: 'Kira', software: 'Yazılım', other: 'Diğer' };
 PAGES.finance = {
-  title: 'Finans', icon: '₺',
+  title: 'Finans', icon: 'finance',
   async render() {
     const draw = async () => {
       setHeader('Finans', 'Sipariş ve SKU seviyesinde kârlılık', html`${periodSeg(state.period, draw)}${can('operator') ? html`<button class="btn btn-primary" id="add-exp">+ Gider ekle</button>` : ''}`);
@@ -632,19 +705,25 @@ PAGES.finance = {
         api('/api/finance/expenses', { query: { period: state.period, page_size: 50 } })]);
       const t = f.orders;
       view().innerHTML = renderVal(html`
-        ${t.estimated_orders ? html`<div class="notice warn" style="margin-bottom:16px"><b>${num(t.estimated_orders)}</b> siparişte komisyon, kargo, hizmet bedeli veya ürün maliyeti tahmini ya da eksik. Gerçek tutarları sipariş detayından veya ürün maliyetinden girerek netleştirebilirsiniz.</div>` : ''}
+        <div class="notice warn" style="margin-bottom:16px"><b>TAHMİNİ:</b> Pazaryeri hakediş (settlement) verisi henüz bağlı değil. Komisyon ve hizmet bedeli Ayarlar'daki oranlarla, KDV satış − maliyet KDV'si olarak tahmin edilir. Gerçek tutarları sipariş detayından “Gerçek gider gir” ile ekleyebilirsiniz.${t.estimated_orders ? html` Bu dönemde <b>${num(t.estimated_orders)}</b> siparişte tahmini veya eksik değer var.` : ''}</div>
         <div class="grid grid-4">
-          <div class="card kpi"><div class="label">Ciro</div><div class="value">${money0(t.revenue)}</div><div class="sub">${num(t.orders)} sipariş</div></div>
-          <div class="card kpi"><div class="label">Sipariş giderleri</div><div class="value">${money0(t.total_cost)}</div><div class="sub">Maliyet + kesintiler</div></div>
-          <div class="card kpi"><div class="label">Dönem giderleri</div><div class="value">${money0(f.expenses.total)}</div><div class="sub">Siparişe bağlı olmayan</div></div>
-          <div class="card kpi"><div class="label">Net kâr</div><div class="value ${signClass(f.net_profit_after_expenses)}">${money0(f.net_profit_after_expenses)}</div><div class="sub">Marj ${pct(f.margin_after_expenses)}</div></div>
+          ${kpi('Ciro', money0(t.revenue), `${num(t.orders)} sipariş · ort. ${t.average_order_value === null ? '—' : money(t.average_order_value)}`)}
+          ${kpi('Sipariş giderleri', money0(t.total_cost), 'Maliyet + komisyon + kargo + hizmet + reklam + iade + diğer', '', TAHMINI)}
+          ${kpi('Dönem giderleri', money0(f.expenses.total), 'Siparişe bağlı olmayan')}
+          ${kpi('Net kâr', money0(f.net_profit_after_expenses), `Marj ${pct(f.margin_after_expenses)}`, signClass(f.net_profit_after_expenses), TAHMINI)}
+        </div>
+        <div class="grid grid-4 mt">
+          ${kpi('Tahmini KDV', money0(f.tax_estimate), 'Satış KDV − maliyet KDV (KDV dahil tutarlardan)', '', TAHMINI)}
+          ${kpi('Net kâr (KDV sonrası)', money0(f.net_profit_after_tax), `Marj ${pct(f.margin_after_tax)}`, signClass(f.net_profit_after_tax), TAHMINI)}
+          ${kpi('Satıcı indirimi', money0(t.discount), 'Ciroya yansımış; ayrıca düşülmez')}
+          ${kpi('İade tutarı', money0(t.refund), 'İade edilen siparişlerin cirosu')}
         </div>
         <div class="grid grid-2 mt">
-          <div class="card"><div class="card-head"><div><h2>Kâr / zarar dökümü</h2><p>Ciro − ürün maliyeti − komisyon − hizmet bedeli − kargo − reklam − iade − diğer</p></div></div>${profitBars(t, f.expenses.total)}</div>
+          <div class="card"><div class="card-head"><div><h2>Kâr / zarar dökümü ${TAHMINI}</h2><p>Ciro − ürün maliyeti − komisyon − hizmet bedeli − kargo − reklam − iade − diğer</p></div></div>${profitBars(t, { periodExpenses: f.expenses.total, net: f.net_profit_after_expenses, tax: f.tax_estimate, netAfterTax: f.net_profit_after_tax })}</div>
           <div class="card"><div class="card-head"><h2>Günlük</h2></div>${lineChart(f.daily, [{ key: 'revenue', label: 'Ciro', color: 'var(--series-1)' }, { key: 'net_profit', label: 'Net kâr', color: 'var(--series-2)' }])}</div>
         </div>
-        <div class="card mt"><div class="card-head"><h2>Pazaryerine göre</h2></div><div class="table-wrap"><table><thead><tr><th>Pazaryeri</th><th class="r">Sipariş</th><th class="r">Ciro</th><th class="r">Ürün maliyeti</th><th class="r">Komisyon</th><th class="r">Hizmet</th><th class="r">Kargo</th><th class="r">Reklam</th><th class="r">İade</th><th class="r">Net kâr</th><th class="r">Marj</th></tr></thead><tbody>
-          ${f.by_marketplace.map((m) => html`<tr><td><b>${m.name}</b></td><td class="r num">${num(m.orders)}</td><td class="r num">${money(m.revenue)}</td><td class="r num">${money(m.product_cost)}</td><td class="r num">${money(m.commission)}</td><td class="r num">${money(m.service_fee)}</td><td class="r num">${money(m.shipping)}</td><td class="r num">${money(m.advertising)}</td><td class="r num">${money(m.refund)}</td><td class="r num ${signClass(m.net_profit)}">${money(m.net_profit)}</td><td class="r num">${pct(m.margin)}</td></tr>`)}
+        <div class="card mt"><div class="card-head"><h2>Pazaryerine göre</h2></div><div class="table-wrap"><table><thead><tr><th>Pazaryeri</th><th class="r">Sipariş</th><th class="r">Ciro</th><th class="r">Ürün maliyeti</th><th class="r">Komisyon</th><th class="r">Hizmet</th><th class="r">Kargo</th><th class="r">Reklam</th><th class="r">İade</th><th class="r">Net kâr</th><th class="r">Tahmini KDV</th><th class="r">Marj</th></tr></thead><tbody>
+          ${f.by_marketplace.map((m) => html`<tr><td><b>${m.name}</b></td><td class="r num">${num(m.orders)}</td><td class="r num">${money(m.revenue)}</td><td class="r num">${money(m.product_cost)}</td><td class="r num">${money(m.commission)}</td><td class="r num">${money(m.service_fee)}</td><td class="r num">${money(m.shipping)}</td><td class="r num">${money(m.advertising)}</td><td class="r num">${money(m.refund)}</td><td class="r num ${signClass(m.net_profit)}">${money(m.net_profit)}</td><td class="r num">${money(m.tax_estimate)}</td><td class="r num">${pct(m.margin)}</td></tr>`)}
         </tbody></table></div></div>
         <div class="card mt"><div class="card-head"><div><h2>Dönem giderleri</h2><p>Reklam, ambalaj, personel gibi siparişe bağlı olmayan giderler. SKU girilen reklam giderleri SKU raporuna yansır.</p></div></div>
           ${ex.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Kategori</th><th>Açıklama</th><th>Pazaryeri</th><th>SKU</th><th class="r">Tutar</th><th></th></tr></thead><tbody>
@@ -681,7 +760,7 @@ async function expenseForm() {
 
 // ---- Raporlar
 PAGES.reports = {
-  title: 'Raporlar', icon: '📊',
+  title: 'Raporlar', icon: 'reports',
   async render() {
     let sortKey = 'net_profit', dir = -1;
     const draw = async () => {
@@ -693,10 +772,10 @@ PAGES.reports = {
       const table = () => {
         const sorted = [...items].sort((a, b) => ((a[sortKey] ?? -Infinity) > (b[sortKey] ?? -Infinity) ? 1 : -1) * dir);
         const th = (k, l, r = true) => html`<th class="${r ? 'r' : ''}"><a href="#" data-sort="${k}">${l}${sortKey === k ? (dir < 0 ? ' ↓' : ' ↑') : ''}</a></th>`;
-        $('#sku-table').innerHTML = renderVal(items.length ? html`<div class="table-wrap"><table><thead><tr>${th('sku', 'SKU', false)}${th('quantity', 'Adet')}${th('revenue', 'Ciro')}${th('product_cost', 'Maliyet')}${th('commission', 'Komisyon')}${th('shipping', 'Kargo')}${th('advertising', 'Reklam')}${th('refund', 'İade')}${th('return_rate', 'İade oranı')}${th('net_profit', 'Net kâr')}${th('margin', 'Marj')}</tr></thead><tbody>
+        $('#sku-table').innerHTML = renderVal(items.length ? html`<div class="table-wrap"><table><thead><tr>${th('sku', 'SKU', false)}${th('quantity', 'Adet')}${th('revenue', 'Ciro')}${th('product_cost', 'Maliyet')}${th('commission', 'Komisyon')}${th('shipping', 'Kargo')}${th('advertising', 'Reklam')}${th('refund', 'İade')}${th('return_rate', 'İade oranı')}${th('net_profit', 'Net kâr')}${th('tax_estimate', 'Tahmini KDV')}${th('margin', 'Marj')}</tr></thead><tbody>
           ${sorted.map((r) => html`<tr><td><b>${r.sku}</b><span class="ellipsis small muted">${r.product_name || ''}</span>${r.missing_cost ? html`<span class="badge plain tone-warn">Maliyet eksik</span>` : ''}</td>
             <td class="r num">${num(r.quantity)}</td><td class="r num">${money(r.revenue)}</td><td class="r num">${money(r.product_cost)}</td><td class="r num">${money(r.commission)}</td><td class="r num">${money(r.shipping)}</td><td class="r num">${money(r.advertising)}</td><td class="r num">${money(r.refund)}</td><td class="r num">${pct(r.return_rate)}</td>
-            <td class="r num ${signClass(r.net_profit)}">${money(r.net_profit)}${estimateBadge(r.is_estimate)}</td><td class="r num">${pct(r.margin)}</td></tr>`)}</tbody></table></div>` : empty('Veri yok', 'Seçilen dönemde satılan ürün yok.'));
+            <td class="r num ${signClass(r.net_profit)}">${money(r.net_profit)}${estimateBadge(r.is_estimate)}</td><td class="r num">${money(r.tax_estimate)}</td><td class="r num">${pct(r.margin)}</td></tr>`)}</tbody></table></div>` : empty('Veri yok', 'Seçilen dönemde satılan ürün yok.'));
         $$('[data-sort]').forEach((a) => a.addEventListener('click', (e) => {
           e.preventDefault(); if (sortKey === a.dataset.sort) dir = -dir; else { sortKey = a.dataset.sort; dir = -1; } table();
         }));
@@ -713,7 +792,7 @@ PAGES.reports = {
 
 // ---- Entegrasyonlar
 PAGES.integrations = {
-  title: 'Entegrasyonlar', icon: '⚙',
+  title: 'Entegrasyonlar', icon: 'integrations',
   async render() {
     setHeader('Entegrasyonlar', 'Pazaryeri bağlantıları ve senkronizasyon');
     const d = await api('/api/integrations');
@@ -751,7 +830,7 @@ const jobBadge = (s) => { const [l, t] = JOB_LABELS[s] || [s || '—', '']; retu
 
 // ---- Sistem / Hatalar
 PAGES.system = {
-  title: 'Sistem / Hatalar', icon: '⚠', nav: 'Sistem / Hatalar',
+  title: 'Sistem / Hatalar', icon: 'system', nav: 'Sistem / Hatalar',
   async render() {
     setHeader('Sistem / Hatalar', 'Sağlık durumu, iş kuyruğu, hatalar ve denetim kaydı');
     const [h, jobs, events] = await Promise.all([api('/api/system/health'), api('/api/system/jobs', { query: { page_size: 20 } }), api('/api/system/events', { query: { page_size: 50 } })]);
@@ -759,10 +838,18 @@ PAGES.system = {
     view().innerHTML = renderVal(html`
       <div class="grid grid-4">
         <div class="card kpi"><div class="label">Genel durum</div><div class="value">${h.status === 'healthy' ? html`<span class="pos">Sağlıklı</span>` : html`<span class="neg">Dikkat</span>`}</div><div class="sub">Şema: <code>${h.database.migration || 'bilinmiyor'}</code></div></div>
-        <div class="card kpi"><div class="label">Worker</div><div class="value ${h.worker_alive ? 'pos' : 'neg'}">${h.worker_alive ? 'Çalışıyor' : 'Yok'}</div><div class="sub">${h.workers[0] ? 'Son sinyal ' + dateTime(h.workers[0].last_seen_at) : 'Hiç sinyal alınmadı'}</div></div>
+        <div class="card kpi"><div class="label">Worker</div><div class="value ${h.worker_alive ? 'pos' : 'neg'}">${h.worker_alive ? 'Çalışıyor' : 'Yok'}</div><div class="sub">${h.last_heartbeat_at ? 'Son heartbeat ' + dateTime(h.last_heartbeat_at) : 'Hiç heartbeat alınmadı'}</div></div>
         <div class="card kpi"><div class="label">Kuyruk</div><div class="value">${num(h.queue.queued)} <span class="small muted">bekliyor</span></div><div class="sub">${num(h.queue.running)} çalışıyor · ${num(h.queue.succeeded_24h)} başarılı (24s)</div></div>
         <div class="card kpi"><div class="label">Açık hata</div><div class="value ${h.open_events.errors ? 'neg' : ''}">${num(h.open_events.errors)}</div><div class="sub">${num(h.open_events.warnings)} uyarı · ${num(h.queue.failed_24h)} başarısız iş (24s)</div></div>
       </div>
+      <div class="card mt"><div class="card-head"><div><h2>Pazaryeri bağlantıları</h2><p>Salt okunur · pazaryeri yazma: ${h.config.connector_write_enabled ? 'AÇIK' : 'kapalı'} · senkron aralığı ${h.config.sync_interval_minutes} dk</p></div><a class="small" href="#/integrations">Entegrasyonlar →</a></div>
+        <div class="table-wrap"><table><thead><tr><th>Pazaryeri</th><th>Durum</th><th>Son senkron</th><th>Son başarılı iş</th><th>Son hata</th><th class="r">Başarısız (24s)</th></tr></thead><tbody>
+        ${h.connectors.map((c) => html`<tr><td><b>${c.name}</b></td><td><span class="badge ${{ connected: 'tone-good', error: 'tone-bad', not_connected: '' }[c.state] ?? 'tone-warn'}">${c.state_label}</span></td>
+          <td>${dateTime(c.last_sync_at)}</td><td>${dateTime(c.last_success_at)}</td><td>${dateTime(c.last_failure_at)}</td><td class="r num ${c.failed_24h ? 'neg' : ''}">${num(c.failed_24h)}</td></tr>`)}</tbody></table></div></div>
+      <div class="card mt"><div class="card-head"><h2>Worker'lar</h2></div>
+        ${h.workers.length ? html`<div class="table-wrap"><table><thead><tr><th>Worker</th><th>Başlangıç</th><th>Son heartbeat</th><th>Durum</th><th>Çalışan iş</th></tr></thead><tbody>
+        ${h.workers.map((w) => html`<tr><td><code>${w.worker_id}</code></td><td>${dateTime(w.started_at)}</td><td>${dateTime(w.last_seen_at)}</td><td>${w.alive ? html`<span class="badge tone-good">Canlı</span>` : html`<span class="badge">Sinyal yok</span>`}</td><td>${w.current_job_id ? '#' + w.current_job_id : '—'}</td></tr>`)}</tbody></table></div>`
+          : empty('Worker yok', 'Worker servisi çalıştığında burada heartbeat görünür. Senkronizasyon worker olmadan çalışmaz.')}</div>
       <div class="card mt"><div class="card-head"><h2>Hatalar ve uyarılar</h2></div>
         ${events.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Son</th><th>Seviye</th><th>Kaynak</th><th>Mesaj</th><th class="r">Tekrar</th><th></th></tr></thead><tbody>
         ${events.items.map((e) => html`<tr><td>${dateTime(e.last_occurred_at)}</td><td><span class="badge ${e.level === 'warning' ? 'tone-warn' : e.level === 'info' ? 'tone-info' : 'tone-bad'}">${{ info: 'Bilgi', warning: 'Uyarı', error: 'Hata', critical: 'Kritik' }[e.level]}</span></td>
@@ -781,11 +868,10 @@ PAGES.system = {
 
 // ---- Ayarlar
 PAGES.settings = {
-  title: 'Ayarlar', icon: '☰',
+  title: 'Ayarlar', icon: 'settings',
   async render() {
-    setHeader('Ayarlar', 'Finans varsayılanları, kullanıcılar ve hesap');
+    setHeader('Ayarlar', 'Finans varsayılanları ve hesap');
     const s = await api('/api/settings');
-    const users = can('admin') ? await api('/api/users') : null;
     const input = (it) => {
       const dis = can('admin') ? '' : 'disabled';
       if (it.type === 'bool') return html`<label class="check"><input type="checkbox" name="${it.key}" ${raw(it.value ? 'checked' : '')} ${raw(dis)}>${it.label}</label>`;
@@ -794,20 +880,20 @@ PAGES.settings = {
     };
     view().innerHTML = renderVal(html`
       <div class="grid grid-2">
-        <form class="card" id="set-form"><div class="card-head"><div><h2>Finans ve stok varsayılanları</h2><p>Pazaryeri gerçek tutarı bildirmediğinde kullanılan tahminler. Tahmini tutarlar raporlarda “Tahmini” olarak işaretlenir.</p></div></div>
+        <form class="card" id="set-form"><div class="card-head"><div><h2>Finans ve stok varsayılanları</h2><p>Pazaryeri gerçek tutarı bildirmediğinde kullanılan tahminler. Bu değerlerle hesaplanan tutarlar raporlarda “TAHMİNİ” olarak işaretlenir.</p></div></div>
           <div class="form-grid">${s.items.map((it) => html`<div class="${it.type === 'bool' ? 'full' : ''}">${input(it)}</div>`)}</div>
           ${can('admin') ? html`<p class="form-error"></p><button class="btn btn-primary mt" type="submit">Kaydet</button>` : html`<p class="muted small mt">Ayarları yalnızca yöneticiler değiştirebilir.</p>`}</form>
-        <form class="card" id="pw-form"><div class="card-head"><h2>Parola değiştir</h2></div><div class="stack">
-          <label>Mevcut parola<input type="password" name="current_password" autocomplete="current-password" required></label>
-          <label>Yeni parola (en az 12 karakter)<input type="password" name="new_password" autocomplete="new-password" minlength="12" required></label>
-          <p class="form-error"></p><button class="btn btn-primary" type="submit">Parolayı değiştir</button><p class="small muted">Diğer cihazlardaki oturumlar kapatılır.</p></div></form>
-      </div>
-      ${users ? html`<div class="card mt"><div class="card-head"><h2>Kullanıcılar</h2><button class="btn btn-sm btn-primary" id="add-user">+ Kullanıcı</button></div>
-        <div class="table-wrap"><table><thead><tr><th>Kullanıcı</th><th>Ad</th><th>Rol</th><th>Durum</th><th>Son giriş</th><th></th></tr></thead><tbody>
-        ${users.map((u) => html`<tr><td><b>${u.username}</b></td><td>${u.full_name || ''}</td><td>${ROLE_LABELS[u.role]}</td>
-          <td>${u.is_active ? (u.locked ? html`<span class="badge tone-warn">Kilitli</span>` : html`<span class="badge tone-good">Aktif</span>`) : html`<span class="badge">Pasif</span>`}</td><td>${dateTime(u.last_login_at)}</td>
-          <td class="r">${u.id !== state.user.id ? html`<button class="btn btn-sm" data-user="${u.id}">Düzenle</button>` : html`<span class="muted small">Siz</span>`}</td></tr>`)}</tbody></table></div>
-        <p class="small muted">Roller: <b>İzleyici</b> yalnızca görüntüler · <b>Operatör</b> sipariş durumu, maliyet, gider ve senkronizasyon işlemleri yapar · <b>Yönetici</b> ayarları ve kullanıcıları yönetir.</p></div>` : ''}`);
+        <div class="stack">
+          <form class="card" id="pw-form"><div class="card-head"><h2>Parola değiştir</h2></div><div class="stack">
+            <label>Mevcut parola<input type="password" name="current_password" autocomplete="current-password" required></label>
+            <label>Yeni parola (en az 12 karakter)<input type="password" name="new_password" autocomplete="new-password" minlength="12" required></label>
+            <p class="form-error"></p><button class="btn btn-primary" type="submit">Parolayı değiştir</button><p class="small muted">Diğer cihazlardaki oturumlar kapatılır.</p></div></form>
+          <div class="card"><div class="card-head"><h2>Hesap</h2></div><dl class="kv">
+            <dt>Kullanıcı</dt><dd>${state.user.username}</dd><dt>Rol</dt><dd>${ROLE_LABELS[state.user.role]}</dd>
+            <dt>Pazaryeri yazma</dt><dd>Kapalı — TrendHub pazaryerlerine yalnızca okuma yapar</dd></dl>
+            ${can('admin') ? html`<a class="btn btn-sm mt" href="#/users">Kullanıcıları yönet →</a>` : ''}</div>
+        </div>
+      </div>`);
     $('#set-form').addEventListener('submit', (e) => {
       e.preventDefault();
       submitting(e.target, async () => {
@@ -825,14 +911,36 @@ PAGES.settings = {
       e.preventDefault();
       submitting(e.target, async () => { await api('/api/auth/change-password', { method: 'POST', body: formData(e.target) }); e.target.reset(); toast('Parola değiştirildi'); });
     });
+  },
+};
+
+// ---- Kullanıcılar (yalnızca yönetici)
+PAGES.users = {
+  title: 'Kullanıcılar', icon: 'users', admin: true,
+  async render() {
+    setHeader('Kullanıcılar', 'Panel erişimi ve roller', can('admin') ? html`<button class="btn btn-primary" id="add-user">+ Kullanıcı ekle</button>` : '');
+    if (!can('admin')) { view().innerHTML = renderVal(empty('Yetkiniz yok', 'Kullanıcı yönetimi yalnızca yöneticilere açıktır.')); return; }
+    const users = await api('/api/users');
+    view().innerHTML = renderVal(html`<div class="card">
+      <div class="table-wrap"><table><thead><tr><th>Kullanıcı</th><th>Ad</th><th>Rol</th><th>Durum</th><th>Son giriş</th><th>Oluşturma</th><th></th></tr></thead><tbody>
+      ${users.map((u) => html`<tr><td><b>${u.username}</b></td><td>${u.full_name || '—'}</td><td>${ROLE_LABELS[u.role]}</td>
+        <td>${u.is_active ? (u.locked ? html`<span class="badge tone-warn">Kilitli</span>` : html`<span class="badge tone-good">Aktif</span>`) : html`<span class="badge">Pasif</span>`}</td>
+        <td>${dateTime(u.last_login_at)}</td><td>${date(u.created_at)}</td>
+        <td class="r">${u.id !== state.user.id ? html`<button class="btn btn-sm" data-user="${u.id}">Düzenle</button>` : html`<span class="muted small">Siz</span>`}</td></tr>`)}</tbody></table></div></div>
+      <div class="grid grid-3 mt">
+        <div class="card"><h3>İzleyici</h3><p class="small muted">Tüm ekranları görüntüler; değişiklik yapamaz.</p></div>
+        <div class="card"><h3>Operatör</h3><p class="small muted">Sipariş durumu, ürün maliyeti, gider, tedarikçi ve senkronizasyon işlemleri.</p></div>
+        <div class="card"><h3>Yönetici</h3><p class="small muted">Operatör yetkileri + ayarlar, kullanıcılar ve denetim kaydı.</p></div>
+      </div>
+      <p class="small muted mt">Hesap 5 hatalı girişte 15 dakika kilitlenir. Parola sıfırlandığında veya kullanıcı pasifleştirildiğinde açık oturumları kapatılır.</p>`);
     const userForm = (u) => {
       const body = openModal(html`<h2>${u ? `Kullanıcı · ${u.username}` : 'Yeni kullanıcı'}</h2><form class="stack" id="uform">
-        ${u ? '' : html`<label>Kullanıcı adı<input name="username" required minlength="3" maxlength="50" pattern="[A-Za-z0-9_.\\-]+"></label>`}
+        ${u ? '' : html`<label>Kullanıcı adı<input name="username" required minlength="3" maxlength="50" pattern="[A-Za-z0-9_.\\-]+" autocomplete="off"></label>`}
         <label>Ad soyad<input name="full_name" maxlength="100" value="${u?.full_name || ''}"></label>
         <label>Rol<select name="role">${Object.entries(ROLE_LABELS).map(([v, l]) => html`<option value="${v}" ${raw(u?.role === v ? 'selected' : '')}>${l}</option>`)}</select></label>
         ${u ? html`<label class="check"><input type="checkbox" name="is_active" value="1" ${raw(u.is_active ? 'checked' : '')}>Aktif</label>` : ''}
-        <label>${u ? 'Yeni parola (boş bırakılırsa değişmez)' : 'Parola (en az 12 karakter)'}<input type="password" name="password" autocomplete="new-password" ${raw(u ? '' : 'required minlength="12"')}></label>
-        <p class="form-error"></p><button class="btn btn-primary" type="submit">Kaydet</button></form>`);
+        <label>${u ? 'Yeni parola (boş bırakılırsa değişmez; kilit de kaldırılır)' : 'Parola (en az 12 karakter)'}<input type="password" name="password" autocomplete="new-password" ${raw(u ? '' : 'required minlength="12"')}></label>
+        <p class="form-error"></p><div class="row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>`);
       $('#uform', body).addEventListener('submit', (e) => {
         e.preventDefault();
         submitting(e.target, async () => {
@@ -844,19 +952,34 @@ PAGES.settings = {
       });
     };
     $('#add-user')?.addEventListener('click', () => userForm());
-    $$('[data-user]').forEach((b) => b.addEventListener('click', () => userForm(users.find((u) => String(u.id) === b.dataset.user))));
+    $$('[data-user]').forEach((b) => b.addEventListener('click', () => userForm(users.find((x) => String(x.id) === b.dataset.user))));
   },
 };
 
 // ------------------------------------------------------------------- yönlendirme
-const NAV = ['dashboard', 'orders', 'products', 'shipping', 'suppliers', 'finance', 'reports', 'integrations', 'system', 'settings'];
+const NAV = ['dashboard', 'orders', 'products', 'shipping', 'suppliers', 'finance', 'reports', 'integrations', 'system', 'settings', 'users'];
+// Sade çizgi ikonlar (24x24, currentColor)
+const ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  orders: '<path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6.2"/><circle cx="10" cy="20" r="1.3"/><circle cx="18" cy="20" r="1.3"/>',
+  products: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+  shipping: '<path d="M3 6h11v10H3zM14 10h4l3 3v3h-7"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>',
+  suppliers: '<path d="M3 21V10l6 3V10l6 3V6l6-3v18z"/><path d="M7 17h2M12 17h2M17 17h2"/>',
+  finance: '<path d="M8 4v16M8 9l7-3M8 13l7-3M5 20h9a5 5 0 0 0 5-5"/>',
+  reports: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  integrations: '<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/>',
+  system: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
+};
+const icon = (name) => raw(`<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`);
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
   const [path, qs] = h.split('?');
   return { page: PAGES[path] ? path : 'dashboard', params: new URLSearchParams(qs || '') };
 }
 function renderNav(active) {
-  $('#nav').innerHTML = renderVal(NAV.map((k) => html`<a href="#/${k}" class="${k === active ? 'active' : ''}" ${raw(k === active ? 'aria-current="page"' : '')}><span class="ico" aria-hidden="true">${PAGES[k].icon}</span>${PAGES[k].nav || PAGES[k].title}</a>`));
+  $('#nav').innerHTML = renderVal(NAV.filter((k) => !PAGES[k].admin || can('admin')).map((k) => html`<a href="#/${k}" class="${k === active ? 'active' : ''}" ${raw(k === active ? 'aria-current="page"' : '')}><span class="ico">${icon(PAGES[k].icon)}</span>${PAGES[k].nav || PAGES[k].title}</a>`));
 }
 let routeSeq = 0;
 async function route() {
