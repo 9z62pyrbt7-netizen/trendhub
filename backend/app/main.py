@@ -4,9 +4,11 @@
 (docker-compose'daki `migrate` servisi) ile uygulanır.
 """
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -64,10 +66,47 @@ def create_app() -> FastAPI:
             response.headers.setdefault("Cache-Control", "no-store")
         return response
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError):
+        # Kullanıcıya sade Türkçe mesaj; teknik ayrıntı "Gelişmiş detay" için ayrı alanda.
+        # Girilen değerler (parola/secret olabilir) yanıta KONMAZ.
+        errors = [{"field": ".".join(str(x) for x in e.get("loc", [])[1:]), "message": _tr_validation(e)}
+                  for e in exc.errors()]
+        fields = ", ".join(sorted({e["field"] for e in errors if e["field"]}))
+        return JSONResponse(status_code=422, content={
+            "detail": "Girilen bilgilerde hata var" + (f": {fields}" if fields else "") + ".",
+            "errors": errors,
+            "technical": "; ".join(f"{e['field'] or 'istek'}: {e['message']}" for e in errors)})
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception):
+        ref = uuid.uuid4().hex[:10]
+        log.exception("Beklenmeyen hata (ref %s) %s %s", ref, request.method, request.url.path)
+        return JSONResponse(status_code=500, content={
+            "detail": "Beklenmeyen bir hata oluştu. İşlem tamamlanmadı; lütfen tekrar deneyin.",
+            "technical": f"Hata referansı: {ref} ({exc.__class__.__name__}). Ayrıntı sunucu kayıtlarında."})
+
     for r in (auth.router, analytics.router, orders.router, catalog.router, suppliers.router,
               transfer.router, integrations.router, system.router, alerts.router, ads.router):
         app.include_router(r)
     return app
+
+
+_TR_MESSAGES = {
+    "missing": "zorunlu alan", "string_too_short": "çok kısa", "string_too_long": "çok uzun",
+    "string_pattern_mismatch": "geçersiz biçim", "int_parsing": "tam sayı olmalı", "float_parsing": "sayı olmalı",
+    "decimal_parsing": "sayı olmalı", "greater_than": "daha büyük olmalı", "greater_than_equal": "çok küçük",
+    "less_than_equal": "çok büyük", "less_than": "çok büyük", "date_from_datetime_parsing": "geçersiz tarih",
+    "date_parsing": "geçersiz tarih", "bool_parsing": "evet/hayır olmalı", "too_short": "en az bir değer seçin",
+    "too_long": "çok fazla değer", "json_invalid": "geçersiz istek", "value_error": "geçersiz değer",
+    "enum": "geçersiz seçim", "list_type": "liste olmalı",
+}
+
+
+def _tr_validation(e: dict) -> str:
+    if e.get("type") == "value_error":
+        return str(e.get("msg", "")).removeprefix("Value error, ") or "geçersiz değer"
+    return _TR_MESSAGES.get(e.get("type", ""), "geçersiz değer")
 
 
 app = create_app()

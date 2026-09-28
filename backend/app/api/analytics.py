@@ -14,7 +14,7 @@ from ..connectors.registry import all_connectors
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, finance_editor, operator, viewer
 from ..domain import order_status as S
-from ..services import jobs
+from ..services import app_settings, jobs
 from ..services.audit import log_audit
 from .suppliers import supplier_overview
 from .common import DateRange, Page, not_found, paged
@@ -153,10 +153,36 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
                              AND o.internal_status <> 'cancelled'
          GROUP BY m.id, m.code, m.name ORDER BY m.id
     """, **rng.params())
+    from .ads import spend_total
+    from ..services.alerts import summary as alert_summary
+    today_rng = DateRange(period="today", date_from=None, date_to=None)
+    most_profitable = rows(conn, """
+        SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, MAX(i.product_name) AS product_name,
+               SUM(i.quantity) AS quantity,
+               SUM(i.unit_price * i.quantity - COALESCE(i.unit_cost, 0) * i.quantity - COALESCE(i.commission, 0)
+                   - COALESCE(i.shipping_cost, 0) - COALESCE(i.service_fee, 0) - COALESCE(i.refund_amount, 0)
+                   - COALESCE(i.other_cost, 0)) AS profit
+          FROM order_items i JOIN orders o ON o.id = i.order_id
+         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status NOT IN ('cancelled', 'returned')
+         GROUP BY 1 HAVING SUM(COALESCE(i.unit_cost, 0)) > 0 ORDER BY profit DESC NULLS LAST LIMIT 5
+    """, **rng.params())
+    threshold = int(app_settings.get(conn, "alerts.critical_stock_threshold", 2))
+    critical_stock = rows(conn, """
+        SELECT p.id, p.sku, p.name, p.stock FROM products p
+         WHERE p.is_active AND COALESCE(p.stock, 0) <= :th
+           AND EXISTS (SELECT 1 FROM marketplace_listings l WHERE l.product_id = p.id
+                        OR (p.barcode IS NOT NULL AND p.barcode <> '' AND l.barcode = p.barcode))
+         ORDER BY p.stock NULLS FIRST, p.name LIMIT 10""", th=threshold)
     return {
         "range": rng.as_dict(),
         "summary": summary(conn, rng),
-        "today": {"orders": today["orders"], "revenue": today["revenue"], "net_profit": today["net_profit"]},
+        "today": {"orders": today["orders"], "revenue": today["revenue"], "net_profit": today["net_profit"],
+                  "ad_spend": spend_total(conn, today_rng)},
+        "ad_spend": spend_total(conn, rng),
+        "alert_summary": alert_summary(conn),
+        "most_profitable": most_profitable,
+        "critical_stock": critical_stock,
+        "critical_stock_threshold": threshold,
         "pending_orders": pending,
         "returns": {"period": period_status.get(S.RETURNED, 0), "open_total": status_counts.get(S.RETURNED, 0)},
         "top_products": top_products,

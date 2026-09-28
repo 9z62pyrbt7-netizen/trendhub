@@ -390,3 +390,6 @@ td .price-in, td .cat-in { min-height: 32px; padding: 4px 8px; }
 .range-in { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 .range-in input { max-width: 150px; }
 table.statement tr.total td { font-weight: 700; border-top: 2px solid var(--border); }
+details.adv { margin-top: 6px; font-size: 12px; }
+details.adv summary { cursor: pointer; opacity: .8; }
+details.adv code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }

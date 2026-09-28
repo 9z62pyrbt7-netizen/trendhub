@@ -13,7 +13,8 @@ from .fields import FIELD_NAMES, FIELD_TYPES, REQUIRED_FIELDS
 
 _NUM_CLEAN = re.compile(r"[^\d,.\-]")
 MAX_TEXT = {"name": 500, "description": 20000, "category": 500, "brand": 200, "supplier_sku": 200,
-            "barcode": 100, "model_code": 200, "currency": 10}
+            "barcode": 100, "model_code": 200, "currency": 10,
+            "color": 100, "variant": 200}
 
 
 def parse_decimal(value) -> Decimal | None:

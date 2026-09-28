@@ -48,8 +48,10 @@ function localSet(k, v) { try { localStorage.setItem(k, v); } catch { /* yok say
 
 // ------------------------------------------------------------------------ API
 class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, technical = null) { super(message); this.status = status; this.technical = technical; }
 }
+// Sade mesaj + (varsa) teknik ayrıntı "Gelişmiş detay" altında
+const errorView = (e) => html`${e.message || 'Beklenmeyen hata'}${e.technical ? html`<details class="adv"><summary>Gelişmiş detay</summary><code>${e.technical}</code></details>` : ''}`;
 async function api(path, { method = 'GET', body, query, rawBody } = {}) {
   let url = path;
   if (query) {
@@ -76,20 +78,23 @@ async function api(path, { method = 'GET', body, query, rawBody } = {}) {
   if (!res.ok) {
     let msg = typeof data === 'object' && data ? data.detail : data;
     if (Array.isArray(msg)) msg = msg.map((d) => `${(d.loc || []).slice(1).join('.')}: ${d.msg}`).join('; ');
-    throw new ApiError(res.status, msg || `Hata (${res.status})`);
+    const friendly = { 403: 'Bu işlem için yetkiniz yok.', 404: 'Kayıt bulunamadı.', 413: 'Dosya çok büyük.', 429: 'Çok fazla deneme. Biraz bekleyip tekrar deneyin.', 502: 'Sunucuya şu an ulaşılamıyor.', 503: 'Servis geçici olarak kullanılamıyor.', 504: 'Sunucu zamanında yanıt vermedi.' };
+    if (typeof msg === 'string' && /^\s*</.test(msg)) msg = null;   // HTML hata sayfası kullanıcıya gösterilmez
+    const technical = (typeof data === 'object' && data && data.technical) || (msg ? null : `HTTP ${res.status}`);
+    throw new ApiError(res.status, msg || friendly[res.status] || `İşlem tamamlanamadı (hata ${res.status}).`, technical);
   }
   return data;
 }
 
 // --------------------------------------------------------------- arayüz öğeleri
-function toast(message, bad = false) {
+function toast(message, bad = false, technical = null) {
   const el = document.createElement('div');
   el.className = 'toast' + (bad ? ' bad' : '');
-  el.textContent = message;
+  if (technical) el.innerHTML = renderVal(errorView({ message, technical })); else el.textContent = message;
   $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), bad ? 6000 : 3500);
+  setTimeout(() => el.remove(), bad ? (technical ? 12000 : 6000) : 3500);
 }
-const fail = (e) => { if (e.status !== 401) toast(e.message || 'Beklenmeyen hata', true); };
+const fail = (e) => { if (e.status !== 401) toast(e.message || 'Beklenmeyen hata', true, e.technical); };
 
 let lastFocus = null;
 function openLayer(id, content) {
@@ -177,7 +182,7 @@ async function submitting(form, fn) {
   const err = form.querySelector('.form-error');
   if (err) err.textContent = '';
   if (btn) btn.disabled = true;
-  try { await fn(); } catch (e) { if (err) err.textContent = e.message; else fail(e); } finally { if (btn) btn.disabled = false; }
+  try { await fn(); } catch (e) { if (err) err.innerHTML = renderVal(errorView(e)); else fail(e); } finally { if (btn) btn.disabled = false; }
 }
 
 // ---------------------------------------------------------------- grafik (SVG)
@@ -1975,7 +1980,7 @@ async function route() {
     await PAGES[page].render(params);
   } catch (e) {
     if (seq !== routeSeq || e.status === 401) return;
-    view().innerHTML = renderVal(html`<div class="notice bad">Sayfa yüklenemedi: ${e.message}</div>`);
+    view().innerHTML = renderVal(html`<div class="notice bad">Sayfa yüklenemedi: ${errorView(e)}</div>`);
   }
 }
 const refresh = () => route();
