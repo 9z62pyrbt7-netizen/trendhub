@@ -387,3 +387,6 @@ td .price-in, td .cat-in { min-height: 32px; padding: 4px 8px; }
 .gate-list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .gate-list li.no { background: var(--bad-soft); }
 .gate-list li.ok { background: var(--good-soft); }
+.range-in { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.range-in input { max-width: 150px; }
+table.statement tr.total td { font-weight: 700; border-top: 2px solid var(--border); }
