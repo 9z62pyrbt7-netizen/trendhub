@@ -177,6 +177,16 @@ kar_marji = net_kar / ciro
 * **Dönem giderleri** (`expenses`): reklam, ambalaj, personel gibi giderler dönem
   kârından düşülür. `sku` girilmiş reklam giderleri SKU raporuna yansır.
 * **Legacy kayıtlar:** kalemi olmayan eski siparişlerin tutarlarına **dokunulmaz**.
+* **Tahmini KDV (vergi):** kalem bazında `(net satış − ürün maliyeti)` içindeki KDV,
+  yani `tutar × r / (100 + r)`. Oran önceliği: kalem `vat_rate` > ürün `vat_rate` > %20.
+  Tutarlar KDV dahil kabul edilir; iptal/iade edilen satışta 0 alınır. "Net kâr (KDV sonrası)" =
+  net kâr − tahmini KDV. Beyanname yerine geçmez; arayüzde **TAHMİNİ** olarak işaretlenir.
+* **İndirim:** satıcının üstlendiği indirim (`lineSellerDiscount`) bilgi olarak gösterilir.
+  Birim fiyata zaten yansıdığı için ayrıca düşülmez. Trendyol'un üstlendiği indirim satıcı gideri değildir.
+* **Decimal:** tüm hesaplar `Decimal`/PostgreSQL `NUMERIC` ile yapılır; dashboard, finans ve
+  rapor toplamları da Decimal olarak taşınır. Sayıya dönüşüm yalnızca JSON çıktısında olur.
+* Pazaryeri hakediş verisi bağlanmadığı sürece finans yanıtları `is_estimate: true` taşır ve
+  panel tüm tahmini değerleri **TAHMİNİ** rozetiyle gösterir.
 
 ## 8. Connector mimarisi
 
@@ -197,7 +207,7 @@ Her connector bağımsızdır. Birinin hatası diğerini etkilemez ve her iş ay
 
 | Connector | Durum |
 |---|---|
-| Trendyol | **Sipariş okuma:** sayfalama, 14 günlük pencereler, paket birleştirme, günlük 60 günlük derin tarama. **İlan okuma:** ürün filtreleme servisi → `marketplace_listings`. Alan eşlemesi dokümantasyona göre yapıldı; **canlı hesapla doğrulanmadı.** |
+| Trendyol | **Sipariş okuma (Order V2):** `GET /integration/order/sellers/{id}/v2/orders` (15.10.2026'dan itibaren zorunlu; 404 dönerse bir kez v1'e düşer). Sayfalama, 14 günlük pencereler, en fazla 30 gün geriye (servis sınırı: 1 ay, 10.000 kayıt, 1000 istek/dk), paket birleştirme. 6 Nisan 2026'da yeniden adlandırılan alanlar (`shipmentPackageId`, `lineId`, `stockCode`, `lineUnitPrice`, `lineGrossAmount`, `lineSellerDiscount`, `vatRate`) önceliklidir; eski adlar yedektir. `orderDate` GMT+3 olarak gelir ve UTC'ye çevrilir. Kaynak: developers.trendyol.com changelog ve servis dokümanları. **Canlı hesapla doğrulanmadı.** **İlan okuma:** Ürün V1 kapatılıyor, V2 filtre şeması doğrulanamadı → `TRENDYOL_LISTINGS_ENABLED=false` (varsayılan kapalı). |
 | Amazon.com.tr | **Sipariş okuma:** LWA token + Orders API v0 (`getOrders`, `getOrderItems`), SP-API rate limitleri, `LastUpdatedAfter` ile artımlı (watermark − 1 saat). Kargo takibi, müşteri adı ve komisyon bu API'de yok. **Canlı hesapla doğrulanmadı.** |
 | Hepsiburada | Credential algılama ve statü eşlemesi hazır. **Sipariş/ilan okuma uygulanmadı.** API sözleşmesi doğrulanmadan tahminle kod yazılmadı. |
 
@@ -211,8 +221,8 @@ Yalnızca bilgisi tanımlı ve ilgili yeteneği olan connector'lar için çalı�
 | İş | Aralık | Not |
 |---|---|---|
 | `orders.sync` | `SYNC_INTERVAL_MINUTES` (15 dk) | Son 14 gün; artımlı connector'da watermark |
-| `orders.deep_sync` | 24 saat | Son 60 gün; geç iade/teslim statüleri için. Artımlı connector'da atlanır |
-| `listings.sync` | 6 saat | Yalnızca `products.read` yeteneği olanlar |
+| `orders.deep_sync` | 24 saat | Son 30 gün (Trendyol sınırı); geç iade/teslim statüleri için. Artımlı connector'da atlanır |
+| `listings.sync` | 6 saat | Yalnızca `products.read` yeteneği olanlar (Trendyol'da varsayılan kapalı) |
 | `integration.check` | 60 dk | Entegrasyon ekranındaki bağlantı durumu |
 
 ## 9. Güvenilirlik
@@ -244,26 +254,22 @@ Yalnızca bilgisi tanımlı ve ilgili yeteneği olan connector'lar için çalı�
 
 ## 10. Kurulum / yükseltme (production)
 
-> Aşağıdaki adımlar TrendHub sunucusu içindir; `/opt/trendcantamiz-xml` ile ilgisi yoktur.
+> Adım adım kılavuz: **[DEPLOYMENT.md](DEPLOYMENT.md)**. `/opt/trendcantamiz-xml` ile ilgisi yoktur.
 
-1. **Yedek alın (zorunlu):**
-   `docker compose exec db pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB" > trendhub-$(date +%F).dump`
-2. `.env` dosyasını `.env.example`'daki yeni değişkenlerle tamamlayın. Özellikle:
-   * `ADMIN_PASSWORD`: en az 12 karakter
-   * `COOKIE_SECURE`: HTTPS yoksa `false`
-   * `CONNECTOR_WRITE_ENABLED=false`
-3. `docker compose build && docker compose up -d`. Önce `migrate` çalışır, başarılı olursa `api` ve `worker` açılır.
-4. `docker compose logs migrate` çıktısında `0002_platform_core` görülmelidir.
-5. `docker compose ps` çıktısında `api`, `worker` ve `web` servisleri `healthy` görünmelidir.
-6. `ADMIN_USER=… ADMIN_PASSWORD=… BASE_URL=http://sunucu:8081 scripts/smoke_test.sh` çalıştırılır.
-7. Panele admin ile girin → Entegrasyonlar → "Bağlantıyı test et".
+Tek komut: `./deploy/deploy.sh`. Sırasıyla şunları yapar:
+1. Güvenlik kontrolleri.
+2. Mevcut compose projesini ve volume'u tespit eder.
+3. Port çakışması varsa 8082–8099 arasından boş port seçer.
+4. `pg_dump` yedeği alır ve doğrular.
+5. `migrate`, ardından `api`/`worker`/`web` servislerini başlatır; nginx yeniden yüklenir.
+6. 4 servisin `healthy` olmasını ve nginx üzerinden `/api/health`'in 200 dönmesini bekler.
+7. Duman testini çalıştırır.
+8. TrendHub dışındaki container'ların değişmediğini doğrular.
 
-Parola sıfırlama:
-`docker compose exec api python -m app.cli reset-password --username admin`
-(parola etkileşimli sorulur).
+Yönetici hesabı: `./deploy/create-admin.sh` (parola etkileşimli sorulur).
 
-Geri dönüş: migration'lar yalnızca ekleme yaptığı için eski imaj yeni şemayla çalışmaya
-devam eder. Gerekirse 1. adımdaki yedekten `pg_restore` ile dönülebilir.
+Geri dönüş: migration'lar yalnızca ekleme yaptığı için eski imaj yeni şemayla çalışmaya devam eder.
+Veri gerekirse `backups/` altındaki yedekten `pg_restore` ile geri yüklenir.
 
 ## 11. Test ve CI
 
@@ -281,19 +287,30 @@ devam eder. Gerekirse 1. adımdaki yedekten `pg_restore` ile dönülebilir.
   * `node --check`
   * `nginx -t`
   * `.env` commit koruması
-  * Docker işi: `compose config`, imaj build, tüm yığını ayağa kaldırma, duman testi, ikinci `migrate` çalıştırması
+  * Docker işi: `compose config`, imaj build, tüm yığını ayağa kaldırma, duman testi, ikinci `migrate` çalıştırması, api yeniden oluşturulduktan sonra nginx→api erişimi
+* Güvenlik testleri:
+  * tüm GET uç noktalarında credential sızıntısı taraması
+  * log maskeleme
+  * çerez bayrakları
+  * SQL injection girdilerinin etkisiz kaldığı
 
 ## 12. Bilinen sınırlamalar / kalan işler
 
-* Trendyol ve Amazon alan eşlemeleri **canlı veriyle doğrulanmalı**. Özellikle Trendyol `price`/`discount` anlamı ve `orderDate` saat dilimi, Amazon `ItemPrice` ve `PromotionDiscount` KDV davranışı.
-* 60 günden eski siparişlerin statü değişiklikleri Trendyol'da yakalanmaz.
+* Trendyol ve Amazon alan eşlemeleri **canlı veriyle doğrulanmalı**. Özellikle Trendyol `lineUnitPrice`'ın indirim sonrası birim fiyat olduğu varsayımı, Amazon `ItemPrice` ve `PromotionDiscount` KDV davranışı.
+* Trendyol servis sınırı nedeniyle 30 günden eski siparişlerin statü değişiklikleri yakalanmaz. Ayrı bir iade (claims) servisi ile genişletilebilir.
+* Trendyol ilan (ürün/stok/fiyat) okuma: Ürün V2 filtre servisinin yanıt şeması doğrulanınca açılmalı.
 * Trendyol hakediş (settlement) API'si bağlanmadı; komisyon şu an **tahmini**. Gerçek tutar manuel girilebilir.
 * Amazon Finances API (gerçek ücretler) ve Amazon ilan okuma (Reports API) yok.
 * Hepsiburada sipariş/ilan okuma yok.
 * Stok/fiyat gönderimi bilinçli olarak kapalı ve uygulanmadı.
 * Tedarikçi (Çanta Bayim) aktarım kayıtları production sisteminden okunmuyor. Entegrasyon yöntemi (salt okunur DB/replika, dosya veya API) kararlaştırılmalı.
-* KDV ayrımı: tutarlar KDV dahil tutuluyor, KDV hariç kâr raporu yok.
+* KDV: tahmini KDV ve KDV sonrası net kâr var; gerçek beyanname/muhasebe entegrasyonu yok.
 * Rate limit süreç içindedir. Birden fazla worker çalıştırılırsa limit worker başına uygulanır.
 * Credential'lar yalnızca env'de, tek mağaza/hesap destekleniyor. Çoklu mağaza için şifreli credential deposu gerekir.
 * HTTPS nginx önünde bir TLS sonlandırıcı (ör. Caddy, Traefik, certbot) ile sağlanmalıdır.
-* Docker imajı ve CI Docker işi bu geliştirme ortamında (Docker yok) çalıştırılamadı. Yığın Docker'sız olarak (uvicorn + worker + nginx 1.24 + PostgreSQL 16) duman testinden geçti.
+* Canlı sunucuya bu geliştirme ortamından erişim yoktur. Deploy, eski sürümün çalıştığı ve korunan bir "canlı" stack'in bulunduğu bir provada (Docker 29, compose v5) uçtan uca denendi:
+  * yedek alındı, migration uygulandı
+  * 4 servis healthy oldu, duman testi geçti
+  * api yeniden oluşturulduğunda nginx erişimi korundu
+  * Docker yeniden başlatıldığında (reboot) stack kendiliğinden geri geldi
+  * korunan stack değişmedi

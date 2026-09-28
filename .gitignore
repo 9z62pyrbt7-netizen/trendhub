@@ -23,6 +23,9 @@ venv/
 # Backups
 *.bak
 *.backup
+*.dump
+backups/
+deploy/logs/
 *~
 
 # Test / tooling
