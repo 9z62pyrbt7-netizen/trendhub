@@ -469,7 +469,7 @@ def test_unknown_marketplace_rejected_and_new_marketplace_supported(client, engi
         with engine.begin() as c:
             c.execute(text("UPDATE listing_drafts SET status = 'cancelled'"))
             # test DB'si: sonraki testler 3 pazaryeri bekliyor
-            c.execute(text("TRUNCATE listing_drafts"))
+            c.execute(text("TRUNCATE listing_drafts CASCADE"))
             c.execute(text("DELETE FROM marketplaces WHERE code = 'n11'"))
 
 
@@ -521,7 +521,7 @@ def test_marketplace_rules_show_connection_and_publish_is_disabled(client, engin
         assert cs["connector"]["exists"] is False and "connector yok" in cs["connector"]["reason"]
     finally:
         with engine.begin() as c:
-            c.execute(text("TRUNCATE listing_drafts, marketplace_rules, marketplace_category_mappings"))
+            c.execute(text("TRUNCATE listing_drafts, marketplace_rules, marketplace_category_mappings CASCADE"))
             c.execute(text("DELETE FROM marketplaces WHERE code = 'ciceksepeti'"))
             c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
 

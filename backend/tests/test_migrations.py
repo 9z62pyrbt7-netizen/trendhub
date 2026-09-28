@@ -10,6 +10,9 @@ from .conftest import _sa, create_database, drop_database, run_migrations
 
 # Tedarikçi ürünü kataloğa bağlanmadan havuzda durabilsin (0004).
 ALLOWED_NOT_NULL_RELAXATIONS = {("SUPPLIER_PRODUCTS", "PRODUCT_ID")}
+# CHECK kısıtını GENİŞLETMEK için aynı adla yeniden eklemek (0006: users.role + 'accountant').
+# Kısıt aynı migration'da aynı adla yeniden eklenmelidir; veri silinmez.
+ALLOWED_CONSTRAINT_WIDENINGS = {("USERS", "USERS_ROLE_CHECK")}
 
 LEGACY_INIT = os.path.join(os.path.dirname(__file__), "fixtures", "legacy_main.py")
 
@@ -33,7 +36,7 @@ def test_fresh_database_migrates():
         run_migrations(url)  # ikinci çalıştırma no-op olmalı
         eng = create_engine(_sa(url))
         with eng.connect() as c:
-            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0005_listing_attributes"
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0006_web_management"
             assert c.execute(text("SELECT COUNT(*) FROM marketplaces")).scalar() == 3
         eng.dispose()
     finally:
@@ -95,6 +98,11 @@ def test_migrations_contain_no_destructive_statements():
         relaxed = re.findall(r"ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL", src)
         assert set(relaxed) <= ALLOWED_NOT_NULL_RELAXATIONS, f"{name}: onaysız NOT NULL gevşetme {relaxed}"
         src = re.sub(r"ALTER TABLE \w+ ALTER COLUMN \w+ DROP NOT NULL", "", src)
+        widened = re.findall(r"ALTER TABLE (\w+) DROP CONSTRAINT IF EXISTS (\w+)", src)
+        assert set(widened) <= ALLOWED_CONSTRAINT_WIDENINGS, f"{name}: onaysız kısıt kaldırma {widened}"
+        for table, cons in widened:
+            assert f"ALTER TABLE {table} ADD CONSTRAINT {cons}" in src, f"{name}: {cons} yeniden eklenmemiş"
+        src = re.sub(r"ALTER TABLE \w+ DROP CONSTRAINT IF EXISTS \w+", "", src)
         for bad in ("DROP ", "TRUNCATE", "DELETE", "ALTER COLUMN TYPE", " TYPE "):
             assert bad not in src, f"{name} içinde yıkıcı ifade: {bad}"
 
@@ -132,6 +140,47 @@ def test_supplier_migration_preserves_existing_supplier_rows():
             assert nullable == "YES"
             # Her pazaryeri için varsayılan kural satırı
             assert c.execute(text("SELECT COUNT(*) FROM marketplace_rules")).scalar() == 3
+        eng.dispose()
+    finally:
+        drop_database(url)
+
+
+def test_0006_widens_roles_without_touching_users_and_seeds_settings():
+    """Mevcut kullanıcılar ve ayarlar korunur; 'accountant' rolü eklenir; geçersiz rol hâlâ reddedilir."""
+    import pytest as _pytest
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.exc import IntegrityError
+
+    from app.config import get_settings
+    url = create_database("roles")
+    try:
+        old = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = url
+        get_settings.cache_clear()
+        cfg = Config(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
+        cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), "..", "migrations"))
+        try:
+            command.upgrade(cfg, "0005_listing_attributes")
+        finally:
+            os.environ["DATABASE_URL"] = old
+            get_settings.cache_clear()
+        eng = create_engine(_sa(url))
+        with eng.begin() as c:
+            c.execute(text("""INSERT INTO users(username, password_hash, role) VALUES
+                              ('a', 'h', 'admin'), ('o', 'h', 'operator'), ('v', 'h', 'viewer')"""))
+            c.execute(text("""INSERT INTO app_settings(key, value) VALUES ('shipping.same_day_before', '"10:00"')"""))
+        run_migrations(url)
+        with eng.begin() as c:
+            assert c.execute(text("SELECT username, role FROM users ORDER BY username")).all() == [
+                ("a", "admin"), ("o", "operator"), ("v", "viewer")]
+            c.execute(text("INSERT INTO users(username, password_hash, role) VALUES ('m', 'h', 'accountant')"))
+            # Kullanıcının mevcut ayarı ezilmedi, eksik varsayılanlar eklendi
+            assert c.execute(text("SELECT value FROM app_settings WHERE key = 'shipping.same_day_before'")).scalar() == "10:00"
+            assert c.execute(text("SELECT value FROM app_settings WHERE key = 'shipping.next_day_from'")).scalar() == "12:00"
+        with _pytest.raises(IntegrityError):
+            with eng.begin() as c:
+                c.execute(text("INSERT INTO users(username, password_hash, role) VALUES ('x', 'h', 'superuser')"))
         eng.dispose()
     finally:
         drop_database(url)

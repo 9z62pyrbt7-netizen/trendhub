@@ -100,10 +100,8 @@ def run_integration_check(engine: Engine, marketplace: str, settings=None) -> di
     connector = get_connector(marketplace, settings)
     check = connector.test_connection()
     with engine.begin() as conn:
-        conn.execute(text("""
-            UPDATE marketplaces SET last_check_at = NOW(), last_check_ok = :ok, last_check_message = :m,
-                   updated_at = NOW() WHERE code = :c
-        """), {"ok": check.ok, "m": check.message[:500], "c": marketplace})
+        from .marketplace_credentials import record_test
+        record_test(conn, marketplace, check.ok, check.message)
     return {"ok": check.ok, "message": check.message}
 
 
