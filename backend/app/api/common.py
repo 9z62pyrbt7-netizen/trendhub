@@ -7,6 +7,7 @@ from fastapi import HTTPException, Query
 
 TZ = ZoneInfo("Europe/Istanbul")
 PERIODS = {"today": 0, "7d": 6, "30d": 29, "90d": 89, "365d": 364}
+MONTH_PERIODS = ("this_month", "last_month")
 
 
 class DateRange:
@@ -19,6 +20,11 @@ class DateRange:
             start_d = date_from or (date_to or today) - timedelta(days=29)
             end_d = date_to or today
             period = "custom"
+        elif period == "this_month":
+            start_d, end_d = today.replace(day=1), today
+        elif period == "last_month":
+            end_d = today.replace(day=1) - timedelta(days=1)
+            start_d = end_d.replace(day=1)
         else:
             if period not in PERIODS:
                 raise HTTPException(422, f"Geçersiz dönem: {period}")

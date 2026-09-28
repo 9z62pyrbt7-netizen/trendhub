@@ -204,7 +204,7 @@ def list_users(_: CurrentUser = Depends(admin), conn: Connection = Depends(get_c
 class UserIn(BaseModel):
     username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.\-]+$")
     full_name: str | None = Field(None, max_length=100)
-    role: str = Field(pattern=r"^(admin|operator|viewer)$")
+    role: str = Field(pattern=r"^(admin|operator|viewer|accountant)$")
     password: str = Field(max_length=200)
 
 
@@ -229,7 +229,7 @@ def create_user(body: UserIn, request: Request, user: CurrentUser = Depends(admi
 
 
 class UserPatch(BaseModel):
-    role: str | None = Field(None, pattern=r"^(admin|operator|viewer)$")
+    role: str | None = Field(None, pattern=r"^(admin|operator|viewer|accountant)$")
     is_active: bool | None = None
     full_name: str | None = Field(None, max_length=100)
     new_password: str | None = Field(None, max_length=200)

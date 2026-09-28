@@ -9,7 +9,10 @@ from sqlalchemy.engine import Connection
 from .db import get_conn
 from .security import SESSION_COOKIE, resolve_session
 
-ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
+# Muhasebe (accountant) rolü okuma bakımından izleyici düzeyindedir; ek olarak yalnızca finans kayıtlarını
+# (gider, reklam harcaması) girebilir. Bağlantı bilgisi, mağaza, yayın, kullanıcı ve ayar işlemlerine ERİŞEMEZ.
+ROLE_RANK = {"viewer": 0, "accountant": 0, "operator": 1, "admin": 2}
+FINANCE_EDITORS = {"admin", "operator", "accountant"}
 
 
 @dataclass
@@ -58,6 +61,13 @@ def require(minimum: str):
     return dep
 
 
+def _finance_editor(user: CurrentUser = Depends(current_user)) -> CurrentUser:
+    if user.role not in FINANCE_EDITORS:
+        raise HTTPException(403, "Bu işlem için yetkiniz yok")
+    return user
+
+
 viewer = require("viewer")
+finance_editor = _finance_editor
 operator = require("operator")
 admin = require("admin")
