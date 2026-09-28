@@ -10,13 +10,30 @@
 </head>
 <body>
 <div id="login" class="login" hidden>
-  <form class="login-card" id="login-form" autocomplete="on">
-    <div class="brand brand-lg"><span class="brand-mark">T</span><div>TrendHub<small>E-Ticaret Yönetim Merkezi</small></div></div>
-    <label>Kullanıcı adı<input name="username" autocomplete="username" required maxlength="100"></label>
-    <label>Parola<input name="password" type="password" autocomplete="current-password" required maxlength="200"></label>
-    <p class="form-error" id="login-error" role="alert"></p>
-    <button class="btn btn-primary btn-block" type="submit">Giriş yap</button>
-  </form>
+  <section class="login-hero" aria-hidden="true">
+    <div class="brand"><span class="brand-mark">T</span><div>TrendHub<small>E-Ticaret Yönetim Merkezi</small></div></div>
+    <div class="login-hero-copy">
+      <h2>Tüm pazaryerleriniz, tek panelde.</h2>
+      <p>Trendyol, Hepsiburada ve Amazon.com.tr siparişlerinizi, stoklarınızı ve SKU bazında kârlılığınızı tek yerden izleyin.</p>
+      <ul>
+        <li>Sipariş ve kargo takibi</li>
+        <li>SKU ve sipariş bazında kâr/zarar</li>
+        <li>Salt okunur, güvenli pazaryeri bağlantıları</li>
+      </ul>
+    </div>
+    <small class="login-foot">Pazaryeri verileriniz yalnızca okunur; TrendHub fiyat, stok veya sipariş değiştirmez.</small>
+  </section>
+  <section class="login-panel">
+    <form class="login-card" id="login-form" autocomplete="on">
+      <div class="brand brand-lg login-mobile-brand"><span class="brand-mark">T</span><div>TrendHub<small>E-Ticaret Yönetim Merkezi</small></div></div>
+      <div><h1>Giriş yap</h1><p class="muted small">Devam etmek için hesabınızla oturum açın.</p></div>
+      <label>Kullanıcı adı<input name="username" autocomplete="username" required maxlength="100" autocapitalize="none" spellcheck="false"></label>
+      <label>Parola<input name="password" type="password" autocomplete="current-password" required maxlength="200"></label>
+      <p class="form-error" id="login-error" role="alert"></p>
+      <button class="btn btn-primary btn-block btn-lg" type="submit">Giriş yap</button>
+      <p class="muted small">Hesabınız yoksa yöneticinizden isteyin.</p>
+    </form>
+  </section>
 </div>
 
 <div id="app" class="layout" hidden>

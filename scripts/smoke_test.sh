@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Çalışan bir TrendHub yığınına karşı uçtan uca duman testi.
 # Kullanım: BASE_URL=http://localhost:8081 ADMIN_USER=admin ADMIN_PASSWORD=... scripts/smoke_test.sh
+#           SMOKE_ANONYMOUS=1 BASE_URL=... scripts/smoke_test.sh   (giriş gerektirmeyen kontroller)
 # Yalnızca okuma + giriş/çıkış yapar; pazaryerine hiçbir istek göndermez.
 set -eu
 BASE_URL="${BASE_URL:-http://localhost:8081}"
@@ -20,6 +21,14 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/dashboard")
 
 step "güvenlik başlıkları"
 curl -fsSI "$BASE_URL/" | grep -qi 'content-security-policy' || fail "CSP başlığı yok"
+
+if [ "${SMOKE_ANONYMOUS:-0}" = "1" ]; then
+  step "panel dosyaları"
+  curl -fsS "$BASE_URL/" | grep -q 'TrendHub' || fail "panel HTML"
+  curl -fsS "$BASE_URL/assets/app.js" >/dev/null || fail "app.js"
+  printf '✓ Anonim duman testi başarılı (giriş adımları atlandı)\n'
+  exit 0
+fi
 
 step "giriş"
 curl -fsS -c "$JAR" -H "$H" -H 'Content-Type: application/json' \

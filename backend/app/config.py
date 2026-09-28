@@ -27,7 +27,9 @@ class Settings(BaseSettings):
 
     # Oturum çerezi
     session_ttl_hours: int = 12
-    cookie_secure: bool = True
+    # auto: çerez yalnızca HTTPS isteklerinde Secure işaretlenir (nginx X-Forwarded-Proto);
+    # true: her zaman Secure (HTTPS zorunlu); false: hiçbir zaman (önerilmez).
+    cookie_secure: str = "auto"
     # Boş bırakılırsa CORS kapalıdır (nginx ile aynı origin'den servis edilir).
     cors_origins: str = ""
 
@@ -47,6 +49,8 @@ class Settings(BaseSettings):
     trendyol_api_secret: str = ""
     trendyol_base_url: str = "https://apigw.trendyol.com"
     trendyol_rate_per_minute: int = 60
+    # Ürün V1 servisi kapatılıyor, V2 şeması doğrulanmadı: varsayılan KAPALI.
+    trendyol_listings_enabled: bool = False
 
     # Hepsiburada
     hepsiburada_merchant_id: str = ""
@@ -70,6 +74,15 @@ class Settings(BaseSettings):
         if url.startswith("postgresql://"):
             url = "postgresql+psycopg://" + url[len("postgresql://"):]
         return url
+
+
+def cookie_secure_for(settings: "Settings", scheme: str) -> bool:
+    v = str(settings.cookie_secure).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return scheme == "https"
 
 
 @lru_cache

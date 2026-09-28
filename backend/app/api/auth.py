@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from ..config import get_settings
+from ..config import cookie_secure_for, get_settings
 from ..db import get_conn, transaction
 from ..deps import CurrentUser, client_ip, current_user
 from ..security import (LOCK_MINUTES, MAX_FAILED_LOGINS, SESSION_COOKIE, create_session, hash_password,
@@ -61,8 +61,10 @@ def login(body: LoginIn, request: Request, response: Response, conn: Connection 
                  {"id": u["id"]})
     token = create_session(conn, u["id"], settings.session_ttl_hours, ip, request.headers.get("User-Agent"))
     log_audit(conn, actor=u["username"], user_id=u["id"], action="auth.login", ip=ip)
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=settings.cookie_secure, samesite="strict",
-                        max_age=settings.session_ttl_hours * 3600, path="/")
+    # API yalnızca nginx arkasında erişilebilir; X-Forwarded-Proto'yu nginx yazar.
+    scheme = request.headers.get("X-Forwarded-Proto", request.url.scheme).split(",")[0].strip().lower()
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=cookie_secure_for(settings, scheme),
+                        samesite="strict", max_age=settings.session_ttl_hours * 3600, path="/")
     return {"user": _user_out(u)}
 
 

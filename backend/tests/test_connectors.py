@@ -98,7 +98,7 @@ def test_trendyol_fetch_paginates_and_chunks_windows():
         calls.append(dict(request.url.params))
         assert request.headers["User-Agent"] == "12345 - SelfIntegration"
         assert request.headers["Authorization"].startswith("Basic ")
-        assert request.url.path == "/integration/order/sellers/12345/orders"
+        assert request.url.path == "/integration/order/sellers/12345/v2/orders"
         page = int(request.url.params["page"])
         return httpx.Response(200, json={"content": [pkg(100 + page, number=f"N{page}")], "totalPages": 2})
 
@@ -144,3 +144,50 @@ def test_backoff_and_rate_limiter():
     rl = RateLimiter(60, burst=2, clock=lambda: t["now"], sleep=waits.append)
     assert rl.acquire() == 0 and rl.acquire() == 0
     assert rl.acquire() == pytest.approx(1.0)   # 60/dk -> 1 sn
+
+
+def test_trendyol_new_field_names_take_precedence_and_order_date_is_gmt3():
+    """6 Nisan 2026 alan adı değişikliği: yeni adlar okunur, eski adlar yedek."""
+    pkg_new = {"shipmentPackageId": 901, "orderNumber": "N-1", "shipmentPackageStatus": "Picking",
+               # 2026-09-20 13:00 GMT+3 olarak gönderilen zaman damgası (= 10:00 UTC)
+               "orderDate": int(datetime(2026, 9, 20, 13, 0, tzinfo=timezone.utc).timestamp() * 1000),
+               "lines": [{"lineId": 5001, "stockCode": "CB-9", "barcode": "869", "productName": "Çanta",
+                          "quantity": 2, "lineUnitPrice": 150.5, "lineGrossAmount": 320,
+                          "lineSellerDiscount": 19, "lineTyDiscount": 5, "vatRate": 20,
+                          # aynı pakette eski adlar da gelirse yeni adın değeri kullanılır
+                          "id": 1, "merchantSku": "ESKI", "price": 1}]}
+    (o,) = TrendyolConnector.normalize([pkg_new])
+    line = o.lines[0]
+    assert (line.external_line_id, line.sku, line.unit_price, line.discount, line.vat_rate) == (
+        "5001", "CB-9", Decimal("150.5"), Decimal("19"), Decimal("20"))
+    assert o.shipments[0].external_package_id == "901"
+    assert o.order_date == datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc)
+
+    # Birim fiyat yoksa brüt tutar / adet kullanılır
+    (o2,) = TrendyolConnector.normalize([{"shipmentPackageId": 2, "orderNumber": "N-2", "status": "Created",
+                                          "lines": [{"lineId": 7, "quantity": 4, "lineGrossAmount": 100}]}])
+    assert o2.lines[0].unit_price == Decimal("25.00")
+
+
+def test_trendyol_falls_back_to_v1_once_on_404_and_caps_lookback_to_30_days():
+    paths, starts = [], []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/v2/orders"):
+            return httpx.Response(404, json={"message": "not found"})
+        starts.append(int(request.url.params["startDate"]))
+        return httpx.Response(200, json={"content": [], "totalPages": 0})
+
+    c = TrendyolConnector(settings(**TY), transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    until = datetime(2026, 9, 27, tzinfo=timezone.utc)
+    c.fetch_orders(until - timedelta(days=90), until)
+    assert paths.count("/integration/order/sellers/12345/v2/orders") == 1   # sadece bir kez denenir
+    assert min(starts) >= int((until - timedelta(days=30)).timestamp() * 1000)
+
+
+def test_trendyol_listings_disabled_by_default():
+    from app.connectors.base import CAP_PRODUCTS_READ
+    assert not TrendyolConnector(settings(**TY)).supports(CAP_PRODUCTS_READ)
+    assert "doğrulanmadı" in TrendyolConnector(settings(**TY)).implementation_note
+    assert TrendyolConnector(settings(**TY, trendyol_listings_enabled=True)).supports(CAP_PRODUCTS_READ)

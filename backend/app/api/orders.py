@@ -11,7 +11,8 @@ from sqlalchemy.engine import Connection
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, operator, viewer
 from ..domain import order_status as S
-from ..domain.finance import COMPONENT_LABELS_TR
+from ..domain.finance import COMPONENT_LABELS_TR, ZERO, estimated_vat_payable, money
+from ..services import app_settings
 from ..services.audit import log_audit
 from ..services.finance_service import recalculate_order
 from .common import TZ, Page, not_found, paged
@@ -89,15 +90,33 @@ def get_order(order_id: int, _: CurrentUser = Depends(viewer), conn: Connection 
     o["status_label"] = S.LABELS_TR.get(o["internal_status"], o["internal_status"])
     o["allowed_transitions"] = [{"code": c, "label": S.LABELS_TR[c]}
                                 for c in S.ALL_STATUSES if c in S.MANUAL_TRANSITIONS.get(o["internal_status"], ())]
-    o["items"] = rows(conn, "SELECT * FROM order_items WHERE order_id = :id ORDER BY id", id=order_id)
+    o["items"] = rows(conn, """SELECT i.*, p.vat_rate AS product_vat_rate FROM order_items i
+                                LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = :id ORDER BY i.id""",
+                      id=order_id)
+    status = o["internal_status"]
+    restocked = status == S.RETURNED and not app_settings.get(conn, "finance.return_product_cost_is_loss", False)
+    tax_total = discount_total = ZERO
     for it in o["items"]:
-        revenue = Decimal(it["unit_price"] or 0) * (it["quantity"] or 0)
-        costs = sum(Decimal(it[k] or 0) for k in ("commission", "service_fee", "shipping_cost",
-                                                   "advertising_cost", "refund_amount", "other_cost"))
-        costs += Decimal(it["unit_cost"] or 0) * (it["quantity"] or 0)
+        qty = it["quantity"] or 0
+        revenue = money(Decimal(it["unit_price"] or 0) * qty)
+        product_cost = ZERO if restocked else money(Decimal(it["unit_cost"] or 0) * qty)
+        costs = product_cost + sum((Decimal(it[k] or 0) for k in ("commission", "service_fee", "shipping_cost",
+                                                                   "advertising_cost", "refund_amount", "other_cost")), ZERO)
+        rate = it["vat_rate"] if it["vat_rate"] is not None else it.pop("product_vat_rate", None)
+        it.pop("product_vat_rate", None)
+        tax = ZERO if status in (S.CANCELLED, S.RETURNED) else estimated_vat_payable(
+            revenue, product_cost, it["refund_amount"] or 0, rate)
         it["revenue"] = revenue
-        it["net_profit"] = revenue - costs
-        it["margin"] = float((revenue - costs) / revenue) if revenue else None
+        it["product_cost"] = product_cost
+        it["net_profit"] = ZERO if status == S.CANCELLED else revenue - costs
+        it["tax_estimate"] = tax
+        it["net_profit_after_tax"] = it["net_profit"] - tax
+        it["margin"] = float(it["net_profit"] / revenue) if revenue and status != S.CANCELLED else None
+        tax_total += tax
+        discount_total += Decimal(it["discount"] or 0)
+    o["tax_estimate"] = tax_total
+    o["discount"] = discount_total
+    o["net_profit_after_tax"] = (o["net_profit"] or ZERO) - tax_total
     o["shipments"] = rows(conn, "SELECT * FROM shipments WHERE order_id = :id ORDER BY id", id=order_id)
     o["history"] = rows(conn, """
         SELECT h.*, u.username FROM order_status_history h LEFT JOIN users u ON u.id = h.user_id

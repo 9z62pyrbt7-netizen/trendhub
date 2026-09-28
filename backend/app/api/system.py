@@ -51,8 +51,29 @@ def system_health(_: CurrentUser = Depends(viewer), conn: Connection = Depends(g
     overall = "healthy"
     if not alive or events["errors"]:
         overall = "degraded"
+    from ..connectors.registry import all_connectors
+    from .integrations import integration_state
+    mp_rows = {r["code"]: r for r in rows(conn, "SELECT * FROM marketplaces")}
+    last_jobs = {r["marketplace"]: r for r in rows(conn, """
+        SELECT marketplace,
+               MAX(finished_at) FILTER (WHERE status = 'succeeded') AS last_success_at,
+               MAX(finished_at) FILTER (WHERE status IN ('failed', 'dead')) AS last_failure_at,
+               COUNT(*) FILTER (WHERE status IN ('failed', 'dead') AND finished_at > NOW() - INTERVAL '24 hours') AS failed_24h
+          FROM sync_jobs WHERE marketplace IS NOT NULL GROUP BY marketplace
+    """)}
+    connectors = []
+    for c in all_connectors():
+        st = integration_state(c, mp_rows.get(c.code))
+        lj = last_jobs.get(c.code, {})
+        # Yalnızca durum bilgisi: credential alanları bu listeye hiç eklenmez.
+        connectors.append({"code": c.code, "name": c.name, "state": st["state"], "state_label": st["state_label"],
+                           "last_sync_at": st["last_sync_at"], "last_check_at": st["last_check_at"],
+                           "last_check_ok": st["last_check_ok"], "last_success_at": lj.get("last_success_at"),
+                           "last_failure_at": lj.get("last_failure_at"), "failed_24h": lj.get("failed_24h", 0)})
     return {"status": overall, "database": {"ok": True, "time": db_time, "migration": version},
             "workers": workers, "worker_alive": alive, "queue": queue, "open_events": events,
+            "last_heartbeat_at": workers[0]["last_seen_at"] if workers else None,
+            "connectors": connectors,
             "config": {"connector_write_enabled": get_settings().connector_write_enabled,
                        "sync_interval_minutes": get_settings().sync_interval_minutes,
                        "app_env": get_settings().app_env}}

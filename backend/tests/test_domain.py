@@ -70,3 +70,16 @@ def test_refund_reduces_profit_and_zero_revenue_margin_is_none():
                                   commission=Decimal("0"), refund_amount=Decimal("100"))], OrderCosts())
     assert of.total.net_profit == Decimal("-50.00")
     assert Breakdown().margin is None
+
+
+def test_estimated_vat_payable_uses_decimal_and_vat_inclusive_amounts():
+    from app.domain.finance import estimated_vat_payable, vat_portion
+    assert vat_portion(Decimal("120"), 20) == Decimal("20.00")
+    assert vat_portion(Decimal("110"), 10) == Decimal("10.00")
+    assert vat_portion(Decimal("100"), 0) == Decimal("0")
+    # satış 240 (KDV 40), maliyet 120 (KDV 20) -> ödenecek tahmini KDV 20
+    assert estimated_vat_payable(Decimal("240"), Decimal("120"), Decimal("0"), 20) == Decimal("20.00")
+    # iade edilen satışın KDV'si düşülür
+    assert estimated_vat_payable(Decimal("240"), Decimal("0"), Decimal("240"), 20) == Decimal("0.00")
+    # float birikimi yok: 0.1 + 0.2 gibi tutarlar kuruş hassasiyetinde kalır
+    assert estimated_vat_payable(Decimal("0.30"), Decimal("0"), Decimal("0"), 20) == Decimal("0.05")
