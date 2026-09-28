@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -7,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.connectors.amazon_tr import AmazonTrConnector
-from app.connectors.base import CAP_ORDERS_READ, AuthError, NotSupported, RetryableError, WriteDisabled
+from app.connectors.base import CAP_ORDERS_READ, AuthError, RetryableError, WriteDisabled
 from app.connectors.hepsiburada import HepsiburadaConnector
 from app.connectors.http import RateLimiter, ResilientClient, backoff_delay
 from app.connectors.trendyol import TrendyolConnector, aggregate_status, map_status

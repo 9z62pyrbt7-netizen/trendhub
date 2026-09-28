@@ -13,24 +13,32 @@ zamanını karşılaştırır.
 * Açılışta Docker'ın başlaması: `sudo systemctl enable docker` (reboot sonrası stack otomatik gelir;
   tüm servisler `restart: unless-stopped`)
 
-## 1. İlk kurulum veya güncelleme
+## 1. İlk kurulum veya güncelleme (tek komut)
 
-TrendHub'ın sunucudaki klasörüne gidin (ilk kurulumsa klonlayın). **`/opt/trendcantamiz-xml`
-içinde değil**, örneğin `/opt/trendhub`:
+**İlk kurulum** (TrendHub henüz yoksa; `/opt/trendcantamiz-xml` içinde DEĞİL):
 
 ```bash
-# ilk kurulum
-sudo git clone https://github.com/9z62pyrbt7-netizen/trendhub.git /opt/trendhub
-cd /opt/trendhub
-cp .env.example .env && chmod 600 .env
-nano .env      # POSTGRES_PASSWORD, DATABASE_URL (aynı parola), gerekirse TRENDYOL_* değerleri
+sudo git clone https://github.com/9z62pyrbt7-netizen/trendhub.git /opt/trendhub && cd /opt/trendhub && sudo bash deploy/install.sh
 ```
 
-Mevcut bir TrendHub kurulumu varsa **kendi klasöründe** kalın; `.env` dosyanız korunur, yalnızca
-`.env.example`'daki yeni satırları (ör. `COOKIE_SECURE=auto`, `TRENDHUB_HTTP_PORT=8081`,
-`TRENDYOL_LISTINGS_ENABLED=false`) ekleyin. Var olan değerleri değiştirmeyin.
+**Güncelleme** (TrendHub zaten kuruluysa, kendi klasöründe):
 
-Deploy (tek komut):
+```bash
+cd /opt/trendhub && sudo git fetch origin main && sudo git checkout main && sudo git merge --ff-only origin/main && sudo bash deploy/install.sh
+```
+
+`deploy/install.sh`:
+* `/opt/trendcantamiz-xml` içinde çalışmayı reddeder; yerel değişiklik varsa durur.
+* `.env` **yoksa** `.env.example`'dan oluşturur, veritabanı parolasını ve `APP_SECRET`'ı rastgele
+  üretir (değerler ekrana/loga yazılmaz, izin 600). `.env` **varsa** değerlerine dokunmaz; yalnızca
+  eksik güvenlik anahtarlarını ekler (`CONNECTOR_WRITE_ENABLED=false`, `*_LISTINGS_ENABLED=false`, …).
+* `deploy/deploy.sh`'i çalıştırır (aşağıda), sonra aktif yönetici yoksa parolayı gizli sorarak oluşturur.
+
+Pazaryeri API bilgilerini (`TRENDYOL_*`, `HEPSIBURADA_*`, `AMAZON_SP_*`) daha sonra `.env`'e ekleyip
+`sudo bash deploy/install.sh`'i tekrar çalıştırmanız yeterlidir. Bilgi girilmeyen pazaryeri
+"Bağlı değil" görünür.
+
+Yalnızca deploy adımı için:
 
 ```bash
 ./deploy/deploy.sh
