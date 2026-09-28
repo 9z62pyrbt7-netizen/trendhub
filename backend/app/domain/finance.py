@@ -157,3 +157,20 @@ def compute_order(lines: list[LineInput], order_costs: OrderCosts,
             other=money(d(line.other) + other[i]),
         ))
     return result
+
+
+def vat_portion(amount_incl_vat, rate) -> Decimal:
+    """KDV dahil tutarın içindeki KDV: tutar * r / (100 + r)."""
+    r = d(rate if rate is not None else 20)
+    if r <= 0:
+        return ZERO
+    return money(d(amount_incl_vat) * r / (Decimal(100) + r))
+
+
+def estimated_vat_payable(revenue, product_cost, refund, rate) -> Decimal:
+    """TAHMİNİ ödenecek KDV = satış KDV'si − maliyet KDV'si (aynı oran varsayımı).
+
+    Tutarlar KDV dahil kabul edilir; iade edilen satışın KDV'si düşülür.
+    Gerçek beyanname değildir; muhasebe kayıtlarının yerini tutmaz.
+    """
+    return money(vat_portion(d(revenue) - d(refund), rate) - vat_portion(product_cost, rate))

@@ -26,8 +26,20 @@ EXPENSE_CATEGORIES = {"advertising": "Reklam", "shipping": "Kargo", "packaging":
                       "personnel": "Personel", "rent": "Kira", "software": "Yazılım", "other": "Diğer"}
 
 
-def _num(v) -> float:
-    return float(v or 0)
+def _num(v) -> Decimal:
+    """Para değerleri Decimal olarak taşınır; JSON'a yazılırken sayıya çevrilir."""
+    return Decimal(v) if v is not None else Decimal("0")
+
+
+def _ratio(a: Decimal, b: Decimal) -> Decimal | None:
+    return (a / b).quantize(Decimal("0.0001")) if b else None
+
+
+# Kalem bazlı TAHMİNİ KDV: (net satış − maliyet) içindeki KDV. İptal ve iade edilen
+# siparişlerde satış tersine döndüğü için 0 kabul edilir. Oran: kalem > ürün > %20.
+TAX_SQL = """COALESCE(SUM(CASE WHEN o.internal_status = 'returned' THEN 0 ELSE
+               ((i.unit_price * i.quantity) - COALESCE(i.refund_amount, 0) - COALESCE(i.unit_cost, 0) * i.quantity)
+               * COALESCE(i.vat_rate, p.vat_rate, 20) / (100 + COALESCE(i.vat_rate, p.vat_rate, 20)) END), 0)"""
 
 
 def order_totals(conn: Connection, rng: DateRange, marketplace: str | None = None) -> dict:
@@ -48,8 +60,17 @@ def order_totals(conn: Connection, rng: DateRange, marketplace: str | None = Non
          WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}
     """, **rng.params(), mp=marketplace)
     out = {k: (_num(v) if k not in ("orders", "estimated_orders") else int(v)) for k, v in r.items()}
-    out["total_cost"] = round(sum(out[k] for k in ("product_cost", "commission", "service_fee", "shipping",
-                                                   "advertising", "refund", "other")), 2)
+    out["total_cost"] = sum((out[k] for k in ("product_cost", "commission", "service_fee", "shipping",
+                                              "advertising", "refund", "other")), Decimal("0"))
+    r2 = row(conn, f"""
+        SELECT COALESCE(SUM(i.discount), 0) AS discount, {TAX_SQL} AS tax_estimate
+          FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
+          LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
+         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}
+    """, **rng.params(), mp=marketplace)
+    out["discount"] = _num(r2["discount"]).quantize(Decimal("0.01"))
+    out["tax_estimate"] = _num(r2["tax_estimate"]).quantize(Decimal("0.01"))
+    out["average_order_value"] = (out["revenue"] / out["orders"]).quantize(Decimal("0.01")) if out["orders"] else None
     return out
 
 
@@ -60,7 +81,7 @@ def period_expenses(conn: Connection, rng: DateRange) -> dict:
           FROM expenses WHERE expense_date >= :start_date AND expense_date <= :end_date
          GROUP BY 1 ORDER BY 2 DESC
     """, **rng.params())
-    return {"total": sum(_num(i["amount"]) for i in items),
+    return {"total": sum((_num(i["amount"]) for i in items), Decimal("0")),
             "by_category": [{"category": i["category"], "label": EXPENSE_CATEGORIES.get(i["category"], i["category"]),
                              "amount": _num(i["amount"])} for i in items]}
 
@@ -68,10 +89,15 @@ def period_expenses(conn: Connection, rng: DateRange) -> dict:
 def summary(conn: Connection, rng: DateRange) -> dict:
     t = order_totals(conn, rng)
     exp = period_expenses(conn, rng)
-    net_after = round(t["net_profit"] - exp["total"], 2)
+    net_after = t["net_profit"] - exp["total"]
+    net_after_tax = net_after - t["tax_estimate"]
     return {"orders": t, "expenses": exp, "net_profit_after_expenses": net_after,
-            "margin": (t["net_profit"] / t["revenue"]) if t["revenue"] else None,
-            "margin_after_expenses": (net_after / t["revenue"]) if t["revenue"] else None}
+            "tax_estimate": t["tax_estimate"], "net_profit_after_tax": net_after_tax,
+            "margin": _ratio(t["net_profit"], t["revenue"]),
+            "margin_after_expenses": _ratio(net_after, t["revenue"]),
+            "margin_after_tax": _ratio(net_after_tax, t["revenue"]),
+            # Gerçek hakediş verisi bağlanmadığı sürece tüm finans rakamları tahminidir.
+            "is_estimate": True}
 
 
 def daily_series(conn: Connection, rng: DateRange) -> list[dict]:
@@ -108,9 +134,32 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
                (SELECT COUNT(*) FROM worker_heartbeats WHERE last_seen_at > NOW() - INTERVAL '90 seconds') AS live_workers
     """)
     mp_rows = {r["code"]: r for r in rows(conn, "SELECT * FROM marketplaces")}
+    today = order_totals(conn, DateRange(period="today", date_from=None, date_to=None))
+    pending = sum(status_counts.get(c, 0) for c in (S.NEW, S.PREPARING, S.SENT_TO_SUPPLIER, S.AWAITING_SHIPMENT))
+    top_products = rows(conn, """
+        SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, MAX(i.product_name) AS product_name,
+               SUM(i.quantity) AS quantity, SUM(i.unit_price * i.quantity) AS revenue
+          FROM order_items i JOIN orders o ON o.id = i.order_id
+         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status NOT IN ('cancelled', 'returned')
+         GROUP BY 1 ORDER BY revenue DESC NULLS LAST LIMIT 5
+    """, **rng.params())
+    by_marketplace = rows(conn, """
+        SELECT m.code, m.name, COUNT(o.id) AS orders, COALESCE(SUM(o.gross_revenue), 0) AS revenue,
+               COALESCE(SUM(o.net_profit), 0) AS net_profit
+          FROM marketplaces m
+          LEFT JOIN stores s ON s.marketplace_id = m.id
+          LEFT JOIN orders o ON o.store_id = s.id AND o.order_date >= :start AND o.order_date < :end
+                             AND o.internal_status <> 'cancelled'
+         GROUP BY m.id, m.code, m.name ORDER BY m.id
+    """, **rng.params())
     return {
         "range": rng.as_dict(),
         "summary": summary(conn, rng),
+        "today": {"orders": today["orders"], "revenue": today["revenue"], "net_profit": today["net_profit"]},
+        "pending_orders": pending,
+        "returns": {"period": period_status.get(S.RETURNED, 0), "open_total": status_counts.get(S.RETURNED, 0)},
+        "top_products": top_products,
+        "by_marketplace": by_marketplace,
         "statuses": [{"code": c, "label": S.LABELS_TR[c], "count": status_counts.get(c, 0),
                       "period_count": period_status.get(c, 0)} for c in S.ALL_STATUSES],
         "daily": daily_series(conn, rng),
@@ -127,8 +176,7 @@ def finance_summary(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer)
     by_mp = []
     for m in rows(conn, "SELECT code, name FROM marketplaces ORDER BY id"):
         t = order_totals(conn, rng, m["code"])
-        by_mp.append({"code": m["code"], "name": m["name"], **t,
-                      "margin": (t["net_profit"] / t["revenue"]) if t["revenue"] else None})
+        by_mp.append({"code": m["code"], "name": m["name"], **t, "margin": _ratio(t["net_profit"], t["revenue"])})
     return {"range": rng.as_dict(), **summary(conn, rng), "by_marketplace": by_mp,
             "daily": daily_series(conn, rng)}
 
@@ -193,23 +241,28 @@ def delete_expense(expense_id: int, request: Request, user: CurrentUser = Depend
 
 # ------------------------------------------------------------------ raporlar
 def sku_report(conn: Connection, rng: DateRange, marketplace: str | None = None) -> list[dict]:
+    from ..services import app_settings
     extra = "AND m.code = :mp" if marketplace else ""
+    ret_loss = bool(app_settings.get(conn, "finance.return_product_cost_is_loss", False))
     items = rows(conn, f"""
         SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, MAX(i.product_name) AS product_name,
                SUM(i.quantity) AS quantity, COUNT(DISTINCT o.id) AS orders,
                COUNT(DISTINCT o.id) FILTER (WHERE o.internal_status = 'returned') AS returns,
                SUM(i.unit_price * i.quantity) AS revenue,
-               SUM(COALESCE(i.unit_cost, 0) * i.quantity) AS product_cost,
+               -- İade edilen ürün varsayılan olarak stoğa döner (sipariş hesabıyla aynı kural)
+               SUM(CASE WHEN o.internal_status = 'returned' AND NOT :ret_loss THEN 0
+                        ELSE COALESCE(i.unit_cost, 0) * i.quantity END) AS product_cost,
+               SUM(COALESCE(i.discount, 0)) AS discount, {TAX_SQL} AS tax_estimate,
                SUM(COALESCE(i.commission, 0)) AS commission, SUM(COALESCE(i.service_fee, 0)) AS service_fee,
                SUM(COALESCE(i.shipping_cost, 0)) AS shipping, SUM(COALESCE(i.advertising_cost, 0)) AS advertising,
                SUM(COALESCE(i.refund_amount, 0)) AS refund, SUM(COALESCE(i.other_cost, 0)) AS other,
                BOOL_OR(COALESCE(i.unit_cost, 0) = 0) AS missing_cost,
                BOOL_OR(i.finance_is_estimate) AS is_estimate
-          FROM order_items i JOIN orders o ON o.id = i.order_id
+          FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
           LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
          WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}
          GROUP BY 1
-    """, **rng.params(), mp=marketplace)
+    """, **rng.params(), mp=marketplace, ret_loss=ret_loss)
     # SKU'ya doğrudan girilmiş dönem reklam giderleri (expenses.sku)
     direct_ads = {r["sku"]: _num(r["amount"]) for r in rows(conn, """
         SELECT sku, SUM(amount) AS amount FROM expenses
@@ -218,11 +271,14 @@ def sku_report(conn: Connection, rng: DateRange, marketplace: str | None = None)
     out = []
     for it in items:
         r = {k: (_num(v) if isinstance(v, Decimal) else v) for k, v in it.items()}
-        r["advertising"] = r["advertising"] + direct_ads.get(r["sku"], 0)
-        cost = sum(r[k] for k in ("product_cost", "commission", "service_fee", "shipping", "advertising", "refund", "other"))
-        r["net_profit"] = round(r["revenue"] - cost, 2)
-        r["margin"] = (r["net_profit"] / r["revenue"]) if r["revenue"] else None
-        r["return_rate"] = (r["returns"] / r["orders"]) if r["orders"] else None
+        r["advertising"] = r["advertising"] + direct_ads.get(r["sku"], Decimal("0"))
+        r["tax_estimate"] = r["tax_estimate"].quantize(Decimal("0.01"))
+        cost = sum((r[k] for k in ("product_cost", "commission", "service_fee", "shipping", "advertising",
+                                   "refund", "other")), Decimal("0"))
+        r["net_profit"] = (r["revenue"] - cost).quantize(Decimal("0.01"))
+        r["net_profit_after_tax"] = r["net_profit"] - r["tax_estimate"]
+        r["margin"] = _ratio(r["net_profit"], r["revenue"])
+        r["return_rate"] = _ratio(Decimal(r["returns"]), Decimal(r["orders"])) if r["orders"] else None
         out.append(r)
     out.sort(key=lambda x: x["net_profit"], reverse=True)
     return out
@@ -238,7 +294,9 @@ CSV_COLUMNS = [("sku", "SKU"), ("product_name", "Ürün"), ("quantity", "Adet"),
                ("returns", "İade"), ("revenue", "Ciro"), ("product_cost", "Ürün Maliyeti"),
                ("commission", "Komisyon"), ("service_fee", "Hizmet Bedeli"), ("shipping", "Kargo"),
                ("advertising", "Reklam"), ("refund", "İade Tutarı"), ("other", "Diğer"),
-               ("net_profit", "Net Kâr"), ("margin", "Kâr Marjı"), ("is_estimate", "Tahmini")]
+               ("discount", "Satıcı İndirimi (ciroya dahil)"), ("net_profit", "Net Kâr (vergi öncesi)"),
+               ("tax_estimate", "Tahmini KDV"), ("net_profit_after_tax", "Net Kâr (tahmini KDV sonrası)"),
+               ("margin", "Kâr Marjı"), ("is_estimate", "Tahmini")]
 
 
 def _csv_safe(v):

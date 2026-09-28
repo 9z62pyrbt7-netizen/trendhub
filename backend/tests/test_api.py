@@ -227,3 +227,27 @@ def test_create_product_with_barcode_links_existing_order_items(client, engine):
     assert r.status_code == 201, r.text
     with engine.connect() as c:
         assert c.execute(text("SELECT product_id FROM order_items WHERE order_id = :o"), {"o": oid}).scalar() == r.json()["id"]
+
+
+def test_dashboard_and_finance_expose_estimated_tax_today_top_products(client, engine):
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO products(sku, name, cost, vat_rate) VALUES ('SKU-9', 'Sırt Çantası', 60, 20)"))
+    oid = seed_order(engine, "T1", price="240")
+    seed_order(engine, "T2", status="returned", price="120")
+    login(client)
+    d = client.get("/api/dashboard?period=7d").json()
+    assert d["today"]["orders"] == 2 and d["pending_orders"] == 1
+    assert d["returns"]["period"] == 1
+    assert d["top_products"][0]["sku"] == "SKU-9" and float(d["top_products"][0]["revenue"]) == 240
+    assert {m["code"] for m in d["by_marketplace"]} == {"trendyol", "hepsiburada", "amazon_tr"}
+    s = d["summary"]
+    assert s["is_estimate"] is True
+    # T1: satış 240 (KDV 40) - maliyet 60 (KDV 10) = 30; iade edilen T2'de KDV 0
+    assert float(s["tax_estimate"]) == 30.0
+    assert float(s["net_profit_after_tax"]) == pytest.approx(float(s["net_profit_after_expenses"]) - 30.0)
+    assert float(s["orders"]["average_order_value"]) == 180.0
+    detail = client.get(f"/api/orders/{oid}").json()
+    assert float(detail["tax_estimate"]) == 30.0
+    sku = client.get("/api/reports/sku?period=7d").json()["items"][0]
+    # iade edilen T2'nin ürünü stoğa döner -> maliyet yalnızca T1'den (60)
+    assert float(sku["product_cost"]) == 60.0 and float(sku["tax_estimate"]) == 30.0
