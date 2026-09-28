@@ -169,7 +169,10 @@ if [ "${TRENDHUB_BUILD:-1}" = "1" ]; then "${DC[@]}" build; else warn "TRENDHUB_
 "${DC[@]}" run --rm migrate || die "Migration başarısız. Yedek: ${BACKUP:-yok}. Uygulama container'ları değiştirilmedi."
 ok "Migration tamam"
 "${DC[@]}" up -d --no-deps api worker web
-ok "api, worker, web başlatıldı"
+# nginx.conf bind-mount ile gelir; içerik değiştiyse compose container'ı yeniden oluşturmaz.
+"${DC[@]}" exec -T web nginx -t >/dev/null 2>&1 || die "nginx yapılandırması geçersiz"
+"${DC[@]}" exec -T web nginx -s reload >/dev/null
+ok "api, worker, web başlatıldı; nginx yapılandırması yeniden yüklendi"
 
 # ------------------------------------------------------------ 6. sağlık
 say "6. Sağlık kontrolü"
@@ -182,6 +185,10 @@ while :; do
     line="$line $s=$h"
     [ "$h" = "healthy" ] || all=0
   done
+  # web healthcheck en fazla 30 sn'de bir çalışır; gerçek durumu nginx üzerinden doğrula
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$NEW_PORT/api/health" || true)"
+  line="$line nginx->api=$code"
+  [ "$code" = "200" ] || all=0
   echo " $line"
   [ "$all" = 1 ] && break
   [ "$(date +%s)" -lt "$deadline" ] || { "${DC[@]}" ps; "${DC[@]}" logs --tail 80 api worker web; die "Servisler zamanında sağlıklı olmadı"; }

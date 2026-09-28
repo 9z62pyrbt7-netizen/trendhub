@@ -97,7 +97,9 @@ services:
       - "${TRENDHUB_HTTP_PORT:-8081}:80"
     volumes:
       - ./web:/usr/share/nginx/html:ro
-      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Klasör olarak bağlanır (tek dosya bağlamak, git dosyayı yenilediğinde eski içeriği
+      # göstermeye devam eder). nginx conf.d içinden yalnızca *.conf okur -> web/nginx.conf.
+      - ./web:/etc/nginx/conf.d:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/api/health | grep -q healthy"]
       interval: 30s

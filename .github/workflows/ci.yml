@@ -77,6 +77,14 @@ jobs:
         run: ADMIN_USER=admin ADMIN_PASSWORD=ci-admin-password-123 BASE_URL=http://localhost:8081 scripts/smoke_test.sh
       - name: migrate ikinci kez çalıştırılabilir (idempotent)
         run: docker compose run --rm migrate
+      - name: api yeniden oluşturulunca nginx yeni IP'yi bulur (502 regresyonu)
+        run: |
+          docker compose up -d --no-deps --force-recreate api
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/api/health || true)
+            echo "nginx->api: $code"; [ "$code" = 200 ] && exit 0; sleep 2
+          done
+          exit 1
       - name: Loglar
         if: always()
         run: docker compose logs --no-color | tail -n 300
