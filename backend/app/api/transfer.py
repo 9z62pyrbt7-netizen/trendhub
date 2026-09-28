@@ -7,11 +7,12 @@ yalnızca TrendHub'da tutulur ve CSV olarak dışa aktarılabilir.
 """
 import csv
 import io
+import json
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
@@ -69,6 +70,22 @@ class CategoryMapIn(BaseModel):
     source_category: str = Field(min_length=1, max_length=500)
     target_category_id: str = Field(min_length=1, max_length=100)
     target_category_name: str | None = Field(None, max_length=300)
+    # Pazaryeri kategori özellikleri (ör. {"Renk": "Kahverengi"}); taslaklara kopyalanır
+    attributes: dict[str, str] | None = None
+
+    @field_validator("attributes")
+    @classmethod
+    def _attrs(cls, v):
+        if v is None:
+            return v
+        if len(v) > 50 or any(len(str(k)) > 100 or len(str(x)) > 300 for k, x in v.items()):
+            raise ValueError("En fazla 50 özellik; ad 100, değer 300 karakter")
+        return {str(k).strip(): str(x).strip() for k, x in v.items() if str(k).strip()}
+
+
+class MarketplaceIn(BaseModel):
+    code: str = Field(min_length=2, max_length=40, pattern=r"^[a-z0-9_]+$")
+    name: str = Field(min_length=2, max_length=100)
 
 
 def _mp(conn: Connection, code: str) -> dict:
@@ -228,14 +245,21 @@ def export_ready(marketplace: str = "trendyol", _: CurrentUser = Depends(viewer)
 # ------------------------------------------------------------ pazaryeri kuralları
 @router.get("/api/marketplace-rules")
 def list_rules(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    from ..connectors.registry import CONNECTOR_CLASSES, get_connector
     out = []
     for mp in rows(conn, "SELECT id, code, name FROM marketplaces ORDER BY id"):
+        if mp["code"] in CONNECTOR_CLASSES:
+            c = get_connector(mp["code"])
+            connector = {"exists": True, "connected": c.is_configured(), **c.publish_status()}
+        else:
+            connector = {"exists": False, "connected": False, "can_publish": False,
+                         "reason": "Bu pazaryeri için connector yok; taslaklar CSV ile dışa aktarılır."}
         rule, extra = marketplace_rule(conn, mp)
         stored = row(conn, "SELECT commission_rate FROM marketplace_rules WHERE marketplace_id = :m", m=mp["id"]) or {}
         out.append({"code": mp["code"], "name": mp["name"], "commission_rate": stored.get("commission_rate"),
                     "effective_commission_rate": rule.commission_rate, "markup_rate": rule.markup_rate,
                     "fixed_cost": rule.fixed_cost, "shipping_cost": rule.shipping_cost,
-                    "min_margin_rate": rule.min_margin_rate, "rounding": rule.rounding, **extra})
+                    "min_margin_rate": rule.min_margin_rate, "rounding": rule.rounding, "connector": connector, **extra})
     return {"items": out, "requirable_fields": REQUIRABLE}
 
 
@@ -246,7 +270,6 @@ def put_rule(code: str, body: RuleIn, request: Request, user: CurrentUser = Depe
     bad = set(body.required_fields) - set(REQUIRABLE)
     if bad:
         raise HTTPException(422, f"Bilinmeyen zorunlu alan: {', '.join(sorted(bad))}")
-    import json
     conn.execute(text("""
         INSERT INTO marketplace_rules(marketplace_id, commission_rate, markup_rate, fixed_cost, shipping_cost,
                min_margin_rate, rounding, stock_buffer, min_stock, max_stock, title_max_length, required_fields, updated_at)
@@ -274,10 +297,11 @@ def list_category_mappings(marketplace: str = "trendyol", _: CurrentUser = Depen
             UNION ALL
             SELECT category, 0 FROM supplier_products WHERE category IS NOT NULL AND category <> '' GROUP BY category
         )
-        SELECT c.source_category, SUM(c.product_count) AS product_count, m.target_category_id, m.target_category_name
+        SELECT c.source_category, SUM(c.product_count) AS product_count, m.target_category_id, m.target_category_name,
+               COALESCE(m.attributes, '{}'::jsonb) AS attributes
           FROM cats c LEFT JOIN marketplace_category_mappings m
             ON m.marketplace_id = :m AND m.source_category = c.source_category
-         GROUP BY c.source_category, m.target_category_id, m.target_category_name
+         GROUP BY c.source_category, m.target_category_id, m.target_category_name, m.attributes
          ORDER BY (m.target_category_id IS NULL) DESC, SUM(c.product_count) DESC, c.source_category LIMIT 500
     """, m=mp["id"])
     return {"marketplace": mp, "items": items}
@@ -288,12 +312,31 @@ def put_category_mapping(body: CategoryMapIn, request: Request, user: CurrentUse
                          conn: Connection = Depends(get_conn)):
     mp = _mp(conn, body.marketplace)
     conn.execute(text("""
-        INSERT INTO marketplace_category_mappings(marketplace_id, source_category, target_category_id, target_category_name, updated_at)
-        VALUES (:m, :s, :t, :n, NOW())
+        INSERT INTO marketplace_category_mappings(marketplace_id, source_category, target_category_id, target_category_name,
+               attributes, updated_at)
+        VALUES (:m, :s, :t, :n, CAST(:a AS JSONB), NOW())
         ON CONFLICT (marketplace_id, source_category) DO UPDATE SET target_category_id = EXCLUDED.target_category_id,
-               target_category_name = EXCLUDED.target_category_name, updated_at = NOW()
+               target_category_name = EXCLUDED.target_category_name,
+               attributes = CASE WHEN :keep THEN marketplace_category_mappings.attributes ELSE EXCLUDED.attributes END,
+               updated_at = NOW()
     """), {"m": mp["id"], "s": body.source_category, "t": body.target_category_id.strip(),
-           "n": body.target_category_name})
+           "n": body.target_category_name, "a": json.dumps(body.attributes or {}, ensure_ascii=False),
+           "keep": body.attributes is None})
     log_audit(conn, actor=user.username, user_id=user.id, action="category_mapping.updated", entity_type="marketplace",
               entity_id=mp["id"], ip=client_ip(request), details=body.model_dump())
     return {"ok": True}
+
+
+@router.post("/api/marketplaces", status_code=201)
+def add_marketplace(body: MarketplaceIn, request: Request, user: CurrentUser = Depends(admin),
+                    conn: Connection = Depends(get_conn)):
+    """Yeni pazaryeri (ör. n11, Çiçeksepeti) ekler: kendi kural ve kategori eşleştirmesiyle taslak
+    hazırlanabilir. API connector'ı yoksa "Bağlı değil" kalır; sipariş/ilan verisi üretilmez."""
+    mid = conn.execute(text("""INSERT INTO marketplaces(code, name, enabled) VALUES (:c, :n, FALSE)
+                               ON CONFLICT (code) DO NOTHING RETURNING id"""), {"c": body.code, "n": body.name}).scalar()
+    if mid is None:
+        raise HTTPException(409, "Bu pazaryeri kodu zaten kayıtlı")
+    conn.execute(text("INSERT INTO marketplace_rules(marketplace_id) VALUES (:m) ON CONFLICT DO NOTHING"), {"m": mid})
+    log_audit(conn, actor=user.username, user_id=user.id, action="marketplace.created", entity_type="marketplace",
+              entity_id=mid, ip=client_ip(request), details=body.model_dump())
+    return {"id": mid}

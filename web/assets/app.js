@@ -683,11 +683,28 @@ PAGES.suppliers = {
   title: 'Tedarikçiler', icon: 'suppliers',
   async render(params) {
     if (params.get('id')) return renderSupplierDetail(Number(params.get('id')), params.get('tab') || 'overview');
+    const sview = params.get('view') || 'list';
     setHeader('Tedarikçiler', 'Tüm tedarikçiler, ürün havuzu ve senkronizasyon durumu', html`
       <a class="btn" href="#/transfer">Ürün aktarımı →</a>${can('admin') ? html` <button class="btn btn-primary" id="add-sup">+ Yeni Tedarikçi Ekle</button>` : ''}`);
+    const tabs = html`<div class="seg" role="tablist" style="margin-bottom:16px">${[['list', 'Tedarikçiler'], ['pool', 'Ürün havuzu'], ['compare', 'Tedarikçi karşılaştırma']].map(([k, l]) =>
+      html`<button role="tab" class="${k === sview ? 'on' : ''}" aria-selected="${k === sview}" data-sview="${k}">${l}</button>`)}</div>`;
+    const bindTabs = () => {
+      $$('[data-sview]').forEach((b) => b.addEventListener('click', () => { location.hash = b.dataset.sview === 'list' ? '#/suppliers' : `#/suppliers?view=${b.dataset.sview}`; }));
+      $('#add-sup')?.addEventListener('click', () => supplierForm());
+    };
+    if (sview === 'pool') {
+      view().innerHTML = renderVal(html`${tabs}<div id="sup-pool"></div>`);
+      bindTabs();
+      return renderPool($('#sup-pool'), {});
+    }
+    if (sview === 'compare') {
+      view().innerHTML = renderVal(html`${tabs}<div id="sup-cmp"></div>`);
+      bindTabs();
+      return renderComparison($('#sup-cmp'));
+    }
     const [sups, sos] = await Promise.all([api('/api/suppliers'), api('/api/supplier-orders', { query: { page_size: 25 } })]);
     const sum = (k) => sups.reduce((a, s) => a + (Number(s[k]) || 0), 0);
-    view().innerHTML = renderVal(html`
+    view().innerHTML = renderVal(html`${tabs}
       <div class="grid grid-4">
         ${kpi('Tedarikçi', `${num(sups.filter((s) => s.is_active).length)} / ${num(sups.length)}`, 'Aktif / toplam')}
         ${kpi('Havuzdaki ürün', num(sum('active_count')), `${num(sum('linked_count'))} ürün kataloğa bağlı`)}
@@ -702,9 +719,37 @@ PAGES.suppliers = {
         ${sos.items.map((x) => html`<tr><td>${dateTime(x.created_at)}</td><td>${x.external_order_id || '—'}</td><td>${x.supplier_name || '—'}</td><td>${x.external_supplier_order_id || '—'}</td><td>${x.status || '—'}</td><td class="r num">${money(x.cost)}</td><td class="neg small">${x.last_error || ''}</td></tr>`)}</tbody></table></div>`
           : empty('Kayıt yok', 'TrendHub tedarikçiye sipariş aktarmaz.')}</div>`);
     bindSupplierRows();
-    $('#add-sup')?.addEventListener('click', () => supplierForm());
+    bindTabs();
   },
 };
+
+async function renderComparison(box) {
+  let q = '', onlySavings = false;
+  const load = async (page) => {
+    const d = await api('/api/supplier-comparison', { query: { q, only_savings: onlySavings ? 'true' : '', page, page_size: 25 } });
+    box.innerHTML = renderVal(html`
+      <div class="grid grid-3">
+        ${kpi('Birden çok tedarikçili ürün', num(d.summary.products), 'Aynı barkod, farklı tedarikçiler')}
+        ${kpi('Daha ucuz teklif var', num(d.summary.with_saving), 'Seçili tedarikçiden ucuz, stokta', d.summary.with_saving ? 'warn-text' : '')}
+        ${kpi('Uygun teklif yok', num(d.summary.no_usable_offer), 'Hiçbir tedarikçide stok/fiyat yok', d.summary.no_usable_offer ? 'neg' : '')}
+      </div>
+      <div class="card mt"><form class="filters" id="cmp-f"><input type="search" name="q" value="${q}" placeholder="SKU, barkod veya ürün adı" aria-label="Ara">
+        <label class="check"><input type="checkbox" name="only_savings" value="1" ${raw(onlySavings ? 'checked' : '')}>Yalnızca daha ucuz teklifi olanlar</label>
+        <button class="btn btn-primary" type="submit">Filtrele</button></form>
+      ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Ürün</th><th>Teklifler (alış · stok)</th><th>Seçili tedarikçi</th><th>En ucuz</th><th>En yüksek stok</th><th class="r">Adet başı fark</th><th></th></tr></thead><tbody>
+        ${d.items.map((x) => html`<tr><td><b class="ellipsis" title="${x.name}">${x.name}</b><span class="muted small">${x.sku} · ${x.barcode || 'barkod yok'}</span></td>
+          <td>${x.offers.map((o) => html`<span class="small ${o.usable ? '' : 'muted'}" style="display:block">${o.supplier_name}: ${o.cost === null ? '—' : money(o.cost)} · ${num(o.stock)} adet</span>`)}</td>
+          <td>${x.selected_supplier || html`<span class="muted">seçilmedi</span>`}<span class="muted small">${x.strategy_label}</span></td>
+          <td>${x.cheapest_supplier || '—'}<span class="muted small">${x.cheapest_cost === null ? '' : money(x.cheapest_cost)}</span></td>
+          <td>${x.highest_stock_supplier || '—'}<span class="muted small">${x.highest_stock === null ? '' : num(x.highest_stock) + ' adet'}</span></td>
+          <td class="r num ${Number(x.saving_per_unit) > 0 ? 'warn-text' : ''}">${x.saving_per_unit === null ? '—' : money(x.saving_per_unit)}</td>
+          <td class="r"><button class="btn btn-sm" data-offers="${x.id}">Tedarikçi seç</button></td></tr>`)}
+        </tbody></table></div>${pager(d, load)}` : empty('Karşılaştırılacak ürün yok', 'Aynı barkodlu ürün birden fazla tedarikçide bulunduğunda burada fiyat ve stok karşılaştırması görünür.')}</div>`);
+    $('#cmp-f', box).addEventListener('submit', (e) => { e.preventDefault(); const v = formData(e.target); q = v.q || ''; onlySavings = v.only_savings === '1'; load(1); });
+    $$('[data-offers]', box).forEach((b) => b.addEventListener('click', () => showOffers(Number(b.dataset.offers))));
+  };
+  await load(1);
+}
 
 async function supplierForm(detail) {
   const meta = await supplierMeta();
@@ -718,7 +763,8 @@ async function supplierForm(detail) {
         <span class="small muted" id="preset-note">Alan eşleştirmesi kaydettikten sonra kaynağı önizleyerek yapılır.</span></label>`}
       <label>Tedarikçi adı<input name="name" required maxlength="200" value="${s?.name || ''}"></label>
       <label>Kod<input name="code" maxlength="50" pattern="[a-z0-9_\\-]*" value="${s?.code || ''}" ${raw(s ? 'readonly' : '')} placeholder="otomatik"></label>
-      <label>Entegrasyon türü<select name="integration_type">${opt(Object.entries(meta.integration_types), c.integration_type || 'xml')}</select></label>
+      <label>Entegrasyon türü<select name="integration_type">${opt(Object.entries(meta.integration_types), c.integration_type || 'xml')}</select>
+        <span class="small muted" id="conn-desc"></span></label>
       <label>Senkronizasyon sıklığı<select name="sync_interval_minutes">${opt(INTERVALS, s?.sync_interval_minutes ?? 60)}</select></label>
       <fieldset class="full fieldset" data-remote>
         <legend>Kaynak</legend>
@@ -733,6 +779,10 @@ async function supplierForm(detail) {
           <label data-auth="basic bearer header query">veya ortam değişkeni<input name="secret_env" maxlength="80" pattern="SUPPLIER_[A-Z0-9_]+" value="${c.secret_env || ''}" placeholder="SUPPLIER_ACME_TOKEN"></label>
           ${c.has_secret ? html`<label class="check" data-auth="basic bearer header query"><input type="checkbox" name="clear_secret" value="1">Kayıtlı şifreyi sil</label>` : ''}
           <label>Kayıt yolu (isteğe bağlı)<input name="record_path" maxlength="300" value="${c.record_path || ''}" placeholder="ör. Urunler/Urun — boşsa otomatik"></label>
+          <label data-api>Sayfa parametresi (isteğe bağlı)<input name="page_param" maxlength="50" value="${c.options?.page_param || ''}" placeholder="ör. page — boşsa tek istek"></label>
+          <label data-api>Sayfa boyutu parametresi<input name="page_size_param" maxlength="50" value="${c.options?.page_size_param || ''}" placeholder="ör. limit"></label>
+          <label data-api>Sayfa boyutu<input name="page_size" type="number" min="1" max="5000" value="${c.options?.page_size ?? ''}" placeholder="100"></label>
+          <label data-api>En fazla sayfa<input name="max_pages" type="number" min="1" max="500" value="${c.options?.max_pages ?? ''}" placeholder="100"></label>
           <label data-csv>CSV ayırıcı<select name="delimiter">${opt([['', 'Otomatik'], [';', 'Noktalı virgül (;)'], [',', 'Virgül (,)'], ['\t', 'Sekme'], ['|', 'Dikey çizgi (|)']], c.options?.delimiter || '')}</select></label>
         </div>
       </fieldset>
@@ -754,8 +804,10 @@ async function supplierForm(detail) {
   const sync = () => {
     const t = form.integration_type.value, a = form.auth_type.value;
     $('[data-remote]', form).hidden = t === 'manual';
+    $('#conn-desc', form).textContent = (meta.connectors || []).find((x) => x.type === t)?.description || '';
     $$('[data-auth]', form).forEach((el) => { el.hidden = !el.dataset.auth.split(' ').includes(a); });
     $$('[data-csv]', form).forEach((el) => { el.hidden = t !== 'csv'; });
+    $$('[data-api]', form).forEach((el) => { el.hidden = t !== 'api'; });
   };
   form.integration_type.addEventListener('change', sync);
   form.auth_type.addEventListener('change', sync);
@@ -778,6 +830,8 @@ async function supplierForm(detail) {
         integration_type: d.integration_type, auth_type: d.integration_type === 'manual' ? 'none' : d.auth_type,
         auth_username: d.auth_username || null, auth_param_name: d.auth_param_name || null, secret_env: d.secret_env || null,
         record_path: d.record_path || null, delimiter: d.delimiter || null,
+        page_param: d.page_param || null, page_size_param: d.page_size_param || null,
+        page_size: d.page_size ? Number(d.page_size) : null, max_pages: d.max_pages ? Number(d.max_pages) : null,
         source_url: d.clear_url ? '' : (d.source_url || null), secret: d.clear_secret ? '' : (d.secret || null),
       };
       const payload = {
@@ -806,7 +860,7 @@ async function renderSupplierDetail(id, tab) {
   const remote = c.integration_type !== 'manual' && c.has_source_url;
   setHeader(s.name, `${INTEGRATION_LABELS[c.integration_type] || c.integration_type} tedarikçi · ${s.code}`, html`
     <a class="btn" href="#/suppliers">← Tedarikçiler</a>
-    ${can('operator') && remote ? html`<button class="btn" id="sup-sync">Şimdi senkronize et</button>` : ''}
+    ${can('operator') && remote ? html`<button class="btn" id="sup-test">Bağlantıyı test et</button> <button class="btn" id="sup-sync">Şimdi senkronize et</button>` : ''}
     ${can('operator') ? html`<label class="btn" for="sup-file">Dosya yükle</label><input type="file" id="sup-file" accept=".xml,.csv,.json,.txt,text/xml,text/csv,application/json" hidden>` : ''}
     ${can('admin') ? html`<button class="btn btn-primary" id="sup-edit">Düzenle</button>` : ''}`);
   view().innerHTML = renderVal(html`
@@ -823,6 +877,10 @@ async function renderSupplierDetail(id, tab) {
     <div id="sup-tab" class="mt"></div>`);
   $$('[data-stab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/suppliers?id=${id}&tab=${b.dataset.stab}`; }));
   $('#sup-edit')?.addEventListener('click', () => supplierForm(d));
+  $('#sup-test')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { const r = await api(`/api/suppliers/${id}/test`, { method: 'POST' }); toast(r.message, !r.ok); } catch (ex) { fail(ex); } finally { e.target.disabled = false; }
+  });
   $('#sup-sync')?.addEventListener('click', async (e) => {
     e.target.disabled = true;
     try { const r = await api(`/api/suppliers/${id}/sync`, { method: 'POST' }); toast(r.message); } catch (ex) { fail(ex); } finally { e.target.disabled = false; }
@@ -1068,7 +1126,8 @@ PAGES.transfer = {
       box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Hedef pazaryerleri</h2><p>${num(T.selected.size)} ürün seçildi. Her pazaryeri kendi fiyat, komisyon, kategori ve stok kuralıyla ayrı değerlendirilir.</p></div></div>
         <div class="grid grid-3">${mps.map((m) => { const r = rmap[m.code] || {}; return html`<label class="card mp-pick"><span class="row nowrap"><input type="checkbox" name="mp" value="${m.code}" ${raw(T.marketplaces.has(m.code) ? 'checked' : '')}><b>${m.name}</b></span>
           <span class="small muted">Komisyon ${pct(r.effective_commission_rate)} · kâr oranı ${pct(r.markup_rate)} · min. marj ${pct(r.min_margin_rate)}</span>
-          <span class="small muted">Zorunlu: ${(r.required_fields || []).join(', ') || '—'}</span></label>`; })}</div>
+          <span class="small muted">Zorunlu: ${(r.required_fields || []).join(', ') || '—'}</span>
+          <span class="small"><span class="dot ${r.connector?.connected ? 'good' : ''}"></span> ${r.connector?.exists ? (r.connector.connected ? 'API bağlı (salt okunur)' : 'Bağlı değil') : 'Connector yok'} · otomatik yayın kapalı</span></label>`; })}</div>
         <p class="small muted mt">Seçilen havuz ürünleri önce kataloğa alınır: barkodu katalogda olan ürün MEVCUT ürüne bağlanır (aynı ürün iki tedarikçide olsa bile tek katalog ürünü ve pazaryeri başına tek ilan).</p>
         <div class="row mt"><a class="btn" href="#/transfer">← Ürün seçimi</a><span class="spacer"></span><button class="btn btn-primary" id="tr-build">Kataloğa al ve fiyatlandır →</button></div></div>`);
       $('#tr-build', box).addEventListener('click', async (e) => {
@@ -1179,22 +1238,29 @@ async function renderRules(box) {
   let mp = mps[0]?.code || 'trendyol';
   const drawCats = async () => {
     const d = await api('/api/category-mappings', { query: { marketplace: mp } });
-    $('#cat-box', box).innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Kaynak kategori</th><th class="r">Katalog ürünü</th><th>Pazaryeri kategori ID</th><th>Kategori adı</th></tr></thead><tbody>
+    $('#cat-box', box).innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Kaynak kategori</th><th class="r">Katalog ürünü</th><th>Pazaryeri kategori ID</th><th>Kategori adı</th><th>Özellikler (ad=değer; …)</th></tr></thead><tbody>
       ${d.items.map((c) => html`<tr><td>${c.source_category}</td><td class="r num">${num(c.product_count)}</td>
         <td>${can('operator') ? html`<input data-cid="${c.source_category}" value="${c.target_category_id || ''}" placeholder="eşleştirilmedi" aria-label="Kategori ID">` : c.target_category_id || '—'}</td>
-        <td>${can('operator') ? html`<input data-cname="${c.source_category}" value="${c.target_category_name || ''}" aria-label="Kategori adı">` : c.target_category_name || ''}</td></tr>`)}</tbody></table></div>`
+        <td>${can('operator') ? html`<input data-cname="${c.source_category}" value="${c.target_category_name || ''}" aria-label="Kategori adı">` : c.target_category_name || ''}</td>
+        <td>${can('operator') ? html`<input data-cattr="${c.source_category}" value="${Object.entries(c.attributes || {}).map(([k, v]) => `${k}=${v}`).join('; ')}" placeholder="Renk=Kahverengi; Materyal=Deri" aria-label="Kategori özellikleri">` : Object.entries(c.attributes || {}).map(([k, v]) => `${k}=${v}`).join('; ')}</td></tr>`)}</tbody></table></div>`
       : empty('Kategori yok', 'Tedarikçi ürünleri senkronize edildiğinde kaynak kategoriler burada listelenir.'));
     $$('[data-cid]', box).forEach((inp) => {
       const save = async () => {
         const id = inp.value.trim(); if (!id) return;
         const name = $$('[data-cname]', box).find((x) => x.dataset.cname === inp.dataset.cid)?.value || null;
-        try { await api('/api/category-mappings', { method: 'PUT', body: { marketplace: mp, source_category: inp.dataset.cid, target_category_id: id, target_category_name: name } }); toast('Kategori eşleştirmesi kaydedildi'); } catch (ex) { fail(ex); }
+        const rawAttrs = $$('[data-cattr]', box).find((x) => x.dataset.cattr === inp.dataset.cid)?.value || '';
+        const attributes = Object.fromEntries(rawAttrs.split(';').map((x) => x.split('=')).filter((kv) => kv.length === 2 && kv[0].trim()).map(([k, v]) => [k.trim(), v.trim()]));
+        try { await api('/api/category-mappings', { method: 'PUT', body: { marketplace: mp, source_category: inp.dataset.cid, target_category_id: id, target_category_name: name, attributes } }); toast('Kategori eşleştirmesi kaydedildi'); } catch (ex) { fail(ex); }
       };
       inp.addEventListener('change', save);
       $$('[data-cname]', box).find((x) => x.dataset.cname === inp.dataset.cid)?.addEventListener('change', save);
+      $$('[data-cattr]', box).find((x) => x.dataset.cattr === inp.dataset.cid)?.addEventListener('change', save);
     });
   };
-  box.innerHTML = renderVal(html`<div class="grid grid-3">${rules.items.map((r) => html`<form class="card rule-form" data-rule="${r.code}"><div class="card-head"><h2>${r.name}</h2></div>
+  box.innerHTML = renderVal(html`${can('admin') ? html`<div class="row" style="margin-bottom:12px"><span class="spacer"></span><button class="btn" id="add-mp">+ Yeni pazaryeri</button></div>` : ''}
+    <div class="grid grid-3">${rules.items.map((r) => html`<form class="card rule-form" data-rule="${r.code}"><div class="card-head"><h2>${r.name}</h2>
+      <span class="badge ${r.connector.connected ? 'tone-good' : ''}">${r.connector.exists ? (r.connector.connected ? 'Bağlı' : 'Bağlı değil') : 'Connector yok'}</span></div>
+      <p class="small muted" style="margin-top:0">${r.connector.reason}</p>
       <div class="form-grid">
         <label>Komisyon oranı<input name="commission_rate" type="number" step="0.001" min="0" max="0.99" value="${r.commission_rate ?? ''}" placeholder="${r.effective_commission_rate} (Ayarlar)"></label>
         <label>Kâr oranı<input name="markup_rate" type="number" step="0.01" min="0" value="${r.markup_rate}"></label>
@@ -1225,6 +1291,17 @@ async function renderRules(box) {
     });
   }));
   $('#cat-mp', box).addEventListener('change', (e) => { mp = e.target.value; drawCats(); });
+  $('#add-mp', box)?.addEventListener('click', () => {
+    const body = openModal(html`<h2>Yeni pazaryeri</h2><form class="stack" id="mpform">
+      <label>Kod<input name="code" required pattern="[a-z0-9_]+" maxlength="40" placeholder="ör. n11"></label>
+      <label>Ad<input name="name" required minlength="2" maxlength="100" placeholder="ör. N11"></label>
+      <p class="small muted">Yeni pazaryeri kendi fiyat, stok, zorunlu alan ve kategori kurallarıyla taslak hazırlamada kullanılır. API connector'ı olmadığı için “Bağlı değil” görünür; sipariş/ilan verisi üretilmez.</p>
+      <p class="form-error"></p><div class="row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Ekle</button></div></form>`);
+    $('#mpform', body).addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitting(e.target, async () => { await api('/api/marketplaces', { method: 'POST', body: formData(e.target) }); closeLayer('modal'); toast('Pazaryeri eklendi'); refresh(); });
+    });
+  });
   await drawCats();
 }
 

@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     hepsiburada_username: str = ""
     hepsiburada_password: str = ""
     hepsiburada_base_url: str = "https://oms-external.hepsiburada.com"
+    hepsiburada_listing_base_url: str = "https://listing-external.hepsiburada.com"
+    # Zorunlu User-Agent başlığı; boşsa entegrasyon kullanıcı adı kullanılır.
+    hepsiburada_user_agent: str = ""
+    hepsiburada_rate_per_minute: int = 60
+    # İlan okuma: yanıt şeması doğrulanmadı, varsayılan KAPALI (açılırsa yine yalnızca GET).
+    hepsiburada_listings_enabled: bool = False
 
     # Amazon SP-API (Türkiye pazaryeri: A33AVAJ2PDY3EV, EU bölgesi)
     amazon_sp_client_id: str = ""

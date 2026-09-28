@@ -136,6 +136,22 @@ class MarketplaceConnector(abc.ABC):
     incremental: bool = False
     # Uygulama henüz doğrulanmadıysa arayüzde gösterilecek not.
     implementation_note: str | None = None
+    # Taslak ilanı pazaryerinde ürün olarak oluşturma (yazma). Hiçbir connector'da uygulanmadı:
+    # resmi ürün oluşturma sözleşmesi doğrulanmadan ve CONNECTOR_WRITE_ENABLED=false iken yazılmaz.
+    listing_publish_supported: bool = False
+    listing_publish_note: str = "Ürün oluşturma API'si doğrulanmadı; taslaklar CSV ile dışa aktarılır."
+
+    def publish_status(self) -> dict:
+        """Ürün aktarımı ekranı için yayın durumu (salt bilgi)."""
+        write = bool(self.settings.connector_write_enabled)
+        can = self.listing_publish_supported and write
+        reason = ("Yazma kapalı (CONNECTOR_WRITE_ENABLED=false). " if not write else "") + (
+            "" if self.listing_publish_supported else self.listing_publish_note)
+        return {"can_publish": can, "reason": reason.strip()}
+
+    def publish_listing(self, draft: dict) -> None:
+        self._require_write()
+        raise NotSupported(f"{self.name}: {self.listing_publish_note}")
 
     def __init__(self, settings):
         self.settings = settings

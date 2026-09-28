@@ -67,6 +67,7 @@ def _amount(money: dict | None) -> Decimal | None:
 class AmazonTrConnector(MarketplaceConnector):
     code = "amazon_tr"
     name = "Amazon.com.tr"
+    listing_publish_note = "Amazon Listings Items API ile ürün oluşturma uygulanmadı; taslaklar CSV ile dışa aktarılır."
     capabilities = frozenset({CAP_ORDERS_READ})
     incremental = True
     implementation_note = "Salt okunur sipariş senkronizasyonu; canlı hesapla henüz doğrulanmadı."

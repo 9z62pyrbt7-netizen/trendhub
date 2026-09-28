@@ -126,12 +126,12 @@ def test_scheduler_only_for_configured_connectors(conn):
     s = Settings(**base, trendyol_seller_id="1", trendyol_api_key="k", trendyol_api_secret="s",
                  hepsiburada_merchant_id="m", hepsiburada_username="u", hepsiburada_password="p")
     created = sync_service.schedule_due_jobs(conn, 15, s)
-    # Hepsiburada senkronizasyonu uygulanmadığı için hiç iş planlanmaz
     planned = {tuple(r) for r in conn.execute(text("SELECT marketplace, job_type FROM sync_jobs"))}
-    # İlan senkronu (doğrulanmamış Ürün servisi) varsayılan kapalı olduğundan planlanmaz
+    # İlan senkronları (doğrulanmamış şemalar) varsayılan kapalı olduğundan planlanmaz
     assert planned == {("trendyol", "orders.sync"), ("trendyol", "orders.deep_sync"),
-                       ("trendyol", "integration.check")}
-    assert len(created) == 3
+                       ("trendyol", "integration.check"), ("hepsiburada", "orders.sync"),
+                       ("hepsiburada", "orders.deep_sync"), ("hepsiburada", "integration.check")}
+    assert len(created) == 6
     assert sync_service.schedule_due_jobs(conn, 15, s) == []   # interval dolmadan tekrar yok
 
     conn.execute(text("DELETE FROM sync_jobs"))

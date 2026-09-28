@@ -71,10 +71,16 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--full-name")
     r = sub.add_parser("reset-password")
     r.add_argument("--username", required=True)
+    sub.add_parser("has-admin", help="Aktif yönetici varsa 0, yoksa 3 ile çıkar (deploy betiği için)")
     a = p.parse_args(argv)
 
     if a.cmd == "healthcheck":
         return healthcheck(a.target)
+    if a.cmd == "has-admin":
+        with transaction() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active")).scalar()
+        print("yönetici var" if n else "yönetici yok")
+        return 0 if n else 3
     try:
         pw = _password()
     except ValueError as exc:

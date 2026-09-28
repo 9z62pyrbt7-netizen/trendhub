@@ -271,8 +271,9 @@ def test_worker_job_downloads_feed_over_http(client, engine, monkeypatch):
     def handler(req):
         urls.append(str(req.url))
         return httpx.Response(200, content=XML_A.encode())
-    real = supplier_sync.download
-    monkeypatch.setattr(supplier_sync, "download", lambda cfg, transport=None: real(cfg, httpx.MockTransport(handler)))
+    # Ağ çağrısı tek noktadan (suppliers.fetch.fetch) sahte transport'a yönlendirilir
+    real = fetcher.fetch
+    monkeypatch.setattr(fetcher, "fetch", lambda url, auth=None, transport=None: real(url, auth, transport=httpx.MockTransport(handler)))
     from app.worker import Worker
     w = Worker(engine=engine)
     assert w.run_once()
@@ -478,3 +479,74 @@ def test_dashboard_shows_supplier_health(client):
     s = client.get("/api/dashboard").json()["suppliers"][0]
     assert (s["name"], s["product_count"], s["in_stock_count"], s["out_of_stock_count"]) == ("Çanta Bayim", 3, 2, 1)
     assert s["last_sync_at"] and s["health"] == "ok"
+
+
+def test_supplier_comparison_lists_multi_offer_products_with_saving(client):
+    a = make_supplier(client, "Çanta Bayim", MAP_A, priority=1)
+    b = make_supplier(client, "Tedarikçi B", MAP_B, priority=2)
+    upload(client, a, XML_A)
+    ids = [i["id"] for i in client.get("/api/supplier-products", params={"supplier_id": a}).json()["items"]]
+    client.post("/api/transfer/import", json={"supplier_product_ids": ids}, headers=H)
+    upload(client, b, CSV_B)
+    d = client.get("/api/supplier-comparison").json()
+    assert d["total"] == 1 and d["summary"]["with_saving"] == 1
+    x = d["items"][0]
+    assert x["barcode"] == "8690000000017" and x["offer_count"] == 2
+    assert (x["selected_supplier"], x["cheapest_supplier"], x["highest_stock_supplier"]) == ("Çanta Bayim", "Tedarikçi B", "Çanta Bayim")
+    assert Decimal(x["saving_per_unit"]) == Decimal("8.00") and Decimal(x["min_cost"]) == Decimal("142.00")
+    assert [o["supplier_name"] for o in x["offers"]] == ["Tedarikçi B", "Çanta Bayim"]
+    # En ucuz stratejisine geçince tasarruf kalmaz
+    client.put(f"/api/products/{x['id']}/sourcing", json={"strategy": "cheapest"}, headers=H)
+    assert client.get("/api/supplier-comparison", params={"only_savings": "true"}).json()["total"] == 0
+
+
+def test_marketplace_rules_show_connection_and_publish_is_disabled(client, engine):
+    items = {x["code"]: x for x in client.get("/api/marketplace-rules").json()["items"]}
+    assert set(items) >= {"trendyol", "hepsiburada", "amazon_tr"}
+    for code in ("trendyol", "hepsiburada", "amazon_tr"):
+        c = items[code]["connector"]
+        assert c["exists"] and c["connected"] is False and c["can_publish"] is False
+        assert "CONNECTOR_WRITE_ENABLED=false" in c["reason"]
+    from app.connectors.base import WriteDisabled
+    from app.connectors.registry import all_connectors
+    for c in all_connectors():
+        with pytest.raises(WriteDisabled):
+            c.publish_listing({"id": 1})
+    # Yeni pazaryeri: connector yok, kendi kuralıyla taslak hazırlanabilir
+    r = client.post("/api/marketplaces", json={"code": "ciceksepeti", "name": "Çiçeksepeti"}, headers=H)
+    try:
+        assert r.status_code == 201
+        assert client.post("/api/marketplaces", json={"code": "ciceksepeti", "name": "Kopya"}, headers=H).status_code == 409
+        cs = {x["code"]: x for x in client.get("/api/marketplace-rules").json()["items"]}["ciceksepeti"]
+        assert cs["connector"]["exists"] is False and "connector yok" in cs["connector"]["reason"]
+    finally:
+        with engine.begin() as c:
+            c.execute(text("TRUNCATE listing_drafts, marketplace_rules, marketplace_category_mappings"))
+            c.execute(text("DELETE FROM marketplaces WHERE code = 'ciceksepeti'"))
+            c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
+
+
+def test_category_attributes_are_per_marketplace_and_copied_to_drafts(client):
+    a = make_supplier(client, "A", MAP_A)
+    upload(client, a, XML_A)
+    pids = _catalog(client, a)
+    client.put("/api/category-mappings", json={"marketplace": "trendyol", "source_category": "Çanta > Sırt Çantası",
+                                               "target_category_id": "1001", "attributes": {"Renk": "Kahverengi", "Materyal": "Deri"}},
+               headers=H)
+    client.put("/api/category-mappings", json={"marketplace": "hepsiburada", "source_category": "Çanta > Sırt Çantası",
+                                               "target_category_id": "HB-77", "attributes": {"Cinsiyet": "Unisex"}}, headers=H)
+    # attributes gönderilmezse mevcut özellikler korunur
+    client.put("/api/category-mappings", json={"marketplace": "trendyol", "source_category": "Çanta > Sırt Çantası",
+                                               "target_category_id": "1001", "target_category_name": "Sırt Çantası"}, headers=H)
+    cats = {c["source_category"]: c for c in client.get("/api/category-mappings", params={"marketplace": "trendyol"}).json()["items"]}
+    assert cats["Çanta > Sırt Çantası"]["attributes"] == {"Renk": "Kahverengi", "Materyal": "Deri"}
+    client.post("/api/transfer/drafts", json={"product_ids": pids, "marketplaces": ["trendyol", "hepsiburada"]}, headers=H)
+    from app.db import get_engine
+    with get_engine().begin() as c:
+        got = {r[0]: (r[1], r[2]) for r in c.execute(text("""
+            SELECT m.code, d.category_id, d.attributes FROM listing_drafts d JOIN marketplaces m ON m.id = d.marketplace_id
+              JOIN products p ON p.id = d.product_id WHERE p.barcode = '8690000000017'"""))}
+    assert got["trendyol"] == ("1001", {"Renk": "Kahverengi", "Materyal": "Deri"})
+    assert got["hepsiburada"] == ("HB-77", {"Cinsiyet": "Unisex"})
+    assert client.put("/api/category-mappings", json={"marketplace": "trendyol", "source_category": "x", "target_category_id": "1",
+                                                      "attributes": {f"k{i}": "v" for i in range(60)}}, headers=H).status_code == 422

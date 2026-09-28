@@ -27,10 +27,8 @@ from sqlalchemy.engine import Connection, Engine
 
 from ..connectors.base import ConnectorError
 from ..db import row, rows
-from ..suppliers import fetch as fetcher
+from ..suppliers.connectors import FetchResult, SupplierConnectorError, get_supplier_connector
 from ..suppliers.mapping import apply_mapping
-from ..suppliers.parsing import ParseError, parse
-from ..suppliers.secrets import SecretStoreError, decrypt, read_env_secret
 from .events import record_event, resolve_fingerprint
 from .supplier_catalog import link_by_barcode, refresh_catalog
 
@@ -39,8 +37,7 @@ MASS_MISSING_RATIO = Decimal("0.5")
 MAX_ERRORS_KEPT = 50
 
 
-class SupplierSyncError(ConnectorError):
-    retryable = False
+SupplierSyncError = SupplierConnectorError
 
 
 @dataclass
@@ -78,31 +75,14 @@ def load_config(conn: Connection, supplier_id: int) -> dict:
     return {"supplier": sup, "connection": con, "mapping": mapping}
 
 
-def source_auth(con: dict) -> fetcher.SourceAuth:
-    secret = decrypt(con.get("secret_enc")) if con.get("secret_enc") else read_env_secret(con.get("secret_env"))
-    return fetcher.SourceAuth(auth_type=con.get("auth_type") or "none", username=con.get("auth_username"),
-                              param_name=con.get("auth_param_name"), secret=secret)
+def connector_for(cfg: dict, transport=None):
+    return get_supplier_connector(cfg["connection"] or {"integration_type": "manual"}, transport)
 
 
-def download(cfg: dict, transport=None) -> bytes:
-    con = cfg["connection"]
-    if not con or con.get("integration_type") == "manual":
-        raise SupplierSyncError("Bu tedarikçi manuel; senkronizasyon için dosya yükleyin.")
-    try:
-        url = decrypt(con.get("source_url_enc"))
-        if not url:
-            raise SupplierSyncError("Tedarikçi kaynak adresi (XML/API/CSV URL) tanımlı değil.")
-        return fetcher.fetch(url, source_auth(con), transport=transport)
-    except SecretStoreError as exc:
-        raise SupplierSyncError(str(exc)) from None
-
-
-def parse_records(cfg: dict, content: bytes) -> tuple[list[dict], str | None]:
-    con = cfg["connection"] or {}
-    try:
-        return parse(content, con.get("integration_type") or "csv", con.get("record_path"), con.get("options") or {})
-    except ParseError as exc:
-        raise SupplierSyncError(str(exc)) from None
+def fetch_records(cfg: dict, content: bytes | None = None, transport=None) -> FetchResult:
+    """Kaynağı (URL veya yüklenen içerik) tedarikçinin connector'ıyla okuyup kayıtlara çevirir."""
+    c = connector_for(cfg, transport)
+    return c.from_content(content) if content is not None else c.fetch()
 
 
 def _hash(v: dict) -> str:
@@ -253,8 +233,8 @@ def run_supplier_sync(engine: Engine, supplier_id: int, *, trigger: str = "manua
     run_id = start_run(engine, supplier_id, trigger, job_id)
     stats = SyncStats()
     try:
-        data = content if content is not None else download(cfg, transport)
-        records, used_path = parse_records(cfg, data)
+        fetched = fetch_records(cfg, content, transport)
+        records, used_path = fetched.records, fetched.record_path
         stats.records_total = len(records)
         if not cfg["mapping"].get("supplier_sku", {}).get("source_path"):
             raise SupplierSyncError("Alan eşleştirmesi eksik: 'Tedarikçi ürün kodu (SKU)' alanı eşleştirilmeli.")

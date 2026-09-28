@@ -213,7 +213,7 @@ Her connector bağımsızdır. Birinin hatası diğerini etkilemez ve her iş ay
 |---|---|
 | Trendyol | **Sipariş okuma (Order V2):** `GET /integration/order/sellers/{id}/v2/orders` (15.10.2026'dan itibaren zorunlu; 404 dönerse bir kez v1'e düşer). Sayfalama, 14 günlük pencereler, en fazla 30 gün geriye (servis sınırı: 1 ay, 10.000 kayıt, 1000 istek/dk), paket birleştirme. 6 Nisan 2026'da yeniden adlandırılan alanlar (`shipmentPackageId`, `lineId`, `stockCode`, `lineUnitPrice`, `lineGrossAmount`, `lineSellerDiscount`, `vatRate`) önceliklidir; eski adlar yedektir. `orderDate` GMT+3 olarak gelir ve UTC'ye çevrilir. Kaynak: developers.trendyol.com changelog ve servis dokümanları. **Canlı hesapla doğrulanmadı.** **İlan okuma:** Ürün V1 kapatılıyor, V2 filtre şeması doğrulanamadı → `TRENDYOL_LISTINGS_ENABLED=false` (varsayılan kapalı). |
 | Amazon.com.tr | **Sipariş okuma:** LWA token + Orders API v0 (`getOrders`, `getOrderItems`), SP-API rate limitleri, `LastUpdatedAfter` ile artımlı (watermark − 1 saat). Kargo takibi, müşteri adı ve komisyon bu API'de yok. **Canlı hesapla doğrulanmadı.** |
-| Hepsiburada | Credential algılama ve statü eşlemesi hazır. **Sipariş/ilan okuma uygulanmadı.** API sözleşmesi doğrulanmadan tahminle kod yazılmadı. |
+| Hepsiburada | **Sipariş (paket) okuma:** `GET https://oms-external.hepsiburada.com/packages/merchantid/{merchantId}?begindate&enddate&limit&offset` (tarih `YYYY-MM-DD HH:mm`, Türkiye saati), HTTP Basic (entegrasyon kullanıcı adı/şifre) + zorunlu `User-Agent` (varsayılan kullanıcı adı), offset sayfalama (`totalcount`), 7 günlük pencereler, en fazla 30 gün geriye; paket kalemleri `orderNumber`'a göre siparişte birleşir; bilinmeyen statü → `needs_review`. Kaynak: developers.hepsiburada.com (arama özetleri; portal bu ortamdan engelli). **Canlı hesapla doğrulanmadı.** **İlan okuma:** `listing-external` `/listings/merchantid/{id}` — şema doğrulanmadı → `HEPSIBURADA_LISTINGS_ENABLED=false`. Yazma yok. |
 
 Credential yoksa entegrasyon **"Bağlı değil"** görünür, hiçbir iş planlanmaz ve hiçbir veri üretilmez. Credential değerleri API'den hiçbir zaman dönmez; yalnızca "Tanımlı / Eksik" bilgisi gösterilir.
 
@@ -245,6 +245,12 @@ Sistem hiçbir tedarikçiye özel değildir; **Çanta Bayim yalnızca ilk tedari
 | `marketplace_rules`, `marketplace_category_mappings` | Pazaryeri başına fiyat/komisyon/stok/zorunlu alan kuralı ve kategori eşleştirmesi |
 | `listing_drafts` | (katalog ürünü, pazaryeri) başına **tek** taslak ilan |
 
+**Connector sınıfları** (`app/suppliers/connectors.py`): `XmlFeedConnector`, `JsonApiConnector`
+(sayfa/limit parametreli sayfalama; sayfalamayı yok sayan API'de döngüye girmez), `CsvFeedConnector`,
+`ManualUploadConnector`; `CONNECTORS` kayıt defteri. Yeni tür = yeni sınıf + bir satır. Her connector
+`fetch()`, `from_content()` ve `test_connection()` (panelde **Bağlantıyı test et**, DB'ye yazmaz) sunar.
+Çanta Bayim `XmlFeedConnector` kullanan bir şablondur.
+
 **Katman:** `app/suppliers/` — `parsing.py` (XML `defusedxml` ile, JSON, CSV; kayıt yolu otomatik
 tespit), `mapping.py` (Türkçe sayı biçimleri, Decimal), `fields.py` (hedef alanlar + eşanlamlılardan
 otomatik öneri), `fetch.py` (yalnızca GET, SSRF koruması, boyut sınırı), `secrets.py` (Fernet;
@@ -271,6 +277,16 @@ ile yazılır; geçmiş siparişler değişmez). Strateji `manual` ve tercih yok
 Validate → Yayına Hazırla. Fiyat = (maliyet × (1 + kâr oranı) + kargo + sabit gider) ÷ (1 − komisyon),
 yuvarlanır. **Pazaryerine gönderim yoktur** (`CONNECTOR_WRITE_ENABLED=false`); hazır taslaklar
 yalnızca CSV olarak indirilebilir.
+
+**Tedarikçi karşılaştırma** (`GET /api/supplier-comparison`, panel: Tedarikçiler → Tedarikçi
+karşılaştırma): birden çok teklifli ürünlerde teklifler, seçili / en ucuz / en yüksek stoklu tedarikçi
+ve adet başı olası tasarruf.
+
+**Çoklu pazaryeri:** pazaryerleri tablo tabanlıdır; her birinin `marketplace_rules` kuralı ve
+`marketplace_category_mappings` (kategori ID + özellikler) eşleştirmesi ayrıdır. Panelden yeni pazaryeri
+eklenebilir (`POST /api/marketplaces`); connector'ı yoksa "Connector yok" görünür. Her connector
+`publish_status()` ile yayın durumunu bildirir; `publish_listing()` hiçbir connector'da uygulanmadı ve
+`CONNECTOR_WRITE_ENABLED=false` iken `WriteDisabled` verir.
 
 **Güvenlik:** URL ve secret'lar API yanıtlarında asla dönmez (yalnızca maskeli URL ve
 "tanımlı mı"); denetim kaydına değer yazılmaz; çözülen secret'lar log maskeleyicisine eklenir;
@@ -353,7 +369,7 @@ Veri gerekirse `backups/` altındaki yedekten `pg_restore` ile geri yüklenir.
 * Trendyol ilan (ürün/stok/fiyat) okuma: Ürün V2 filtre servisinin yanıt şeması doğrulanınca açılmalı.
 * Trendyol hakediş (settlement) API'si bağlanmadı; komisyon şu an **tahmini**. Gerçek tutar manuel girilebilir.
 * Amazon Finances API (gerçek ücretler) ve Amazon ilan okuma (Reports API) yok.
-* Hepsiburada sipariş/ilan okuma yok.
+* Hepsiburada sipariş (paket) okuma: uç nokta, kimlik doğrulama ve sayfalama resmi dokümanın arama özetleriyle doğrulandı (portal bu ortamdan erişilemiyor); alan eşlemesi canlı hesapla doğrulanmalı. HB ilan okuma şeması doğrulanmadı (`HEPSIBURADA_LISTINGS_ENABLED=false`). Paket statü değişikliklerini (ör. teslim) yakalamak için özel statü uç noktaları eklenmedi.
 * Stok/fiyat gönderimi bilinçli olarak kapalı ve uygulanmadı. Ürün aktarımı taslak + CSV ile sınırlıdır; pazaryeri ürün oluşturma API'leri resmi dokümantasyonla doğrulanmadan yazılmayacak.
 * Çanta Bayim'in gerçek XML alan adları bu ortamdan doğrulanamadı: şablon alan adı içermez, önizlemede eşanlamlılardan öneri üretir; ilk kurulumda eşleştirme panelden kontrol edilmeli.
 * Pazaryeri kategori ağaçları ve zorunlu özellikler (attributes) API'den çekilmiyor; kategori ID'si elle girilir, varsayılan zorunlu alanlar düzenlenebilir varsayımlardır.

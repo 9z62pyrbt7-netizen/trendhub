@@ -116,6 +116,7 @@ def aggregate_status(statuses: list[str]) -> str:
 class TrendyolConnector(MarketplaceConnector):
     code = "trendyol"
     name = "Trendyol"
+    listing_publish_note = "Trendyol Ürün V2 oluşturma sözleşmesi doğrulanmadı; taslaklar CSV ile dışa aktarılır."
     capabilities = frozenset({CAP_ORDERS_READ})
     credential_fields = [
         CredentialField("TRENDYOL_SELLER_ID", "Satıcı ID (Supplier ID)", secret=False),
