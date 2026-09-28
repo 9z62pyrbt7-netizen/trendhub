@@ -383,3 +383,7 @@ td .price-in, td .cat-in { min-height: 32px; padding: 4px 8px; }
 .sev-tile { text-align: left; cursor: pointer; font: inherit; color: inherit; }
 .sev-tile.on { outline: 2px solid var(--primary); }
 @media (max-width: 640px) { .attention-box { flex-wrap: wrap; } .attention-box .go { margin-left: 0; } }
+.gate-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; }
+.gate-list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.gate-list li.no { background: var(--bad-soft); }
+.gate-list li.ok { background: var(--good-soft); }

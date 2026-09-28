@@ -1242,13 +1242,36 @@ PAGES.transfer = {
       d.items.forEach((x) => { (byMp[x.marketplace] ||= { name: x.marketplace_name, ready: 0, invalid: 0 })[x.status === 'ready' ? 'ready' : 'invalid'] += 1; });
       box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><h2>Yayına hazır</h2></div>
         <div class="grid grid-3">${Object.entries(byMp).map(([code, v]) => html`<div class="card"><h3>${v.name}</h3><p><b class="pos">${num(v.ready)}</b> hazır · <b class="${v.invalid ? 'neg' : ''}">${num(v.invalid)}</b> eksik/hatalı</p>
-          ${v.ready ? html`<a class="btn btn-sm" href="/api/listing-drafts/export.csv?marketplace=${encodeURIComponent(code)}" download>CSV indir</a>` : ''}</div>`)}</div>
+          ${v.ready ? html`<div class="row"><a class="btn btn-sm" href="/api/listing-drafts/export.csv?marketplace=${encodeURIComponent(code)}" download>CSV indir</a>
+            ${can('admin') ? html`<button class="btn btn-sm btn-primary" data-publish="${code}">Pazaryerine gönder…</button>` : ''}</div>` : ''}</div>`)}</div>
         <p class="small muted mt">Pazaryerine otomatik yükleme kapalıdır. CSV dosyasını pazaryerinin satıcı panelinden toplu ürün yükleme ile kullanabilirsiniz; hatalı taslakları “Tüm taslaklar” sekmesinden düzeltebilirsiniz.</p>
         <div class="row mt"><a class="btn" href="#/transfer?step=pricing">← Fiyat & doğrulama</a><span class="spacer"></span><button class="btn btn-primary" id="tr-new">Yeni aktarım</button></div></div>`);
       $('#tr-new', box).addEventListener('click', () => { T.selected.clear(); T.draftIds = []; T.productIds = []; location.hash = '#/transfer'; });
+      $$('[data-publish]', box).forEach((b) => b.addEventListener('click', () => publishFlow(b.dataset.publish, d.items.filter((x) => x.marketplace === b.dataset.publish).map((x) => x.id))));
     }
   },
 };
+
+// ---- Kontrollü yayın: önizleme -> kapılar -> tek kullanımlık onay (yalnızca yönetici)
+async function publishFlow(code, draftIds) {
+  if (!draftIds.length) { toast('Taslak seçin', true); return; }
+  let pv;
+  try { pv = await api('/api/publish/preview', { method: 'POST', body: { marketplace: code, draft_ids: draftIds } }); } catch (e) { fail(e); return; }
+  const body = openModal(html`<h2>Yayın onayı · ${pv.marketplace_name}</h2>
+    <div class="notice ${pv.sendable.length ? 'info' : 'warn'}"><b>${pv.summary}</b>${pv.blocked_summary ? html` · ${pv.blocked_summary}` : ''}</div>
+    <h3 class="mt">Güvenlik kontrolleri</h3>
+    <ul class="gate-list">${pv.gates.map((g) => html`<li class="${g.ok ? 'ok' : 'no'}"><span aria-hidden="true">${g.ok ? '✅' : '⛔'}</span><span><b>${g.label}</b>${g.hint ? html`<span class="small muted" style="display:block">${g.hint}</span>` : ''}</span></li>`)}</ul>
+    ${pv.sendable.length ? html`<details class="mt" open><summary>Gönderilecek ürünler (${pv.sendable.length})</summary><ul class="small">${pv.sendable.map((x) => html`<li>${x.title} · ${x.barcode || '—'} · ${money(x.price)} · stok ${num(x.stock)}</li>`)}</ul></details>` : ''}
+    ${pv.blocked.length ? html`<details class="mt"><summary>Gönderilmeyecek ürünler (${pv.blocked.length})</summary><ul class="small">${pv.blocked.map((x) => html`<li><b>${x.title || `Taslak #${x.draft_id}`}</b>${x.reasons.map((r) => html`<span class="neg" style="display:block">• ${r}</span>`)}</li>`)}</ul></details>` : ''}
+    ${pv.notice ? html`<div class="notice warn mt">${pv.notice}</div>` : ''}
+    <div class="row mt"><span class="spacer"></span><button class="btn" data-close>Vazgeç</button>
+      <button class="btn btn-primary" id="pub-confirm" ${raw(pv.can_confirm ? '' : 'disabled')}>${pv.can_confirm ? `Onayla ve ${pv.sendable.length} ürünü gönder` : 'Gönderim şu an mümkün değil'}</button></div>`);
+  $('#pub-confirm', body)?.addEventListener('click', async (e) => {
+    if (!confirm(`${pv.summary}. Onaylıyor musunuz?`)) return;
+    e.target.disabled = true;
+    try { const r = await api('/api/publish/confirm', { method: 'POST', body: { token: pv.token, confirm: true } }); closeLayer('modal'); toast(r.message); } catch (ex) { fail(ex); }
+  });
+}
 
 async function renderDrafts(box, { ids = null, wizard = false }) {
   const mps = await api('/api/marketplaces');
@@ -1274,7 +1297,8 @@ async function renderDrafts(box, { ids = null, wizard = false }) {
             ${(x.errors || []).map((e) => html`<span class="small neg" style="display:block">• ${e}</span>`)}${(x.warnings || []).map((w) => html`<span class="small warn-text" style="display:block">• ${w}</span>`)}</td></tr>`)}
         </tbody></table></div>${wizard ? '' : pager(d, load)}` : empty('Taslak yok', 'Ürün Aktarımı sihirbazıyla tedarikçi ürünlerini seçip pazaryeri taslakları oluşturun.')}
       ${can('operator') && d.items.length ? html`<div class="row mt">${wizard ? html`<a class="btn" href="#/transfer?step=marketplaces">← Pazaryeri</a>` : html`<button class="btn" id="dr-cancel">Seçilenleri iptal et</button>`}<span class="spacer"></span>
-        <button class="btn" id="dr-validate">Yeniden doğrula</button><button class="btn btn-primary" id="dr-prepare">${wizard ? 'Yayına hazırla →' : 'Seçilenleri yayına hazırla'}</button></div>` : ''}</div>`);
+        <button class="btn" id="dr-validate">Yeniden doğrula</button><button class="btn btn-primary" id="dr-prepare">${wizard ? 'Yayına hazırla →' : 'Seçilenleri yayına hazırla'}</button>
+        ${!wizard && can('admin') ? html`<button class="btn" id="dr-publish" title="Önizleme ve onay ile">Seçilenleri yayınla…</button>` : ''}</div>` : ''}</div>`);
     const targetIds = () => (wizard ? d.items.map((x) => x.id) : $$('[data-dsel]:checked', box).map((c) => Number(c.dataset.dsel)));
     $$('[data-preview]', box).forEach((b) => b.addEventListener('click', () => showDraftPreview(Number(b.dataset.preview), () => load(page))));
     $('#dr-f', box)?.addEventListener('submit', (e) => { e.preventDefault(); Object.assign(f, formData(e.target)); load(1); });
@@ -1310,6 +1334,12 @@ async function renderDrafts(box, { ids = null, wizard = false }) {
         toast(`${r.ready} taslak yayına hazır${r.invalid ? `, ${r.invalid} hatalı` : ''}`);
         if (wizard) location.hash = '#/transfer?step=ready'; else load(page);
       } catch (ex) { fail(ex); }
+    });
+    $('#dr-publish', box)?.addEventListener('click', () => {
+      const chosen = d.items.filter((x) => targetIds().includes(x.id));
+      const codes = [...new Set(chosen.map((x) => x.marketplace))];
+      if (codes.length !== 1) { toast(chosen.length ? 'Tek seferde tek pazaryeri seçin' : 'Taslak seçin', true); return; }
+      publishFlow(codes[0], chosen.map((x) => x.id));
     });
     $('#dr-cancel', box)?.addEventListener('click', async () => {
       const t = targetIds(); if (!t.length) { toast('Taslak seçin', true); return; }

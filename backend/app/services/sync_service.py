@@ -35,6 +35,7 @@ JOB_LABELS_TR = {
     INTEGRATION_CHECK: "Bağlantı testi",
     SUPPLIER_SYNC: "Tedarikçi senkronizasyonu",
     ALERTS_SCAN: "Uyarı taraması",
+    "listing.publish": "Ürün yayınlama (onaylı)",
 }
 
 
@@ -135,6 +136,9 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
         return _scan_after(engine, _execute_sync(engine, job, payload, settings))
     if t == INTEGRATION_CHECK:
         return run_integration_check(engine, job["marketplace"], settings)
+    if t == "listing.publish":
+        from .publishing import run_publish_job
+        return run_publish_job(engine, job, settings)
     raise NotSupported(f"Bilinmeyen iş tipi: {t}")
 
 

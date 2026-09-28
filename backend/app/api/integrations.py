@@ -210,3 +210,23 @@ def remove_connection(code: str, request: Request, user: CurrentUser = Depends(_
               entity_type="integration", entity_id=code, ip=client_ip(request),
               details={"message": f"{c.name} bağlantısı kaldırıldı"})
     return {"ok": True}
+
+
+class WritePermissionIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/{code}/write-permission")
+def set_write_permission(code: str, body: WritePermissionIn, request: Request, user: CurrentUser = Depends(_admin),
+                         conn: Connection = Depends(get_conn)):
+    """Mağaza yayın izni. Yayın API'si doğrulanmamış pazaryerinde AÇILAMAZ (409)."""
+    from ..services import publishing
+    c = _connector_or_404(code)
+    try:
+        publishing.set_store_write(conn, code, body.enabled)
+    except publishing.PublishError as exc:
+        raise HTTPException(409, str(exc)) from None
+    log_audit(conn, actor=user.username, user_id=user.id, action="integration.write_permission",
+              entity_type="integration", entity_id=code, ip=client_ip(request),
+              details={"message": f"{c.name} yayın izni {'açıldı' if body.enabled else 'kapatıldı'}"})
+    return {"ok": True, "enabled": body.enabled}
