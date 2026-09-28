@@ -44,10 +44,27 @@ class DraftsIn(BaseModel):
     marketplaces: list[str] = Field(min_length=1, max_length=20)
 
 
+def _clean_attrs(v):
+    if v is None:
+        return v
+    if len(v) > 50 or any(len(str(k)) > 100 or len(str(x)) > 300 for k, x in v.items()):
+        raise ValueError("En fazla 50 özellik; ad 100, değer 300 karakter")
+    return {str(k).strip(): str(x).strip() for k, x in v.items() if str(k).strip()}
+
+
 class DraftPatch(BaseModel):
     price: Decimal | None = Field(None, ge=0, le=Decimal("10000000"))
     auto_price: bool = False
+    # "" -> elle girilen kategoriyi kaldır, eşleştirmeye dön
     category_id: str | None = Field(None, max_length=100)
+    attributes: dict[str, str] | None = None
+    reset_attributes: bool = False
+
+    @field_validator("attributes")
+    @classmethod
+    def _attrs(cls, v):
+        return _clean_attrs(v)
+
     category_name: str | None = Field(None, max_length=300)
 
 
@@ -70,17 +87,27 @@ class CategoryMapIn(BaseModel):
     source_category: str = Field(min_length=1, max_length=500)
     target_category_id: str = Field(min_length=1, max_length=100)
     target_category_name: str | None = Field(None, max_length=300)
-    # Pazaryeri kategori özellikleri (ör. {"Renk": "Kahverengi"}); taslaklara kopyalanır
+    # Pazaryeri kategori özellikleri (ör. {"Renk": "Kahverengi"}); taslaklara varsayılan olarak kopyalanır
     attributes: dict[str, str] | None = None
+    # Bu kategoride doldurulması zorunlu özellik adları (doğrulamada kontrol edilir)
+    required_attributes: list[str] | None = Field(None, max_length=50)
 
     @field_validator("attributes")
     @classmethod
     def _attrs(cls, v):
+        return _clean_attrs(v)
+
+    @field_validator("required_attributes")
+    @classmethod
+    def _req(cls, v):
         if v is None:
             return v
-        if len(v) > 50 or any(len(str(k)) > 100 or len(str(x)) > 300 for k, x in v.items()):
-            raise ValueError("En fazla 50 özellik; ad 100, değer 300 karakter")
-        return {str(k).strip(): str(x).strip() for k, x in v.items() if str(k).strip()}
+        out = []
+        for x in v:
+            x = str(x).strip()[:100]
+            if x and x not in out:
+                out.append(x)
+        return out
 
 
 class MarketplaceIn(BaseModel):
@@ -148,7 +175,8 @@ def list_drafts(page: Page = Depends(), marketplace: str | None = None,
         SELECT d.id, d.product_id, p.sku, p.barcode, p.name, p.brand, p.category, m.code AS marketplace,
                m.name AS marketplace_name, d.price, d.price_is_manual, d.stock, d.cost_basis, d.commission_rate,
                d.estimated_profit, d.estimated_margin, d.category_id, d.category_name, d.status, d.errors, d.warnings,
-               d.existing_listing_id, d.validated_at, d.updated_at, s.name AS supplier_name
+               d.existing_listing_id, d.validated_at, d.updated_at, s.name AS supplier_name, d.attributes,
+               d.category_is_manual, d.attributes_override
         {base} ORDER BY p.name, m.id LIMIT :limit OFFSET :offset
     """, **params, limit=page.page_size, offset=page.offset)
     for it in items:
@@ -166,16 +194,72 @@ def patch_draft(draft_id: int, body: DraftPatch, request: Request, user: Current
     d = row(conn, "SELECT id, status FROM listing_drafts WHERE id = :id", id=draft_id)
     if d is None:
         raise not_found("Taslak")
-    cat = None
+    cat, reset_cat = None, False
     if body.category_id is not None:
-        cat = {"target_category_id": body.category_id.strip() or None, "target_category_name": body.category_name,
-               "attributes": {}}
+        if body.category_id.strip():
+            cat = {"target_category_id": body.category_id.strip(), "target_category_name": body.category_name}
+        else:
+            reset_cat = True
     revalidate(conn, [draft_id], price=None if body.auto_price else body.price, reset_price=body.auto_price,
-               category=cat)
+               category=cat, reset_category=reset_cat, attributes=body.attributes,
+               reset_attributes=body.reset_attributes)
     log_audit(conn, actor=user.username, user_id=user.id, action="listing_draft.updated", entity_type="listing_draft",
               entity_id=draft_id, ip=client_ip(request), details=body.model_dump(mode="json"))
-    return row(conn, "SELECT id, price, status, errors, warnings, estimated_profit, estimated_margin FROM listing_drafts WHERE id = :id",
+    return row(conn, """SELECT id, price, status, errors, warnings, estimated_profit, estimated_margin, category_id,
+                              attributes, category_is_manual, attributes_override FROM listing_drafts WHERE id = :id""",
                id=draft_id)
+
+
+def _publish_status(code: str) -> dict:
+    from ..connectors.registry import CONNECTOR_CLASSES, get_connector
+    if code not in CONNECTOR_CLASSES:
+        return {"connector": False, "connected": False, "can_publish": False,
+                "reason": "Bu pazaryeri için connector yok; taslaklar CSV ile dışa aktarılır."}
+    c = get_connector(code)
+    return {"connector": True, "connected": c.is_configured(), **c.publish_status()}
+
+
+@router.get("/api/listing-drafts/{draft_id}/preview")
+def preview_draft(draft_id: int, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Yayın önizlemesi: taslağın güncel hesaplanmış hâli, fiyat/kâr dökümü, doğrulama ve yayın durumu.
+
+    Veritabanına yazmaz, pazaryerine hiçbir istek göndermez. `payload` TrendHub'ın nötr alan
+    adlarıyladır; pazaryeri API şeması DEĞİLDİR (ürün oluşturma sözleşmeleri doğrulanmadı)."""
+    from ..services.listing_drafts import _manual_parts, _products, compute
+    from ..services.supplier_catalog import load_offers
+    d = row(conn, """SELECT d.*, m.code AS marketplace_code, m.name AS marketplace_name FROM listing_drafts d
+                      JOIN marketplaces m ON m.id = d.marketplace_id WHERE d.id = :id""", id=draft_id)
+    if d is None:
+        raise not_found("Taslak")
+    mp = {"id": d["marketplace_id"], "code": d["marketplace_code"]}
+    rule, extra = marketplace_rule(conn, mp)
+    product = _products(conn, [d["product_id"]])[0]
+    offers = load_offers(conn, [d["product_id"]]).get(d["product_id"], [])
+    mcat, mattr = _manual_parts(d)
+    manual_price = Decimal(d["price"]) if d["price_is_manual"] and d["price"] is not None else None
+    c = compute(conn, product, mp, offers, rule, extra, manual_price=manual_price,
+                manual_category=mcat, manual_attributes=mattr)
+    e = c["estimate"]
+    status = _publish_status(d["marketplace_code"])
+    return {
+        "draft": {"id": d["id"], "status": d["status"], "status_label": DRAFT_STATUS_TR.get(d["status"], d["status"]),
+                  "marketplace": d["marketplace_code"], "marketplace_name": d["marketplace_name"]},
+        "publish": {**status, "will_send": False,
+                    "message": "Gönderim yapılmaz. " + status["reason"]},
+        "valid": not c["errors"], "errors": c["errors"], "warnings": c["warnings"],
+        "required_attributes": c["required_attributes"],
+        "pricing": None if e is None else {
+            "price": e.price, "commission_rate": rule.commission_rate, "commission": e.commission,
+            "shipping": e.shipping, "fixed": e.fixed, "cost": e.cost, "vat": e.vat, "profit": e.profit,
+            "margin": e.margin, "min_margin_rate": rule.min_margin_rate, "is_estimate": True},
+        "payload": {"barcode": product["barcode"], "sku": product["sku"], "model_code": product["model_code"],
+                    "title": product["name"], "brand": product["brand"], "category_id": c["category_id"],
+                    "category_name": c["category_name"], "attributes": c["attributes"], "price": c["price"],
+                    "stock": c["stock"], "vat_rate": product["vat_rate"], "desi": product["desi"],
+                    "description": product["description"], "images": product["images"] or [],
+                    "supplier": c["supplier_name"]},
+        "payload_note": "TrendHub alanları; pazaryeri API şeması değildir.",
+    }
 
 
 @router.post("/api/listing-drafts/validate")
@@ -298,10 +382,11 @@ def list_category_mappings(marketplace: str = "trendyol", _: CurrentUser = Depen
             SELECT category, 0 FROM supplier_products WHERE category IS NOT NULL AND category <> '' GROUP BY category
         )
         SELECT c.source_category, SUM(c.product_count) AS product_count, m.target_category_id, m.target_category_name,
-               COALESCE(m.attributes, '{}'::jsonb) AS attributes
+               COALESCE(m.attributes, '{}'::jsonb) AS attributes,
+               COALESCE(m.required_attributes, '[]'::jsonb) AS required_attributes
           FROM cats c LEFT JOIN marketplace_category_mappings m
             ON m.marketplace_id = :m AND m.source_category = c.source_category
-         GROUP BY c.source_category, m.target_category_id, m.target_category_name, m.attributes
+         GROUP BY c.source_category, m.target_category_id, m.target_category_name, m.attributes, m.required_attributes
          ORDER BY (m.target_category_id IS NULL) DESC, SUM(c.product_count) DESC, c.source_category LIMIT 500
     """, m=mp["id"])
     return {"marketplace": mp, "items": items}
@@ -313,15 +398,18 @@ def put_category_mapping(body: CategoryMapIn, request: Request, user: CurrentUse
     mp = _mp(conn, body.marketplace)
     conn.execute(text("""
         INSERT INTO marketplace_category_mappings(marketplace_id, source_category, target_category_id, target_category_name,
-               attributes, updated_at)
-        VALUES (:m, :s, :t, :n, CAST(:a AS JSONB), NOW())
+               attributes, required_attributes, updated_at)
+        VALUES (:m, :s, :t, :n, CAST(:a AS JSONB), CAST(:r AS JSONB), NOW())
         ON CONFLICT (marketplace_id, source_category) DO UPDATE SET target_category_id = EXCLUDED.target_category_id,
                target_category_name = EXCLUDED.target_category_name,
                attributes = CASE WHEN :keep THEN marketplace_category_mappings.attributes ELSE EXCLUDED.attributes END,
+               required_attributes = CASE WHEN :keep_req THEN marketplace_category_mappings.required_attributes
+                                          ELSE EXCLUDED.required_attributes END,
                updated_at = NOW()
     """), {"m": mp["id"], "s": body.source_category, "t": body.target_category_id.strip(),
            "n": body.target_category_name, "a": json.dumps(body.attributes or {}, ensure_ascii=False),
-           "keep": body.attributes is None})
+           "keep": body.attributes is None, "r": json.dumps(body.required_attributes or [], ensure_ascii=False),
+           "keep_req": body.required_attributes is None})
     log_audit(conn, actor=user.username, user_id=user.id, action="category_mapping.updated", entity_type="marketplace",
               entity_id=mp["id"], ip=client_ip(request), details=body.model_dump())
     return {"ok": True}

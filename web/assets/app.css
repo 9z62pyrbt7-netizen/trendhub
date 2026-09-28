@@ -302,6 +302,10 @@ details > summary { cursor: pointer; font-weight: 600; }
 td .price-in, td .cat-in { min-height: 32px; padding: 4px 8px; }
 .nowrap-cell { white-space: nowrap; }
 
+.counts { display: flex; gap: 8px; margin: 8px 0; }
+.counts > div { flex: 1; min-width: 0; background: var(--surface-2); border-radius: 8px; padding: 8px; text-align: center; }
+.counts b { display: block; font-size: 18px; }
+
 /* Duyarlı */
 @media (max-width: 1200px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }

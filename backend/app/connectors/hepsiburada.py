@@ -142,6 +142,13 @@ class HepsiburadaConnector(MarketplaceConnector):
             "doğrulandı; alan eşlemesi canlı hesapla henüz doğrulanmadı. İlan senkronu: "
             + ("AÇIK (şema doğrulanmadı)" if CAP_PRODUCTS_READ in self.capabilities else "kapalı — şema doğrulanmadı"))
 
+    def optional_settings(self) -> list[dict]:
+        s = self.settings
+        return [{"env": "HEPSIBURADA_USER_AGENT", "label": "User-Agent başlığı",
+                 "value": "tanımlı" if (s.hepsiburada_user_agent or "").strip() else "kullanıcı adı kullanılır"},
+                {"env": "HEPSIBURADA_LISTINGS_ENABLED", "label": "İlan okuma (şema doğrulanmadı)",
+                 "value": "açık" if CAP_PRODUCTS_READ in self.capabilities else "kapalı"}]
+
     def credential_values(self) -> dict[str, str]:
         s = self.settings
         return {

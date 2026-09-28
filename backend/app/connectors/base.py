@@ -141,6 +141,10 @@ class MarketplaceConnector(abc.ABC):
     listing_publish_supported: bool = False
     listing_publish_note: str = "Ürün oluşturma API'si doğrulanmadı; taslaklar CSV ile dışa aktarılır."
 
+    def optional_settings(self) -> list[dict]:
+        """Arayüzde gösterilecek gizli OLMAYAN isteğe bağlı ayarlar (bayraklar/uç noktalar)."""
+        return []
+
     def publish_status(self) -> dict:
         """Ürün aktarımı ekranı için yayın durumu (salt bilgi)."""
         write = bool(self.settings.connector_write_enabled)

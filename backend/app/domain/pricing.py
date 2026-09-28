@@ -91,7 +91,8 @@ class DraftCheck:
 def validate_draft(*, product: dict, price: Decimal | None, stock: int | None, cost: Decimal | None,
                    category_id: str | None, estimate: ProfitEstimate | None, rule: PricingRule,
                    required_fields: list[str], title_max_length: int | None, min_stock: int,
-                   existing_listing: bool) -> DraftCheck:
+                   existing_listing: bool, attributes: dict | None = None,
+                   required_attributes: list[str] | None = None) -> DraftCheck:
     c = DraftCheck()
     if existing_listing:
         c.errors.append("Bu ürün bu pazaryerinde zaten ilanda; ikinci ilan açılmaz (mevcut ilanı güncelleyin).")
@@ -122,6 +123,10 @@ def validate_draft(*, product: dict, price: Decimal | None, stock: int | None, c
         c.errors.append("Kullanılabilir stok yok")
     elif stock < min_stock:
         c.warnings.append(f"Stok ({stock}) pazaryeri minimumunun ({min_stock}) altında")
+    attrs = attributes or {}
+    missing = [a for a in (required_attributes or []) if not str(attrs.get(a) or "").strip()]
+    if missing:
+        c.errors.append("Zorunlu kategori özelliği eksik: " + ", ".join(missing))
     if not product.get("description"):
         c.warnings.append("Açıklama boş")
     return c

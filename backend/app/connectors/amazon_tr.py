@@ -90,6 +90,10 @@ class AmazonTrConnector(MarketplaceConnector):
         self._orders_limiter = RateLimiter(1, burst=20, sleep=self._sleep)       # getOrders: 0.0167 rps, burst 20
         self._items_limiter = RateLimiter(30, burst=30, sleep=self._sleep)      # getOrderItems: 0.5 rps, burst 30
 
+    def optional_settings(self) -> list[dict]:
+        return [{"env": "AMAZON_SP_MARKETPLACE_ID", "label": "Pazaryeri kimliği",
+                 "value": self.settings.amazon_sp_marketplace_id}]
+
     def credential_values(self) -> dict[str, str]:
         s = self.settings
         return {
