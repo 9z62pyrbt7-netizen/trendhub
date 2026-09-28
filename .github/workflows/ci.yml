@@ -60,6 +60,7 @@ jobs:
           sed -i 's#^DATABASE_URL=.*#DATABASE_URL=postgresql://trendhub:ci-db-password@db:5432/trendhub#' .env
           sed -i 's/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=ci-admin-password-123/' .env
           sed -i 's/^COOKIE_SECURE=.*/COOKIE_SECURE=false/' .env
+          sed -i 's/^APP_SECRET=.*/APP_SECRET=ci-app-secret-not-a-real-secret-123/' .env
       - run: docker compose config -q
       - run: docker compose build
       - name: Yığını başlat ve sağlıklı olmasını bekle

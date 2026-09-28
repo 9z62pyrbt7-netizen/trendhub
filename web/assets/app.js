@@ -49,7 +49,7 @@ function localSet(k, v) { try { localStorage.setItem(k, v); } catch { /* yok say
 class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
-async function api(path, { method = 'GET', body, query } = {}) {
+async function api(path, { method = 'GET', body, query, rawBody } = {}) {
   let url = path;
   if (query) {
     const qs = new URLSearchParams();
@@ -59,9 +59,11 @@ async function api(path, { method = 'GET', body, query } = {}) {
   }
   const headers = { 'X-Requested-With': 'TrendHub' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
+  // rawBody: dosya yükleme (XML/CSV/JSON) — gövde olduğu gibi gönderilir
+  if (rawBody !== undefined) headers['Content-Type'] = 'application/octet-stream';
   let res;
   try {
-    res = await fetch(url, { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
+    res = await fetch(url, { method, headers, credentials: 'same-origin', body: rawBody !== undefined ? rawBody : body === undefined ? undefined : JSON.stringify(body) });
   } catch {
     throw new ApiError(0, 'Sunucuya ulaşılamadı. Bağlantınızı kontrol edin.');
   }
@@ -350,6 +352,8 @@ PAGES.dashboard = {
           <div class="card"><div class="card-head"><h2>Kâr dökümü ${TAHMINI}</h2><a href="#/finance" class="small">Finans →</a></div>
             ${profitBars(t, { periodExpenses: s.expenses.total, net: s.net_profit_after_expenses })}</div>
         </div>
+        <div class="card mt"><div class="card-head"><div><h2>Tedarikçiler</h2><p>Ürün sayısı, stok durumu, son senkronizasyon ve hata durumu</p></div><a href="#/suppliers" class="small">Tümü →</a></div>
+          ${d.suppliers.length ? supplierHealthTable(d.suppliers, { compact: true }) : empty('Tedarikçi yok', 'Tedarikçiler sayfasından XML, API, CSV veya manuel tedarikçi ekleyin.')}</div>
         <div class="card mt"><div class="card-head"><div><h2>Sipariş durumları</h2><p>Tüm kayıtlar · parantez içinde seçili dönem</p></div></div>
           <div class="status-grid">${d.statuses.map((st) => html`
             <button class="status-tile ${st.code === 'needs_review' && st.count ? 'alert' : ''}" data-status="${st.code}">
@@ -370,6 +374,7 @@ PAGES.dashboard = {
         </div>`);
       $$('[data-status]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/orders?status=${b.dataset.status}`; }));
       $$('[data-order]').forEach((r) => r.addEventListener('click', () => showOrder(r.dataset.order)));
+      bindSupplierRows(view());
     };
     await draw();
   },
@@ -513,10 +518,11 @@ PAGES.products = {
         ${d.items.map((p) => html`<tr><td><b>${p.sku || '—'}</b></td><td><span class="ellipsis">${p.name}</span>${p.is_active === false ? html`<span class="badge plain">Pasif</span>` : ''}</td><td>${p.barcode || '—'}</td>
           <td class="r num ${p.is_low_stock ? 'neg' : ''}">${num(p.stock)}</td><td class="r num">${num(p.sold_30d)}</td>
           <td class="r num">${Number(p.cost) ? money(p.cost) : html`<span class="badge plain tone-warn">Eksik</span>`}</td><td class="r num">${money(p.sale_price)}</td>
-          <td class="r">${can('operator') ? html`<button class="btn btn-sm" data-cost="${p.id}">Maliyet</button> <button class="btn btn-sm" data-edit="${p.id}">Düzenle</button>` : html`<button class="btn btn-sm" data-cost="${p.id}">Geçmiş</button>`}</td></tr>`)}
+          <td class="r nowrap-cell"><button class="btn btn-sm" data-offers="${p.id}">Tedarikçiler</button> ${can('operator') ? html`<button class="btn btn-sm" data-cost="${p.id}">Maliyet</button> <button class="btn btn-sm" data-edit="${p.id}">Düzenle</button>` : html`<button class="btn btn-sm" data-cost="${p.id}">Geçmiş</button>`}</td></tr>`)}
         </tbody></table></div>${pager(d, load)}` : empty('Ürün yok', can('operator') ? 'Ürün ekleyerek maliyet takibine başlayın. Sipariş kalemleri SKU/barkod ile otomatik eşlenir.' : 'Henüz ürün tanımlanmamış.'));
       $$('[data-cost]').forEach((b) => b.addEventListener('click', () => costForm(d.items.find((p) => String(p.id) === b.dataset.cost))));
       $$('[data-edit]').forEach((b) => b.addEventListener('click', () => productForm(d.items.find((p) => String(p.id) === b.dataset.edit))));
+      $$('[data-offers]').forEach((b) => b.addEventListener('click', () => showOffers(Number(b.dataset.offers))));
     };
     await load(1);
   },
@@ -649,49 +655,578 @@ PAGES.shipping = {
 };
 
 // ---- Tedarikçiler
+// ---- Tedarikçiler (genel tedarikçi mimarisi: XML / API / CSV / manuel)
+const INTEGRATION_LABELS = { xml: 'XML', api: 'API (JSON)', csv: 'CSV', manual: 'Manuel / dosya', external: 'Harici sistem' };
+const HEALTH = { ok: ['good', 'Senkron başarılı'], warning: ['warn', 'Uyarılı'], error: ['bad', 'Hata'], never: ['', 'Henüz senkron yok'], inactive: ['', 'Pasif'] };
+const RUN_STATUS = { running: ['info', 'Çalışıyor'], success: ['good', 'Başarılı'], partial: ['warn', 'Kısmi'], failed: ['bad', 'Başarısız'] };
+const INTERVALS = [[0, 'Kapalı (yalnızca elle)'], [15, '15 dakika'], [30, '30 dakika'], [60, '1 saat'], [180, '3 saat'], [360, '6 saat'], [720, '12 saat'], [1440, '24 saat']];
+const healthBadge = (h) => { const [tone, label] = HEALTH[h] || ['', h]; return html`<span class="badge ${tone ? 'tone-' + tone : ''}">${label}</span>`; };
+const runBadge = (s) => { const [tone, label] = RUN_STATUS[s] || ['', s || '—']; return html`<span class="badge tone-${tone}">${label}</span>`; };
+async function supplierMeta() {
+  if (!state.supplierMeta) state.supplierMeta = await api('/api/supplier-meta');
+  return state.supplierMeta;
+}
+function supplierHealthTable(items, { compact = false } = {}) {
+  return html`<div class="table-wrap"><table><thead><tr><th>Tedarikçi</th>${compact ? '' : html`<th>Entegrasyon</th>`}<th class="r">Ürün</th><th class="r">Stokta</th><th class="r">Stoksuz</th><th class="r">Kaynağında yok</th><th>Son senkron</th><th>Durum</th></tr></thead><tbody>
+    ${items.map((s) => html`<tr class="click" data-supplier="${s.id}"><td><b>${s.name}</b>${compact ? '' : html`<span class="muted small">${s.code}</span>`}</td>
+      ${compact ? '' : html`<td>${INTEGRATION_LABELS[s.integration_type] || s.integration_type}</td>`}
+      <td class="r num">${num(s.active_count ?? s.product_count)}</td><td class="r num">${num(s.in_stock_count)}</td>
+      <td class="r num ${Number(s.out_of_stock_count) ? 'warn-text' : ''}">${num(s.out_of_stock_count)}</td>
+      <td class="r num ${Number(s.missing_count) ? 'neg' : ''}">${num(s.missing_count)}</td>
+      <td>${dateTime(s.last_sync_at)}</td>
+      <td>${healthBadge(s.health)}${s.last_sync_error ? html`<span class="ellipsis small neg" title="${s.last_sync_error}">${s.last_sync_error}</span>` : ''}</td></tr>`)}
+    </tbody></table></div>`;
+}
+const bindSupplierRows = (root = document) => $$('[data-supplier]', root).forEach((r) => r.addEventListener('click', () => { location.hash = `#/suppliers?id=${r.dataset.supplier}`; }));
+
 PAGES.suppliers = {
   title: 'Tedarikçiler', icon: 'suppliers',
-  async render() {
-    setHeader('Tedarikçiler', 'Tedarikçi kartları ve tedarikçi siparişleri', can('operator') ? html`<button class="btn btn-primary" id="add-sup">+ Tedarikçi ekle</button>` : '');
+  async render(params) {
+    if (params.get('id')) return renderSupplierDetail(Number(params.get('id')), params.get('tab') || 'overview');
+    setHeader('Tedarikçiler', 'Tüm tedarikçiler, ürün havuzu ve senkronizasyon durumu', html`
+      <a class="btn" href="#/transfer">Ürün aktarımı →</a>${can('admin') ? html` <button class="btn btn-primary" id="add-sup">+ Yeni Tedarikçi Ekle</button>` : ''}`);
     const [sups, sos] = await Promise.all([api('/api/suppliers'), api('/api/supplier-orders', { query: { page_size: 25 } })]);
+    const sum = (k) => sups.reduce((a, s) => a + (Number(s[k]) || 0), 0);
     view().innerHTML = renderVal(html`
-      <div class="notice info" style="margin-bottom:16px">Trendyol → Çanta Bayim sipariş otomasyonu ayrı production sunucusunda çalışır ve TrendHub tarafından <b>yönetilmez veya tetiklenmez</b>. Bu ekran tedarikçi kayıtlarını ve (varsa) aktarım kayıtlarını görüntülemek içindir.</div>
-      <div class="card"><div class="card-head"><h2>Tedarikçiler</h2></div>
-        ${sups.length ? html`<div class="table-wrap"><table><thead><tr><th>Kod</th><th>Ad</th><th>İletişim</th><th>Entegrasyon</th><th class="r">Tedarik süresi</th><th class="r">Sipariş</th><th>Durum</th><th></th></tr></thead><tbody>
-        ${sups.map((s) => html`<tr><td><code>${s.code}</code></td><td><b>${s.name}</b></td><td>${s.contact_name || ''} <span class="muted small">${s.phone || ''} ${s.email || ''}</span></td>
-          <td>${{ manual: 'Manuel', external: 'Harici sistem', api: 'API' }[s.integration_type] || s.integration_type}</td><td class="r">${s.lead_time_days ?? '—'} gün</td>
-          <td class="r num">${num(s.order_count)}${s.error_count ? html` <span class="badge plain tone-bad">${s.error_count} hata</span>` : ''}</td>
-          <td>${s.is_active ? html`<span class="badge tone-good">Aktif</span>` : html`<span class="badge">Pasif</span>`}</td>
-          <td class="r">${can('operator') ? html`<button class="btn btn-sm" data-sup="${s.id}">Düzenle</button>` : ''}</td></tr>`)}</tbody></table></div>`
-          : empty('Tedarikçi yok', 'Tedarikçi ekleyerek ürün-tedarikçi eşleşmesini ve maliyetleri takip edebilirsiniz.')}</div>
+      <div class="grid grid-4">
+        ${kpi('Tedarikçi', `${num(sups.filter((s) => s.is_active).length)} / ${num(sups.length)}`, 'Aktif / toplam')}
+        ${kpi('Havuzdaki ürün', num(sum('active_count')), `${num(sum('linked_count'))} ürün kataloğa bağlı`)}
+        ${kpi('Stoksuz ürün', num(sum('out_of_stock_count')), 'Aktif tedarikçi ürünleri', sum('out_of_stock_count') ? 'warn-text' : '')}
+        ${kpi('Kaynağında bulunamadı', num(sum('missing_count')), 'Silinmez; pasif işaretlenir', sum('missing_count') ? 'neg' : '')}
+      </div>
+      <div class="card mt"><div class="card-head"><div><h2>Tedarikçiler</h2><p>Satıra tıklayarak bağlantı, alan eşleştirme ve ürünleri yönetin.</p></div></div>
+        ${sups.length ? supplierHealthTable(sups) : empty('Henüz tedarikçi yok', can('admin') ? '“Yeni Tedarikçi Ekle” ile XML, API, CSV veya manuel tedarikçi ekleyin. Çanta Bayim için hazır şablon vardır.' : 'Yönetici bir tedarikçi eklediğinde burada görünür.')}</div>
       <div class="card mt"><div class="card-head"><h2>Tedarikçi siparişleri</h2></div>
+        <div class="notice info" style="margin-bottom:12px">Trendyol → Çanta Bayim sipariş otomasyonu ayrı production sunucusunda çalışır ve TrendHub tarafından <b>yönetilmez veya tetiklenmez</b>. TrendHub tedarikçilerden yalnızca ürün/fiyat/stok <b>okur</b>.</div>
         ${sos.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Sipariş</th><th>Tedarikçi</th><th>Tedarikçi sipariş no</th><th>Durum</th><th class="r">Maliyet</th><th>Hata</th></tr></thead><tbody>
         ${sos.items.map((x) => html`<tr><td>${dateTime(x.created_at)}</td><td>${x.external_order_id || '—'}</td><td>${x.supplier_name || '—'}</td><td>${x.external_supplier_order_id || '—'}</td><td>${x.status || '—'}</td><td class="r num">${money(x.cost)}</td><td class="neg small">${x.last_error || ''}</td></tr>`)}</tbody></table></div>`
-          : empty('Kayıt yok', 'TrendHub henüz tedarikçiye sipariş aktarmıyor; aktarım production otomasyonunda yapılıyor.')}</div>`);
-    const form = (s) => {
-      const body = openModal(html`<h2>${s ? 'Tedarikçiyi düzenle' : 'Yeni tedarikçi'}</h2><form class="form-grid" id="sform">
-        <label>Kod<input name="code" required pattern="[a-z0-9_\\-]+" maxlength="50" value="${s?.code || ''}" ${raw(s ? 'readonly' : '')} placeholder="canta_bayim"></label>
-        <label>Ad<input name="name" required maxlength="200" value="${s?.name || ''}"></label>
-        <label>Yetkili<input name="contact_name" value="${s?.contact_name || ''}"></label><label>Telefon<input name="phone" value="${s?.phone || ''}"></label>
-        <label>E-posta<input name="email" type="email" value="${s?.email || ''}"></label><label>Tedarik süresi (gün)<input name="lead_time_days" type="number" min="0" value="${s?.lead_time_days ?? ''}"></label>
-        <label>Entegrasyon<select name="integration_type">${[['manual', 'Manuel'], ['external', 'Harici sistem'], ['api', 'API']].map(([v, l]) => html`<option value="${v}" ${raw(s?.integration_type === v ? 'selected' : '')}>${l}</option>`)}</select></label>
-        <label class="check"><input type="checkbox" name="is_active" value="1" ${raw(!s || s.is_active ? 'checked' : '')}>Aktif</label>
-        <label class="full">Notlar<textarea name="notes" rows="3" maxlength="2000">${s?.notes || ''}</textarea></label>
-        <p class="form-error full"></p><div class="full row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>`);
-      $('#sform', body).addEventListener('submit', (e) => {
-        e.preventDefault();
-        submitting(e.target, async () => {
-          const d = formData(e.target);
-          const payload = { ...d, is_active: d.is_active === '1', lead_time_days: d.lead_time_days ? Number(d.lead_time_days) : null };
-          await api(s ? `/api/suppliers/${s.id}` : '/api/suppliers', { method: s ? 'PUT' : 'POST', body: payload });
-          closeLayer('modal'); toast('Tedarikçi kaydedildi'); refresh();
-        });
-      });
-    };
-    $('#add-sup')?.addEventListener('click', () => form());
-    $$('[data-sup]').forEach((b) => b.addEventListener('click', () => form(sups.find((s) => String(s.id) === b.dataset.sup))));
+          : empty('Kayıt yok', 'TrendHub tedarikçiye sipariş aktarmaz.')}</div>`);
+    bindSupplierRows();
+    $('#add-sup')?.addEventListener('click', () => supplierForm());
   },
 };
+
+async function supplierForm(detail) {
+  const meta = await supplierMeta();
+  const s = detail?.supplier, c = detail?.connection || {};
+  const rules = s?.stock_rules || {};
+  const opt = (pairs, cur) => pairs.map(([v, l]) => html`<option value="${v}" ${raw(String(cur) === String(v) ? 'selected' : '')}>${l}</option>`);
+  const body = openDrawer(html`<h2>${s ? 'Tedarikçiyi düzenle' : 'Yeni tedarikçi ekle'}</h2>
+    ${meta.secret_storage_ready ? '' : html`<div class="notice warn" style="margin-bottom:12px">Sunucuda <code>APP_SECRET</code> tanımlı değil. Kaynak adresi ve şifreler şifreli saklandığı için önce sunucu .env dosyasında APP_SECRET belirlenmeli (deploy betiği boşsa otomatik üretir).</div>`}
+    <form class="form-grid" id="supform" autocomplete="off">
+      ${s ? '' : html`<label class="full">Şablon<select name="preset"><option value="">Boş tedarikçi</option>${meta.presets.map((p) => html`<option value="${p.key}">${p.name} (${INTEGRATION_LABELS[p.integration_type]})</option>`)}</select>
+        <span class="small muted" id="preset-note">Alan eşleştirmesi kaydettikten sonra kaynağı önizleyerek yapılır.</span></label>`}
+      <label>Tedarikçi adı<input name="name" required maxlength="200" value="${s?.name || ''}"></label>
+      <label>Kod<input name="code" maxlength="50" pattern="[a-z0-9_\\-]*" value="${s?.code || ''}" ${raw(s ? 'readonly' : '')} placeholder="otomatik"></label>
+      <label>Entegrasyon türü<select name="integration_type">${opt(Object.entries(meta.integration_types), c.integration_type || 'xml')}</select></label>
+      <label>Senkronizasyon sıklığı<select name="sync_interval_minutes">${opt(INTERVALS, s?.sync_interval_minutes ?? 60)}</select></label>
+      <fieldset class="full fieldset" data-remote>
+        <legend>Kaynak</legend>
+        <label>Kaynak adresi (XML / API / CSV URL)<input name="source_url" type="url" inputmode="url" maxlength="2000" placeholder="${c.has_source_url ? 'Kayıtlı: ' + (c.source_url_display || '') + ' — değiştirmek için yeni adres girin' : 'https://…'}"></label>
+        ${c.has_source_url ? html`<label class="check"><input type="checkbox" name="clear_url" value="1">Kayıtlı adresi sil</label>` : ''}
+        <p class="small muted">Adres token içerebileceği için şifreli saklanır; ekranda yalnızca maskeli hâli görünür.</p>
+        <div class="form-grid">
+          <label>Kimlik doğrulama<select name="auth_type">${opt(Object.entries(meta.auth_types), c.auth_type || 'none')}</select></label>
+          <label data-auth="basic">Kullanıcı adı<input name="auth_username" maxlength="200" value="${c.auth_username || ''}"></label>
+          <label data-auth="header query">Başlık / parametre adı<input name="auth_param_name" maxlength="100" value="${c.auth_param_name || ''}" placeholder="ör. X-Api-Key veya apikey"></label>
+          <label data-auth="basic bearer header query">Şifre / token<input name="secret" type="password" autocomplete="new-password" maxlength="4000" placeholder="${c.has_secret ? 'Kayıtlı ✓ — değiştirmek için yazın' : ''}"></label>
+          <label data-auth="basic bearer header query">veya ortam değişkeni<input name="secret_env" maxlength="80" pattern="SUPPLIER_[A-Z0-9_]+" value="${c.secret_env || ''}" placeholder="SUPPLIER_ACME_TOKEN"></label>
+          ${c.has_secret ? html`<label class="check" data-auth="basic bearer header query"><input type="checkbox" name="clear_secret" value="1">Kayıtlı şifreyi sil</label>` : ''}
+          <label>Kayıt yolu (isteğe bağlı)<input name="record_path" maxlength="300" value="${c.record_path || ''}" placeholder="ör. Urunler/Urun — boşsa otomatik"></label>
+          <label data-csv>CSV ayırıcı<select name="delimiter">${opt([['', 'Otomatik'], [';', 'Noktalı virgül (;)'], [',', 'Virgül (,)'], ['\t', 'Sekme'], ['|', 'Dikey çizgi (|)']], c.options?.delimiter || '')}</select></label>
+        </div>
+      </fieldset>
+      <fieldset class="full fieldset"><legend>Stok kuralları</legend><div class="form-grid">
+        <label>Güvenlik payı (adet düşülür)<input name="buffer" type="number" min="0" value="${rules.buffer ?? 0}"></label>
+        <label>Minimum stok (altı 0 sayılır)<input name="min_stock" type="number" min="0" value="${rules.min_stock ?? 0}"></label>
+        <label>Maksimum stok (üst sınır)<input name="max_stock" type="number" min="0" value="${rules.max_stock ?? ''}" placeholder="sınırsız"></label>
+        <label>Öncelik (1 = en yüksek)<input name="priority" type="number" min="1" max="10000" value="${s?.priority ?? 100}"></label>
+      </div></fieldset>
+      <details class="full"><summary>İletişim ve notlar</summary><div class="form-grid mt">
+        <label>Yetkili<input name="contact_name" maxlength="200" value="${s?.contact_name || ''}"></label><label>Telefon<input name="phone" maxlength="50" value="${s?.phone || ''}"></label>
+        <label>E-posta<input name="email" type="email" maxlength="200" value="${s?.email || ''}"></label><label>Tedarik süresi (gün)<input name="lead_time_days" type="number" min="0" max="365" value="${s?.lead_time_days ?? ''}"></label>
+        <label class="full">Notlar<textarea name="notes" rows="3" maxlength="2000">${s?.notes || ''}</textarea></label></div></details>
+      <label class="check full"><input type="checkbox" name="is_active" value="1" ${raw(!s || s.is_active ? 'checked' : '')}>Aktif (pasif tedarikçi otomatik senkronize edilmez)</label>
+      <p class="form-error full"></p>
+      <div class="full row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">${s ? 'Kaydet' : 'Tedarikçiyi ekle'}</button></div>
+    </form>`);
+  const form = $('#supform', body);
+  const sync = () => {
+    const t = form.integration_type.value, a = form.auth_type.value;
+    $('[data-remote]', form).hidden = t === 'manual';
+    $$('[data-auth]', form).forEach((el) => { el.hidden = !el.dataset.auth.split(' ').includes(a); });
+    $$('[data-csv]', form).forEach((el) => { el.hidden = t !== 'csv'; });
+  };
+  form.integration_type.addEventListener('change', sync);
+  form.auth_type.addEventListener('change', sync);
+  form.preset?.addEventListener('change', () => {
+    const p = meta.presets.find((x) => x.key === form.preset.value);
+    if (!p) return;
+    const nm = form.elements.namedItem('name');
+    if (!nm.value) nm.value = p.name;
+    form.integration_type.value = p.integration_type;
+    form.sync_interval_minutes.value = p.sync_interval_minutes;
+    $('#preset-note', body).textContent = p.note;
+    sync();
+  });
+  sync();
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(form, async () => {
+      const d = formData(form);
+      const connection = {
+        integration_type: d.integration_type, auth_type: d.integration_type === 'manual' ? 'none' : d.auth_type,
+        auth_username: d.auth_username || null, auth_param_name: d.auth_param_name || null, secret_env: d.secret_env || null,
+        record_path: d.record_path || null, delimiter: d.delimiter || null,
+        source_url: d.clear_url ? '' : (d.source_url || null), secret: d.clear_secret ? '' : (d.secret || null),
+      };
+      const payload = {
+        name: d.name, code: d.code || null, contact_name: d.contact_name || null, phone: d.phone || null, email: d.email || null,
+        lead_time_days: d.lead_time_days ? Number(d.lead_time_days) : null, notes: d.notes || null, is_active: d.is_active === '1',
+        priority: Number(d.priority || 100), sync_interval_minutes: Number(d.sync_interval_minutes || 0),
+        stock_rules: { buffer: Number(d.buffer || 0), min_stock: Number(d.min_stock || 0), max_stock: d.max_stock === '' ? null : Number(d.max_stock) },
+        connection, preset: d.preset || null,
+      };
+      if (s) {
+        await api(`/api/suppliers/${s.id}`, { method: 'PUT', body: payload });
+        closeLayer('drawer'); toast('Tedarikçi kaydedildi'); refresh();
+      } else {
+        const r = await api('/api/suppliers', { method: 'POST', body: payload });
+        closeLayer('drawer'); toast('Tedarikçi eklendi — şimdi alan eşleştirmesini yapın');
+        location.hash = `#/suppliers?id=${r.id}&tab=mapping`;
+      }
+    });
+  });
+}
+
+const SUP_TABS = [['overview', 'Genel'], ['mapping', 'Alan eşleştirme'], ['products', 'Ürünler'], ['runs', 'Senkron geçmişi'], ['changes', 'Değişiklikler']];
+async function renderSupplierDetail(id, tab) {
+  const [d, meta] = await Promise.all([api(`/api/suppliers/${id}`), supplierMeta()]);
+  const s = d.supplier, c = d.connection;
+  const remote = c.integration_type !== 'manual' && c.has_source_url;
+  setHeader(s.name, `${INTEGRATION_LABELS[c.integration_type] || c.integration_type} tedarikçi · ${s.code}`, html`
+    <a class="btn" href="#/suppliers">← Tedarikçiler</a>
+    ${can('operator') && remote ? html`<button class="btn" id="sup-sync">Şimdi senkronize et</button>` : ''}
+    ${can('operator') ? html`<label class="btn" for="sup-file">Dosya yükle</label><input type="file" id="sup-file" accept=".xml,.csv,.json,.txt,text/xml,text/csv,application/json" hidden>` : ''}
+    ${can('admin') ? html`<button class="btn btn-primary" id="sup-edit">Düzenle</button>` : ''}`);
+  view().innerHTML = renderVal(html`
+    ${s.last_sync_status === 'failed' ? html`<div class="notice bad" style="margin-bottom:12px"><b>Son senkron başarısız:</b> ${s.last_sync_error}</div>`
+      : s.last_sync_status === 'partial' ? html`<div class="notice warn" style="margin-bottom:12px"><b>Son senkron kısmi:</b> ${s.last_sync_error || 'bazı kayıtlar işlenemedi'}</div>` : ''}
+    ${!Number(s.mapped_fields) ? html`<div class="notice warn" style="margin-bottom:12px">Alan eşleştirmesi yapılmadı. <b>Alan eşleştirme</b> sekmesinde kaynağı önizleyip en az “Tedarikçi ürün kodu” ve “Ürün adı” alanlarını eşleştirin.</div>` : ''}
+    <div class="grid grid-4">
+      ${kpi('Ürün (aktif)', num(s.active_count), `${num(s.linked_count)} ürün kataloğa bağlı`)}
+      ${kpi('Stokta', num(s.in_stock_count), `Stoksuz: ${num(s.out_of_stock_count)}`)}
+      ${kpi('Kaynağında bulunamadı', num(s.missing_count), 'Silinmez, pasif işaretlenir', Number(s.missing_count) ? 'neg' : '')}
+      ${kpi('Son senkron', dateTime(s.last_sync_at), '', 'small', healthBadge(s.health))}
+    </div>
+    <div class="seg mt" role="tablist">${SUP_TABS.map(([k, l]) => html`<button role="tab" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}" data-stab="${k}">${l}</button>`)}</div>
+    <div id="sup-tab" class="mt"></div>`);
+  $$('[data-stab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/suppliers?id=${id}&tab=${b.dataset.stab}`; }));
+  $('#sup-edit')?.addEventListener('click', () => supplierForm(d));
+  $('#sup-sync')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { const r = await api(`/api/suppliers/${id}/sync`, { method: 'POST' }); toast(r.message); } catch (ex) { fail(ex); } finally { e.target.disabled = false; }
+  });
+  $('#sup-file')?.addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    toast('Dosya işleniyor…');
+    try {
+      const r = await api(`/api/suppliers/${id}/upload`, { method: 'POST', rawBody: f });
+      toast(`Senkron: ${r.created_count} yeni, ${r.price_changed} fiyat, ${r.stock_changed} stok, ${r.missing_count} kayıp${r.error_count ? `, ${r.error_count} hata` : ''}`, r.status === 'failed');
+      refresh();
+    } catch (ex) { fail(ex); } finally { e.target.value = ''; }
+  });
+  const box = $('#sup-tab');
+  if (tab === 'mapping') return renderMapping(box, id, d, meta);
+  if (tab === 'products') return renderPool(box, { supplierId: id, embedded: true });
+  if (tab === 'runs') return renderRuns(box, id);
+  if (tab === 'changes') return renderChanges(box, id);
+  const rules = s.stock_rules || {};
+  box.innerHTML = renderVal(html`<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>Bağlantı</h2></div><dl class="kv">
+      <dt>Entegrasyon</dt><dd>${meta.integration_types[c.integration_type] || c.integration_type}</dd>
+      ${c.integration_type !== 'manual' ? html`<dt>Kaynak adresi</dt><dd>${c.has_source_url ? html`<code>${c.source_url_display}</code>` : html`<span class="neg">Tanımlı değil</span>`}</dd>
+      <dt>Kimlik doğrulama</dt><dd>${meta.auth_types[c.auth_type] || c.auth_type}${c.auth_type !== 'none' ? html` · ${c.has_secret ? 'şifre kayıtlı (şifreli)' : c.secret_env ? html`ortam değişkeni <code>${c.secret_env}</code>` : html`<span class="neg">şifre yok</span>`}` : ''}</dd>
+      <dt>Kayıt yolu</dt><dd>${c.record_path || 'otomatik'}</dd>` : ''}
+      <dt>Senkron sıklığı</dt><dd>${(INTERVALS.find(([v]) => v === Number(s.sync_interval_minutes)) || [0, s.sync_interval_minutes + ' dk'])[1]}</dd>
+      <dt>Öncelik</dt><dd>${s.priority}</dd><dt>Durum</dt><dd>${s.is_active ? 'Aktif' : 'Pasif'}</dd></dl></div>
+    <div class="card"><div class="card-head"><h2>Stok kuralları</h2></div><dl class="kv">
+      <dt>Güvenlik payı</dt><dd>${num(rules.buffer || 0)} adet</dd><dt>Minimum stok</dt><dd>${num(rules.min_stock || 0)} (altı 0 sayılır)</dd>
+      <dt>Maksimum stok</dt><dd>${rules.max_stock ?? 'sınırsız'}</dd></dl>
+      <p class="small muted">Kurallar tedarikçi stoğuna uygulanır; sonra her pazaryerinin kendi stok kuralı uygulanır.</p>
+      ${s.contact_name || s.phone || s.email ? html`<h3 class="mt">İletişim</h3><p>${s.contact_name || ''} ${s.phone || ''} ${s.email || ''}</p>` : ''}</div>
+  </div>
+  <div class="card mt"><div class="card-head"><h2>Son senkronizasyonlar</h2><a class="small" href="#/suppliers?id=${id}&tab=runs">Tümü →</a></div>${runsTable(d.runs)}</div>`);
+}
+
+function runsTable(runs) {
+  if (!runs.length) return empty('Henüz senkron yok', 'Kaynak adresi varsa “Şimdi senkronize et”, yoksa “Dosya yükle” ile başlayın.');
+  return html`<div class="table-wrap"><table><thead><tr><th>Başlangıç</th><th>Tetik</th><th>Durum</th><th class="r">Kayıt</th><th class="r">Yeni</th><th class="r">Fiyat</th><th class="r">Stok</th><th class="r">Kayıp</th><th class="r">Hata</th><th>Mesaj</th></tr></thead><tbody>
+    ${runs.map((r) => html`<tr><td>${dateTime(r.started_at)}</td><td>${{ schedule: 'Zamanlanmış', manual: 'Elle', upload: 'Dosya' }[r.trigger] || r.trigger}</td><td>${runBadge(r.status)}</td>
+      <td class="r num">${num(r.records_total)}</td><td class="r num">${num(r.created_count)}</td><td class="r num">${num(r.price_changed)}</td><td class="r num">${num(r.stock_changed)}</td>
+      <td class="r num ${r.missing_count ? 'neg' : ''}">${num(r.missing_count)}</td><td class="r num ${r.error_count ? 'neg' : ''}">${num(r.error_count)}</td>
+      <td><span class="ellipsis small" title="${[r.message, ...(r.errors || [])].filter(Boolean).join('\n')}">${r.message || (r.errors || [])[0] || ''}</span></td></tr>`)}</tbody></table></div>`;
+}
+async function renderRuns(box, id) {
+  const load = async (page) => {
+    const d = await api(`/api/suppliers/${id}/runs`, { query: { page, page_size: 25 } });
+    box.innerHTML = renderVal(html`<div class="card">${runsTable(d.items)}${pager(d, load)}</div>`);
+  };
+  await load(1);
+}
+async function renderChanges(box, id) {
+  let kind = '';
+  const load = async (page) => {
+    const d = await api(`/api/suppliers/${id}/changes`, { query: { page, page_size: 50, kind } });
+    box.innerHTML = renderVal(html`<div class="card"><div class="filters"><select id="chg-kind" aria-label="Değişiklik türü">${[['', 'Tüm değişiklikler'], ['new', 'Yeni ürün'], ['price', 'Fiyat değişti'], ['stock', 'Stok değişti'], ['missing', 'Kaynağında bulunamadı'], ['reactivated', 'Yeniden göründü']].map(([v, l]) => html`<option value="${v}" ${raw(v === kind ? 'selected' : '')}>${l}</option>`)}</select></div>
+      ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Değişiklik</th><th>Tedarikçi SKU</th><th>Ürün</th><th class="r">Önceki</th><th class="r">Yeni</th></tr></thead><tbody>
+      ${d.items.map((x) => html`<tr><td>${dateTime(x.created_at)}</td><td><span class="badge ${{ new: 'tone-info', price: 'tone-warn', stock: '', missing: 'tone-bad', reactivated: 'tone-good' }[x.kind] || ''}">${x.kind_label}</span></td>
+        <td><b>${x.supplier_sku}</b></td><td><span class="ellipsis">${x.name || '—'}</span></td><td class="r num">${x.old_value ?? '—'}</td><td class="r num">${x.new_value ?? '—'}</td></tr>`)}</tbody></table></div>${pager(d, load)}`
+        : empty('Değişiklik yok', 'Senkronizasyonlarda tespit edilen yeni ürün, fiyat, stok ve kaybolan ürün değişiklikleri burada listelenir.')}</div>`);
+    $('#chg-kind', box).addEventListener('change', (e) => { kind = e.target.value; load(1); });
+  };
+  await load(1);
+}
+
+async function renderMapping(box, id, d, meta) {
+  const c = d.connection;
+  const remote = c.integration_type !== 'manual' && c.has_source_url;
+  let preview = null;
+  const current = Object.fromEntries(d.mappings.map((m) => [m.target_field, { source_path: m.source_path || '', default_value: m.default_value || '' }]));
+  const draw = () => {
+    const paths = preview ? preview.fields : [];
+    const sample = (field) => {
+      if (!preview) return '';
+      const v = preview.samples[0]?.values?.[field];
+      return Array.isArray(v) ? v.join(', ') : v ?? '';
+    };
+    const opts = (cur) => html`<option value="">— eşleştirilmedi —</option>${cur && !paths.some((p) => p.path === cur) ? html`<option value="${cur}" selected>${cur}</option>` : ''}
+      ${paths.map((p) => html`<option value="${p.path}" ${raw(p.path === cur ? 'selected' : '')}>${p.path}  (${pct(p.fill_rate)} dolu · ör. ${p.sample.slice(0, 30)})</option>`)}`;
+    box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Alan eşleştirme</h2>
+      <p>Tedarikçinin alan adlarını TrendHub alanlarına bağlayın. Kod hiçbir tedarikçinin alan adına bağlı değildir; her tedarikçinin XML/CSV yapısı farklı olabilir.</p></div></div>
+      <div class="row" style="margin-bottom:12px">
+        ${remote ? html`<button class="btn" id="pv-remote">Kaynaktan önizle</button>` : ''}
+        <label class="btn" for="pv-file">Dosyadan önizle</label><input type="file" id="pv-file" accept=".xml,.csv,.json,.txt" hidden>
+        ${preview ? html`<span class="muted small">${num(preview.total)} kayıt okundu · kayıt yolu <code>${preview.record_path || '—'}</code> · ${preview.using === 'suggestion' ? 'otomatik öneri gösteriliyor' : 'kayıtlı eşleştirme gösteriliyor'}</span>
+          <button class="btn btn-sm" id="pv-apply">Öneriyi uygula</button>` : html`<span class="muted small">Önizleme veritabanına ürün yazmaz.</span>`}
+      </div>
+      <form id="mapform"><div class="table-wrap"><table><thead><tr><th>TrendHub alanı</th><th>Tedarikçi alanı (kaynak yol)</th><th>Varsayılan değer</th>${preview ? html`<th>Örnek (1. kayıt)</th>` : ''}</tr></thead><tbody>
+        ${d.mappings.map((m) => html`<tr><td><b>${m.label}</b>${m.required ? html` <span class="badge plain tone-warn">zorunlu</span>` : ''}<span class="muted small">${m.target_field}</span></td>
+          <td>${preview ? html`<select name="src_${m.target_field}" aria-label="${m.label} kaynak alanı">${opts(current[m.target_field].source_path)}</select>`
+            : html`<input name="src_${m.target_field}" value="${current[m.target_field].source_path}" maxlength="300" placeholder="ör. UrunKodu veya Resimler/Resim" aria-label="${m.label} kaynak alanı">`}</td>
+          <td><input name="def_${m.target_field}" value="${current[m.target_field].default_value}" maxlength="500" aria-label="${m.label} varsayılan" placeholder="${m.target_field === 'currency' ? 'TRY' : m.target_field === 'vat_rate' ? '20' : ''}"></td>
+          ${preview ? html`<td><span class="ellipsis small" title="${sample(m.target_field)}">${sample(m.target_field)}</span></td>` : ''}</tr>`)}
+      </tbody></table></div>
+      ${can('operator') ? html`<div class="row mt"><span class="spacer"></span><button class="btn btn-primary" type="submit">Eşleştirmeyi kaydet</button></div>` : ''}</form></div>
+      ${preview ? html`<div class="card mt"><div class="card-head"><h2>Örnek kayıtlar (eşleştirilmiş)</h2></div><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Barkod</th><th>Ürün adı</th><th>Marka</th><th>Kategori</th><th class="r">Alış</th><th class="r">Stok</th><th class="r">Görsel</th><th>Sorun</th></tr></thead><tbody>
+        ${preview.samples.map((x) => html`<tr><td>${x.values.supplier_sku || '—'}</td><td>${x.values.barcode || '—'}</td><td><span class="ellipsis">${x.values.name || '—'}</span></td><td>${x.values.brand || '—'}</td><td><span class="ellipsis">${x.values.category || '—'}</span></td>
+          <td class="r num">${x.values.purchase_price ? money(x.values.purchase_price) : '—'}</td><td class="r num">${num(x.values.stock)}</td><td class="r num">${num((x.values.images || []).length)}</td>
+          <td class="small ${x.errors.length ? 'neg' : 'pos'}">${x.errors.length ? x.errors.join('; ') : 'Uygun'}</td></tr>`)}</tbody></table></div></div>` : ''}`);
+    const read = () => {
+      const f = $('#mapform', box);
+      d.mappings.forEach((m) => { current[m.target_field] = { source_path: f[`src_${m.target_field}`].value.trim(), default_value: f[`def_${m.target_field}`].value.trim() }; });
+    };
+    const run = async (content) => {
+      read();
+      try {
+        preview = await api(`/api/suppliers/${id}/preview`, { method: 'POST', rawBody: content });
+        if (preview.using === 'suggestion') Object.entries(preview.suggestion).forEach(([k, v]) => { if (!current[k].source_path) current[k].source_path = v; });
+        draw();
+      } catch (ex) { fail(ex); }
+    };
+    $('#pv-remote', box)?.addEventListener('click', (e) => { e.target.disabled = true; toast('Kaynak okunuyor…'); run(undefined); });
+    $('#pv-file', box).addEventListener('change', (e) => { if (e.target.files[0]) run(e.target.files[0]); });
+    $('#pv-apply', box)?.addEventListener('click', () => { read(); Object.entries(preview.suggestion).forEach(([k, v]) => { current[k].source_path = v; }); draw(); });
+    $('#mapform', box).addEventListener('submit', (e) => {
+      e.preventDefault();
+      read();
+      submitting(e.target, async () => {
+        await api(`/api/suppliers/${id}/mappings`, { method: 'PUT', body: { mappings: Object.entries(current).map(([k, v]) => ({ target_field: k, source_path: v.source_path || null, default_value: v.default_value || null })) } });
+        toast('Eşleştirme kaydedildi');
+      });
+    });
+  };
+  draw();
+}
+
+// ---- Ürün havuzu (tedarikçi ürünleri) — Tedarikçi detayında ve Ürün Aktarımı 1. adımında kullanılır
+async function renderPool(box, { supplierId = null, embedded = false, selectable = false, onSelect } = {}) {
+  const sups = embedded ? [] : await api('/api/suppliers');
+  const f = { supplier_id: supplierId || '', q: '', status: 'active', in_catalog: '', in_stock: false, multi_supplier: false };
+  const sel = state.transfer.selected;
+  const load = async (page) => {
+    const d = await api('/api/supplier-products', { query: { ...f, in_stock: f.in_stock ? 'true' : '', multi_supplier: f.multi_supplier ? 'true' : '', page, page_size: 50 } });
+    box.innerHTML = renderVal(html`<div class="card">
+      <form class="filters" id="pool-f">
+        <input type="search" name="q" placeholder="SKU, barkod, model veya ürün adı" value="${f.q}" aria-label="Ara">
+        ${embedded ? '' : html`<select name="supplier_id" aria-label="Tedarikçi"><option value="">Tüm tedarikçiler</option>${sups.map((s) => html`<option value="${s.id}" ${raw(String(s.id) === String(f.supplier_id) ? 'selected' : '')}>${s.name}</option>`)}</select>`}
+        <select name="status" aria-label="Durum">${[['active', 'Aktif'], ['missing', 'Kaynağında bulunamadı'], ['', 'Tümü']].map(([v, l]) => html`<option value="${v}" ${raw(v === f.status ? 'selected' : '')}>${l}</option>`)}</select>
+        <select name="in_catalog" aria-label="Katalog">${[['', 'Katalog: tümü'], ['no', 'Kataloğa alınmamış'], ['yes', 'Katalogda']].map(([v, l]) => html`<option value="${v}" ${raw(v === f.in_catalog ? 'selected' : '')}>${l}</option>`)}</select>
+        <label class="check"><input type="checkbox" name="in_stock" value="1" ${raw(f.in_stock ? 'checked' : '')}>Stokta</label>
+        <label class="check"><input type="checkbox" name="multi_supplier" value="1" ${raw(f.multi_supplier ? 'checked' : '')}>Birden çok tedarikçide</label>
+        <button class="btn btn-primary" type="submit">Filtrele</button></form>
+      <p class="small muted">${num(d.summary.total)} tedarikçi ürünü · ${num(d.summary.missing)} kaynağında bulunamadı · ${num(d.summary.not_in_catalog)} kataloğa alınmamış · ${num(d.summary.catalog_products)} katalog ürünü</p>
+      ${d.items.length ? html`<div class="table-wrap"><table><thead><tr>
+        ${selectable ? html`<th><input type="checkbox" id="pool-all" aria-label="Sayfadakilerin tümünü seç"></th>` : ''}
+        ${embedded ? '' : html`<th>Tedarikçi</th>`}<th>SKU / Barkod</th><th>Ürün</th><th>Marka / Kategori</th><th class="r">Alış</th><th class="r">Stok</th><th>Durum</th><th>Katalog</th></tr></thead><tbody>
+        ${d.items.map((x) => html`<tr>
+          ${selectable ? html`<td><input type="checkbox" data-pick="${x.id}" ${raw(sel.has(x.id) ? 'checked' : '')} aria-label="Seç: ${x.name || x.supplier_sku}"></td>` : ''}
+          ${embedded ? '' : html`<td>${x.supplier_name}</td>`}
+          <td><b>${x.supplier_sku}</b><span class="muted small">${x.barcode || 'barkod yok'}</span></td>
+          <td><span class="ellipsis" title="${x.name || ''}">${x.name || '—'}</span><span class="muted small">${x.image_count ? `${x.image_count} görsel` : 'görsel yok'}</span></td>
+          <td><span class="ellipsis">${x.brand || '—'}</span><span class="muted small ellipsis">${x.category || ''}</span></td>
+          <td class="r num">${x.cost ? money(x.cost) : '—'}</td><td class="r num ${Number(x.stock) > 0 ? '' : 'warn-text'}">${num(x.stock)}</td>
+          <td><span class="badge ${x.status === 'missing' ? 'tone-bad' : 'tone-good'}">${x.status_label}</span></td>
+          <td>${x.product_id ? html`<button class="btn btn-sm" data-offers="${x.product_id}">${Number(x.offer_count) > 1 ? `${x.offer_count} teklif` : 'Katalogda'}</button>` : html`<span class="muted small">Havuzda</span>`}
+            ${(x.draft_marketplaces || []).map((m) => html` <span class="badge plain">${m}</span>`)}</td></tr>`)}
+        </tbody></table></div>${pager(d, load)}` : empty('Ürün yok', embedded ? 'Bu tedarikçiden henüz ürün okunmadı. Alan eşleştirmesini yapıp senkronize edin veya dosya yükleyin.' : 'Filtreye uyan tedarikçi ürünü yok.')}</div>`);
+    $('#pool-f', box).addEventListener('submit', (e) => {
+      e.preventDefault();
+      const v = formData(e.target);
+      Object.assign(f, { q: v.q || '', status: v.status || '', in_catalog: v.in_catalog || '', in_stock: v.in_stock === '1', multi_supplier: v.multi_supplier === '1' });
+      if (!embedded) f.supplier_id = v.supplier_id || '';
+      load(1);
+    });
+    $$('[data-offers]', box).forEach((b) => b.addEventListener('click', () => showOffers(Number(b.dataset.offers))));
+    if (selectable) {
+      $$('[data-pick]', box).forEach((cb) => cb.addEventListener('change', () => { const i = Number(cb.dataset.pick); if (cb.checked) sel.add(i); else sel.delete(i); onSelect?.(); }));
+      $('#pool-all', box)?.addEventListener('change', (e) => { $$('[data-pick]', box).forEach((cb) => { cb.checked = e.target.checked; cb.dispatchEvent(new Event('change')); }); });
+    }
+  };
+  await load(1);
+}
+
+// ---- Teklif karşılaştırma (aynı katalog ürünü, birden çok tedarikçi)
+async function showOffers(productId) {
+  const d = await api(`/api/products/${productId}/offers`);
+  const p = d.product;
+  const body = openDrawer(html`<h2>Tedarikçi teklifleri</h2>
+    <p><b>${p.name}</b><br><span class="muted small">${p.sku || ''} · barkod ${p.barcode || '—'}</span></p>
+    <div class="grid grid-2"><div class="card kpi"><div class="label">Katalog stoğu</div><div class="value">${num(p.stock)}</div></div>
+      <div class="card kpi"><div class="label">Katalog maliyeti</div><div class="value">${money(p.cost)}</div></div></div>
+    ${d.offers.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Tedarikçi</th><th class="r">Alış</th><th class="r">Kullanılabilir stok</th><th class="r">Öncelik</th><th>Durum</th><th>Kullanılan</th></tr></thead><tbody>
+      ${d.offers.map((o) => html`<tr><td><b>${o.supplier_name}</b><span class="muted small">${o.supplier_sku || ''}</span></td><td class="r num">${o.cost === null ? '—' : money(o.cost)}</td>
+        <td class="r num">${num(o.stock)}${Number(o.raw_stock) !== Number(o.stock) ? html`<span class="muted small">kaynak: ${num(o.raw_stock)}</span>` : ''}</td><td class="r num">${o.priority}</td>
+        <td>${o.usable ? html`<span class="badge tone-good">Uygun</span>` : html`<span class="badge tone-bad">${o.available ? 'Stok/fiyat yok' : o.status_label || 'Pasif'}</span>`}</td>
+        <td>${o.supplier_id === d.selected_supplier_id ? html`<span class="badge tone-info">Seçili</span>` : ''}</td></tr>`)}</tbody></table></div>` : empty('Teklif yok', 'Bu ürün henüz hiçbir tedarikçi ürününe bağlı değil.')}
+    <h3 class="mt">Tedarikçi seçimi</h3>
+    <div class="table-wrap"><table><tbody>${Object.entries(d.strategy_labels).map(([k, l]) => html`<tr><td>${l}</td><td>${d.offers.find((o) => o.supplier_id === d.by_strategy[k])?.supplier_name || html`<span class="muted">—</span>`}</td></tr>`)}</tbody></table></div>
+    ${can('operator') && d.offers.length ? html`<form class="form-grid mt" id="srcform">
+      <label>Strateji<select name="strategy">${Object.entries(d.strategy_labels).map(([k, l]) => html`<option value="${k}" ${raw(k === p.supplier_strategy ? 'selected' : '')}>${l}</option>`)}</select></label>
+      <label>Tercih edilen tedarikçi<select name="preferred_supplier_id"><option value="">—</option>${d.offers.map((o) => html`<option value="${o.supplier_id}" ${raw(o.supplier_id === p.preferred_supplier_id ? 'selected' : '')}>${o.supplier_name}</option>`)}</select></label>
+      <p class="small muted full">Seçilen teklif katalog ürününün stok ve maliyetini belirler (yalnızca TrendHub'da). Maliyet değişiklikleri maliyet geçmişine yazılır; geçmiş siparişler değişmez.</p>
+      <p class="form-error full"></p><div class="full row"><span class="spacer"></span><button class="btn btn-primary" type="submit">Kaydet</button></div></form>` : ''}`);
+  $('#srcform', body)?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(e.target, async () => {
+      const v = formData(e.target);
+      await api(`/api/products/${productId}/sourcing`, { method: 'PUT', body: { strategy: v.strategy, preferred_supplier_id: v.preferred_supplier_id ? Number(v.preferred_supplier_id) : null } });
+      toast('Tedarikçi seçimi kaydedildi'); showOffers(productId);
+    });
+  });
+}
+
+// ---- Ürün Aktarımı: Tedarikçiler → Ürün Havuzu → Ürünleri Seç → Pazaryerini Seç → Fiyatlandır → Validate → Yayına Hazırla
+state.transfer = { selected: new Set(), marketplaces: new Set(['trendyol']), productIds: [], draftIds: [] };
+const TRANSFER_STEPS = [['pool', '1. Ürünleri seç'], ['marketplaces', '2. Pazaryeri'], ['pricing', '3. Fiyat & doğrulama'], ['ready', '4. Yayına hazır']];
+const DRAFT_TONE = { draft: 'tone-info', invalid: 'tone-bad', ready: 'tone-good', cancelled: '' };
+PAGES.transfer = {
+  title: 'Ürün Aktarımı', icon: 'transfer', nav: 'Ürün Aktarımı',
+  async render(params) {
+    const step = params.get('step') || 'pool';
+    const tab = params.get('tab') || 'wizard';
+    setHeader('Ürün Aktarımı', 'Tedarikçi ürünlerini seçip pazaryerleri için fiyatlandırın ve doğrulayın');
+    view().innerHTML = renderVal(html`
+      <div class="notice info" style="margin-bottom:12px">Pazaryerine otomatik gönderim <b>kapalıdır</b> (salt okunur mod). “Yayına hazır” taslaklar TrendHub'da tutulur ve CSV olarak indirilebilir; canlı Trendyol / Hepsiburada / Amazon hesaplarında hiçbir şey değişmez.</div>
+      <div class="seg" role="tablist">${[['wizard', 'Aktarım sihirbazı'], ['drafts', 'Tüm taslaklar'], ['rules', 'Pazaryeri kuralları']].map(([k, l]) => html`<button role="tab" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}" data-ttab="${k}">${l}</button>`)}</div>
+      ${tab === 'wizard' ? html`<ol class="steps mt">${TRANSFER_STEPS.map(([k, l], i) => html`<li class="${k === step ? 'on' : TRANSFER_STEPS.findIndex(([x]) => x === step) > i ? 'done' : ''}">${l}</li>`)}</ol>` : ''}
+      <div id="tr-body" class="mt"></div>`);
+    $$('[data-ttab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/transfer?tab=${b.dataset.ttab}`; }));
+    const box = $('#tr-body');
+    if (tab === 'drafts') return renderDrafts(box, {});
+    if (tab === 'rules') return renderRules(box);
+    const T = state.transfer;
+    if (step === 'pool') {
+      const bar = document.createElement('div');
+      const updateBar = () => {
+        bar.innerHTML = renderVal(html`<div class="card sticky-bar row"><b>${num(T.selected.size)}</b> ürün seçildi<span class="spacer"></span>
+          ${T.selected.size ? html`<button class="btn" id="tr-clear">Seçimi temizle</button>` : ''}
+          <button class="btn btn-primary" id="tr-next" ${raw(T.selected.size ? '' : 'disabled')}>Pazaryerini seç →</button></div>`);
+        $('#tr-clear', bar)?.addEventListener('click', () => { T.selected.clear(); refresh(); });
+        $('#tr-next', bar).addEventListener('click', () => { location.hash = '#/transfer?step=marketplaces'; });
+      };
+      const pool = document.createElement('div');
+      box.append(pool, bar);
+      updateBar();
+      return renderPool(pool, { selectable: true, onSelect: updateBar });
+    }
+    if (step === 'marketplaces') {
+      if (!T.selected.size) { location.hash = '#/transfer'; return; }
+      const [mps, rules] = await Promise.all([api('/api/marketplaces'), api('/api/marketplace-rules')]);
+      const rmap = Object.fromEntries(rules.items.map((r) => [r.code, r]));
+      box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Hedef pazaryerleri</h2><p>${num(T.selected.size)} ürün seçildi. Her pazaryeri kendi fiyat, komisyon, kategori ve stok kuralıyla ayrı değerlendirilir.</p></div></div>
+        <div class="grid grid-3">${mps.map((m) => { const r = rmap[m.code] || {}; return html`<label class="card mp-pick"><span class="row nowrap"><input type="checkbox" name="mp" value="${m.code}" ${raw(T.marketplaces.has(m.code) ? 'checked' : '')}><b>${m.name}</b></span>
+          <span class="small muted">Komisyon ${pct(r.effective_commission_rate)} · kâr oranı ${pct(r.markup_rate)} · min. marj ${pct(r.min_margin_rate)}</span>
+          <span class="small muted">Zorunlu: ${(r.required_fields || []).join(', ') || '—'}</span></label>`; })}</div>
+        <p class="small muted mt">Seçilen havuz ürünleri önce kataloğa alınır: barkodu katalogda olan ürün MEVCUT ürüne bağlanır (aynı ürün iki tedarikçide olsa bile tek katalog ürünü ve pazaryeri başına tek ilan).</p>
+        <div class="row mt"><a class="btn" href="#/transfer">← Ürün seçimi</a><span class="spacer"></span><button class="btn btn-primary" id="tr-build">Kataloğa al ve fiyatlandır →</button></div></div>`);
+      $('#tr-build', box).addEventListener('click', async (e) => {
+        const chosen = $$('[name=mp]:checked', box).map((i) => i.value);
+        if (!chosen.length) { toast('En az bir pazaryeri seçin', true); return; }
+        T.marketplaces = new Set(chosen);
+        e.target.disabled = true;
+        try {
+          const imp = await api('/api/transfer/import', { method: 'POST', body: { supplier_product_ids: [...T.selected] } });
+          T.productIds = imp.product_ids;
+          const r = await api('/api/transfer/drafts', { method: 'POST', body: { product_ids: T.productIds, marketplaces: chosen } });
+          T.draftIds = r.draft_ids;
+          toast(`${imp.created} yeni katalog ürünü, ${imp.linked} mevcut ürüne bağlandı · ${r.valid} taslak uygun, ${r.invalid} hatalı`);
+          location.hash = '#/transfer?step=pricing';
+        } catch (ex) { fail(ex); e.target.disabled = false; }
+      });
+      return;
+    }
+    if (step === 'pricing') {
+      if (!T.draftIds.length) { location.hash = '#/transfer'; return; }
+      return renderDrafts(box, { ids: T.draftIds, wizard: true });
+    }
+    if (step === 'ready') {
+      const d = await api('/api/listing-drafts', { query: { ids: T.draftIds.join(','), page_size: 200 } });
+      const byMp = {};
+      d.items.forEach((x) => { (byMp[x.marketplace] ||= { name: x.marketplace_name, ready: 0, invalid: 0 })[x.status === 'ready' ? 'ready' : 'invalid'] += 1; });
+      box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><h2>Yayına hazır</h2></div>
+        <div class="grid grid-3">${Object.entries(byMp).map(([code, v]) => html`<div class="card"><h3>${v.name}</h3><p><b class="pos">${num(v.ready)}</b> hazır · <b class="${v.invalid ? 'neg' : ''}">${num(v.invalid)}</b> eksik/hatalı</p>
+          ${v.ready ? html`<a class="btn btn-sm" href="/api/listing-drafts/export.csv?marketplace=${encodeURIComponent(code)}" download>CSV indir</a>` : ''}</div>`)}</div>
+        <p class="small muted mt">Pazaryerine otomatik yükleme kapalıdır. CSV dosyasını pazaryerinin satıcı panelinden toplu ürün yükleme ile kullanabilirsiniz; hatalı taslakları “Tüm taslaklar” sekmesinden düzeltebilirsiniz.</p>
+        <div class="row mt"><a class="btn" href="#/transfer?step=pricing">← Fiyat & doğrulama</a><span class="spacer"></span><button class="btn btn-primary" id="tr-new">Yeni aktarım</button></div></div>`);
+      $('#tr-new', box).addEventListener('click', () => { T.selected.clear(); T.draftIds = []; T.productIds = []; location.hash = '#/transfer'; });
+    }
+  },
+};
+
+async function renderDrafts(box, { ids = null, wizard = false }) {
+  const mps = await api('/api/marketplaces');
+  const f = { marketplace: '', status: '', q: '' };
+  const load = async (page) => {
+    const d = await api('/api/listing-drafts', { query: { ...f, ids: ids ? ids.join(',') : '', page, page_size: wizard ? 200 : 50 } });
+    box.innerHTML = renderVal(html`<div class="card">
+      ${wizard ? '' : html`<form class="filters" id="dr-f"><input type="search" name="q" value="${f.q}" placeholder="SKU, barkod, ürün adı" aria-label="Ara">
+        <select name="marketplace" aria-label="Pazaryeri"><option value="">Tüm pazaryerleri</option>${mps.map((m) => html`<option value="${m.code}" ${raw(m.code === f.marketplace ? 'selected' : '')}>${m.name}</option>`)}</select>
+        <select name="status" aria-label="Durum"><option value="">Aktif taslaklar</option>${Object.entries({ draft: 'Taslak', invalid: 'Hatalı', ready: 'Yayına hazır', cancelled: 'İptal' }).map(([v, l]) => html`<option value="${v}" ${raw(v === f.status ? 'selected' : '')}>${l}</option>`)}</select>
+        <button class="btn btn-primary" type="submit">Filtrele</button></form>`}
+      <div class="row" style="margin-bottom:10px">${Object.entries({ draft: 'Taslak', invalid: 'Hatalı', ready: 'Yayına hazır' }).map(([k, l]) => html`<span class="badge ${DRAFT_TONE[k]}">${l}: ${num(d.summary[k] || 0)}</span>`)}</div>
+      ${d.items.length ? html`<div class="table-wrap"><table><thead><tr>${wizard ? '' : html`<th><input type="checkbox" id="dr-all" aria-label="Tümünü seç"></th>`}<th>Ürün</th><th>Pazaryeri</th><th>Tedarikçi</th><th class="r">Maliyet</th><th class="r">Fiyat</th><th class="r">Stok</th><th class="r">Tahmini kâr</th><th>Kategori</th><th>Durum</th></tr></thead><tbody>
+        ${d.items.map((x) => html`<tr>${wizard ? '' : html`<td><input type="checkbox" data-dsel="${x.id}" aria-label="Seç"></td>`}
+          <td><b class="ellipsis" title="${x.name}">${x.name}</b><span class="muted small">${x.sku} · ${x.barcode || 'barkod yok'}</span></td>
+          <td>${x.marketplace_name}</td><td>${x.supplier_name || '—'}</td><td class="r num">${x.cost_basis ? money(x.cost_basis) : '—'}</td>
+          <td class="r">${can('operator') && x.status !== 'cancelled' ? html`<input class="price-in" type="number" step="0.01" min="0" value="${x.price ?? ''}" data-price="${x.id}" aria-label="Fiyat">
+            <span class="muted small">${x.price_is_manual ? html`elle · <a href="#" data-auto="${x.id}">otomatik</a>` : 'otomatik'}</span>` : money(x.price)}</td>
+          <td class="r num">${num(x.stock)}</td>
+          <td class="r num ${signClass(x.estimated_profit)}">${x.estimated_profit === null ? '—' : money(x.estimated_profit)}<span class="muted small">${pct(x.estimated_margin)}</span></td>
+          <td>${x.category_id ? html`<span class="small">${x.category_name || x.category_id}</span>` : can('operator') ? html`<input class="cat-in" data-cat="${x.id}" data-mp="${x.marketplace}" data-src="${x.category || ''}" placeholder="kategori ID" aria-label="Pazaryeri kategori ID"><span class="muted small ellipsis">${x.category || 'kaynak kategori yok'}</span>` : '—'}</td>
+          <td><span class="badge ${DRAFT_TONE[x.status]}">${x.status_label}</span>
+            ${(x.errors || []).map((e) => html`<span class="small neg" style="display:block">• ${e}</span>`)}${(x.warnings || []).map((w) => html`<span class="small warn-text" style="display:block">• ${w}</span>`)}</td></tr>`)}
+        </tbody></table></div>${wizard ? '' : pager(d, load)}` : empty('Taslak yok', 'Ürün Aktarımı sihirbazıyla tedarikçi ürünlerini seçip pazaryeri taslakları oluşturun.')}
+      ${can('operator') && d.items.length ? html`<div class="row mt">${wizard ? html`<a class="btn" href="#/transfer?step=marketplaces">← Pazaryeri</a>` : html`<button class="btn" id="dr-cancel">Seçilenleri iptal et</button>`}<span class="spacer"></span>
+        <button class="btn" id="dr-validate">Yeniden doğrula</button><button class="btn btn-primary" id="dr-prepare">${wizard ? 'Yayına hazırla →' : 'Seçilenleri yayına hazırla'}</button></div>` : ''}</div>`);
+    const targetIds = () => (wizard ? d.items.map((x) => x.id) : $$('[data-dsel]:checked', box).map((c) => Number(c.dataset.dsel)));
+    $('#dr-f', box)?.addEventListener('submit', (e) => { e.preventDefault(); Object.assign(f, formData(e.target)); load(1); });
+    $('#dr-all', box)?.addEventListener('change', (e) => $$('[data-dsel]', box).forEach((c) => { c.checked = e.target.checked; }));
+    $$('[data-price]', box).forEach((inp) => inp.addEventListener('change', async () => {
+      try { await api(`/api/listing-drafts/${inp.dataset.price}`, { method: 'PATCH', body: { price: inp.value || null } }); load(page); } catch (ex) { fail(ex); }
+    }));
+    $$('[data-auto]', box).forEach((a) => a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try { await api(`/api/listing-drafts/${a.dataset.auto}`, { method: 'PATCH', body: { auto_price: true } }); load(page); } catch (ex) { fail(ex); }
+    }));
+    $$('[data-cat]', box).forEach((inp) => inp.addEventListener('change', async () => {
+      if (!inp.value.trim()) return;
+      try {
+        if (inp.dataset.src) {
+          await api('/api/category-mappings', { method: 'PUT', body: { marketplace: inp.dataset.mp, source_category: inp.dataset.src, target_category_id: inp.value.trim() } });
+          await api('/api/listing-drafts/validate', { method: 'POST', body: { ids: d.items.map((x) => x.id) } });
+          toast('Kategori eşleştirildi; aynı kaynak kategorideki ürünlere de uygulandı');
+        } else {
+          await api(`/api/listing-drafts/${inp.dataset.cat}`, { method: 'PATCH', body: { category_id: inp.value.trim() } });
+        }
+        load(page);
+      } catch (ex) { fail(ex); }
+    }));
+    $('#dr-validate', box)?.addEventListener('click', async () => {
+      const t = targetIds(); if (!t.length) { toast('Taslak seçin', true); return; }
+      try { const r = await api('/api/listing-drafts/validate', { method: 'POST', body: { ids: t } }); toast(`${r.valid} uygun, ${r.invalid} hatalı`); load(page); } catch (ex) { fail(ex); }
+    });
+    $('#dr-prepare', box)?.addEventListener('click', async () => {
+      const t = targetIds(); if (!t.length) { toast('Taslak seçin', true); return; }
+      try {
+        const r = await api('/api/listing-drafts/prepare', { method: 'POST', body: { ids: t } });
+        toast(`${r.ready} taslak yayına hazır${r.invalid ? `, ${r.invalid} hatalı` : ''}`);
+        if (wizard) location.hash = '#/transfer?step=ready'; else load(page);
+      } catch (ex) { fail(ex); }
+    });
+    $('#dr-cancel', box)?.addEventListener('click', async () => {
+      const t = targetIds(); if (!t.length) { toast('Taslak seçin', true); return; }
+      if (!confirm(`${t.length} taslak iptal edilsin mi? (Pazaryerinde hiçbir şey değişmez.)`)) return;
+      try { await api('/api/listing-drafts/cancel', { method: 'POST', body: { ids: t } }); load(page); } catch (ex) { fail(ex); }
+    });
+  };
+  await load(1);
+}
+
+async function renderRules(box) {
+  const [rules, mps] = await Promise.all([api('/api/marketplace-rules'), api('/api/marketplaces')]);
+  let mp = mps[0]?.code || 'trendyol';
+  const drawCats = async () => {
+    const d = await api('/api/category-mappings', { query: { marketplace: mp } });
+    $('#cat-box', box).innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Kaynak kategori</th><th class="r">Katalog ürünü</th><th>Pazaryeri kategori ID</th><th>Kategori adı</th></tr></thead><tbody>
+      ${d.items.map((c) => html`<tr><td>${c.source_category}</td><td class="r num">${num(c.product_count)}</td>
+        <td>${can('operator') ? html`<input data-cid="${c.source_category}" value="${c.target_category_id || ''}" placeholder="eşleştirilmedi" aria-label="Kategori ID">` : c.target_category_id || '—'}</td>
+        <td>${can('operator') ? html`<input data-cname="${c.source_category}" value="${c.target_category_name || ''}" aria-label="Kategori adı">` : c.target_category_name || ''}</td></tr>`)}</tbody></table></div>`
+      : empty('Kategori yok', 'Tedarikçi ürünleri senkronize edildiğinde kaynak kategoriler burada listelenir.'));
+    $$('[data-cid]', box).forEach((inp) => {
+      const save = async () => {
+        const id = inp.value.trim(); if (!id) return;
+        const name = $$('[data-cname]', box).find((x) => x.dataset.cname === inp.dataset.cid)?.value || null;
+        try { await api('/api/category-mappings', { method: 'PUT', body: { marketplace: mp, source_category: inp.dataset.cid, target_category_id: id, target_category_name: name } }); toast('Kategori eşleştirmesi kaydedildi'); } catch (ex) { fail(ex); }
+      };
+      inp.addEventListener('change', save);
+      $$('[data-cname]', box).find((x) => x.dataset.cname === inp.dataset.cid)?.addEventListener('change', save);
+    });
+  };
+  box.innerHTML = renderVal(html`<div class="grid grid-3">${rules.items.map((r) => html`<form class="card rule-form" data-rule="${r.code}"><div class="card-head"><h2>${r.name}</h2></div>
+      <div class="form-grid">
+        <label>Komisyon oranı<input name="commission_rate" type="number" step="0.001" min="0" max="0.99" value="${r.commission_rate ?? ''}" placeholder="${r.effective_commission_rate} (Ayarlar)"></label>
+        <label>Kâr oranı<input name="markup_rate" type="number" step="0.01" min="0" value="${r.markup_rate}"></label>
+        <label>Kargo (₺)<input name="shipping_cost" type="number" step="0.01" min="0" value="${r.shipping_cost}"></label>
+        <label>Sabit gider (₺)<input name="fixed_cost" type="number" step="0.01" min="0" value="${r.fixed_cost}"></label>
+        <label>Minimum marj<input name="min_margin_rate" type="number" step="0.01" min="-1" max="1" value="${r.min_margin_rate}"></label>
+        <label>Yuvarlama<select name="rounding">${[['x.90', 'x,90'], ['x.99', 'x,99'], ['integer', 'Tam sayı'], ['none', 'Yok']].map(([v, l]) => html`<option value="${v}" ${raw(v === r.rounding ? 'selected' : '')}>${l}</option>`)}</select></label>
+        <label>Stok güvenlik payı<input name="stock_buffer" type="number" min="0" value="${r.stock_buffer}"></label>
+        <label>Minimum stok<input name="min_stock" type="number" min="0" value="${r.min_stock}"></label>
+        <label>Maksimum stok<input name="max_stock" type="number" min="0" value="${r.max_stock ?? ''}" placeholder="sınırsız"></label>
+        <label>Başlık uzunluğu sınırı<input name="title_max_length" type="number" min="10" value="${r.title_max_length ?? ''}" placeholder="yok"></label>
+        <fieldset class="full fieldset"><legend>Zorunlu alanlar</legend><div class="row">${rules.requirable_fields.map((fld) => html`<label class="check"><input type="checkbox" name="rf" value="${fld}" ${raw((r.required_fields || []).includes(fld) ? 'checked' : '')}>${{ barcode: 'Barkod', brand: 'Marka', category: 'Kategori', images: 'Görsel', description: 'Açıklama', model_code: 'Model kodu', desi: 'Desi', vat_rate: 'KDV' }[fld] || fld}</label>`)}</div></fieldset>
+      </div>
+      ${can('admin') ? html`<p class="form-error"></p><div class="row mt"><span class="spacer"></span><button class="btn btn-primary btn-sm" type="submit">Kaydet</button></div>` : ''}</form>`)}</div>
+    <p class="small muted">Fiyat = (maliyet × (1 + kâr oranı) + kargo + sabit gider) ÷ (1 − komisyon), sonra yuvarlanır. Değerler varsayılandır; pazaryerinin güncel komisyon ve zorunlu alan kurallarına göre düzenleyin. Tahmini kâr TAHMİNİDİR.</p>
+    <div class="card mt"><div class="card-head"><div><h2>Kategori eşleştirme</h2><p>Kaynak (tedarikçi/katalog) kategorisini pazaryeri kategori ID'sine bağlayın.</p></div>
+      <select id="cat-mp" aria-label="Pazaryeri">${mps.map((m) => html`<option value="${m.code}">${m.name}</option>`)}</select></div><div id="cat-box"></div></div>`);
+  $$('[data-rule]', box).forEach((form) => form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(form, async () => {
+      const v = formData(form);
+      await api(`/api/marketplace-rules/${form.dataset.rule}`, { method: 'PUT', body: {
+        commission_rate: v.commission_rate === '' ? null : v.commission_rate, markup_rate: v.markup_rate, shipping_cost: v.shipping_cost,
+        fixed_cost: v.fixed_cost, min_margin_rate: v.min_margin_rate, rounding: v.rounding, stock_buffer: Number(v.stock_buffer || 0),
+        min_stock: Number(v.min_stock || 0), max_stock: v.max_stock === '' ? null : Number(v.max_stock),
+        title_max_length: v.title_max_length === '' ? null : Number(v.title_max_length), required_fields: $$('[name=rf]:checked', form).map((c) => c.value) } });
+      toast('Kural kaydedildi · taslakları “Yeniden doğrula” ile güncelleyin');
+    });
+  }));
+  $('#cat-mp', box).addEventListener('change', (e) => { mp = e.target.value; drawCats(); });
+  await drawCats();
+}
 
 // ---- Finans
 const EXPENSE_LABELS = { advertising: 'Reklam', shipping: 'Kargo', packaging: 'Ambalaj', personnel: 'Personel', rent: 'Kira', software: 'Yazılım', other: 'Diğer' };
@@ -957,7 +1492,7 @@ PAGES.users = {
 };
 
 // ------------------------------------------------------------------- yönlendirme
-const NAV = ['dashboard', 'orders', 'products', 'shipping', 'suppliers', 'finance', 'reports', 'integrations', 'system', 'settings', 'users'];
+const NAV = ['dashboard', 'orders', 'products', 'suppliers', 'transfer', 'shipping', 'finance', 'reports', 'integrations', 'system', 'settings', 'users'];
 // Sade çizgi ikonlar (24x24, currentColor)
 const ICONS = {
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -965,6 +1500,7 @@ const ICONS = {
   products: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
   shipping: '<path d="M3 6h11v10H3zM14 10h4l3 3v3h-7"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>',
   suppliers: '<path d="M3 21V10l6 3V10l6 3V6l6-3v18z"/><path d="M7 17h2M12 17h2M17 17h2"/>',
+  transfer: '<path d="M4 7h13l-3-3M20 17H7l3 3"/>',
   finance: '<path d="M8 4v16M8 9l7-3M8 13l7-3M5 20h9a5 5 0 0 0 5-5"/>',
   reports: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   integrations: '<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/>',

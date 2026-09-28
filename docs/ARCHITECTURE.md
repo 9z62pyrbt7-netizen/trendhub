@@ -71,6 +71,10 @@ web/                     index.html, assets/app.js, assets/app.css, nginx.conf
 * **`0001_baseline`**, eski `init_db()` şemasının birebir kopyasıdır (`IF NOT EXISTS`). Mevcut
   veritabanında hiçbir şey değiştirmez, yalnızca Alembic'in takibini başlatır.
 * **`0003_listing_details`**: `marketplace_listings` tablosuna ilan kolonları ekler (yalnızca ekleme).
+* **`0004_supplier_management`**: çoklu tedarikçi + ürün aktarımı tabloları (bkz. §8a). Tek gevşetme:
+  `supplier_products.product_id` NOT NULL kısıtı kaldırılır (tedarikçi ürünü kataloğa bağlanmadan
+  havuzda durabilsin); veri değişmez. Bu istisna `test_migrations.py` içinde açık izin listesiyle
+  sınırlıdır; başka hiçbir `DROP` kabul edilmez.
 * **`0002_platform_core`** yalnızca ekleme yapar. `DROP`, `TRUNCATE`, `DELETE` ve tip
   değişikliği yoktur. Bu kural `tests/test_migrations.py` tarafından otomatik denetlenir.
   * `orders.status` **ham pazaryeri statüsü olarak kalır**. Yeni `orders.internal_status`
@@ -225,6 +229,54 @@ Yalnızca bilgisi tanımlı ve ilgili yeteneği olan connector'lar için çalı�
 | `listings.sync` | 6 saat | Yalnızca `products.read` yeteneği olanlar (Trendyol'da varsayılan kapalı) |
 | `integration.check` | 60 dk | Entegrasyon ekranındaki bağlantı durumu |
 
+## 8a. Tedarikçi yönetimi (çoklu tedarikçi)
+
+Sistem hiçbir tedarikçiye özel değildir; **Çanta Bayim yalnızca ilk tedarikçidir** ve bir şablon
+(`app/suppliers/fields.py → PRESETS`) olarak gelir. Tablo/kolon adları geneldir:
+
+| Tablo | Amaç |
+|---|---|
+| `suppliers` | Tedarikçi kartı + öncelik, stok kuralları (`buffer`, `min_stock`, `max_stock`), senkron sıklığı, son senkron durumu |
+| `supplier_connections` | Entegrasyon türü (xml/api/csv/manual), **şifreli** kaynak URL'si + maskeli gösterimi, kimlik doğrulama türü, **şifreli** secret veya `SUPPLIER_*` ortam değişkeni adı, kayıt yolu |
+| `supplier_field_mappings` | Tedarikçi alanı (yol) → TrendHub alanı eşleştirmesi |
+| `supplier_products` | Tedarikçi teklifi: `supplier_id` zorunlu, `supplier_sku` tedarikçi içinde tekil, `product_id` (global katalog) opsiyonel |
+| `supplier_sync_runs`, `supplier_product_changes` | Senkron geçmişi; yeni / fiyat / stok / kaynağında bulunamadı / yeniden göründü günlüğü |
+| `products` (+) | `preferred_supplier_id`, `supplier_strategy` |
+| `marketplace_rules`, `marketplace_category_mappings` | Pazaryeri başına fiyat/komisyon/stok/zorunlu alan kuralı ve kategori eşleştirmesi |
+| `listing_drafts` | (katalog ürünü, pazaryeri) başına **tek** taslak ilan |
+
+**Katman:** `app/suppliers/` — `parsing.py` (XML `defusedxml` ile, JSON, CSV; kayıt yolu otomatik
+tespit), `mapping.py` (Türkçe sayı biçimleri, Decimal), `fields.py` (hedef alanlar + eşanlamlılardan
+otomatik öneri), `fetch.py` (yalnızca GET, SSRF koruması, boyut sınırı), `secrets.py` (Fernet;
+anahtar `APP_SECRET`'tan türetilir). Servisler: `supplier_sync.py`, `supplier_catalog.py`,
+`listing_drafts.py`. Saf alan mantığı: `domain/suppliers.py` (stok kuralı, seçim stratejileri),
+`domain/pricing.py` (fiyat formülü, tahmini kâr, taslak doğrulama).
+
+**Kimlikler:** tedarikçi SKU'su yalnızca kendi tedarikçisinde tekildir; global katalog kimliği
+`products.id`'dir ve tedarikçiler arası eşleşme **barkod** ile yapılır. Aynı barkod iki tedarikçide
+varsa tek katalog ürünü altında iki teklif olur; pazaryerinde tek taslak/ilan açılır. Pazaryerinde
+zaten aynı barkodlu ilan varsa taslak hata verir (duplicate ilan açılmaz).
+
+**Senkron:** worker işi `supplier.sync` (zamanlayıcı `sync_interval_minutes`'e göre, idempotent)
+veya panelden dosya yükleme. Kaynaktan kaybolan ürün **silinmez**, `status='missing'` olur. Kaynak
+birden boşalırsa / önceki aktif ürünlerin yarısından azını döndürürse (≥20 ürün) toplu "kayıp"
+işareti yapılmaz, çalıştırma `partial` olur ve sistem uyarısı yazılır.
+
+**Seçim stratejileri:** `manual` (tercih edilen), `cheapest`, `highest_stock`, `priority`.
+Yenisi `domain/suppliers.STRATEGIES`'e bir fonksiyon eklenerek tanımlanır. Seçilen teklif katalog
+ürününün stok ve maliyetini belirler (maliyet değişikliği `product_costs`'a `source='supplier'`
+ile yazılır; geçmiş siparişler değişmez). Strateji `manual` ve tercih yoksa ürüne dokunulmaz.
+
+**Ürün aktarımı:** Tedarikçiler → Ürün Havuzu → Ürünleri Seç → Pazaryerini Seç → Fiyatlandır →
+Validate → Yayına Hazırla. Fiyat = (maliyet × (1 + kâr oranı) + kargo + sabit gider) ÷ (1 − komisyon),
+yuvarlanır. **Pazaryerine gönderim yoktur** (`CONNECTOR_WRITE_ENABLED=false`); hazır taslaklar
+yalnızca CSV olarak indirilebilir.
+
+**Güvenlik:** URL ve secret'lar API yanıtlarında asla dönmez (yalnızca maskeli URL ve
+"tanımlı mı"); denetim kaydına değer yazılmaz; çözülen secret'lar log maskeleyicisine eklenir;
+iç ağ adresleri engellidir (`SUPPLIER_ALLOW_PRIVATE_URLS`); XML DTD/dış varlık reddedilir;
+bağlantı değişikliği yalnızca yönetici, eşleştirme/senkron/yükleme operatör yetkisindedir.
+
 ## 9. Güvenilirlik
 
 * **Idempotency**
@@ -302,7 +354,10 @@ Veri gerekirse `backups/` altındaki yedekten `pg_restore` ile geri yüklenir.
 * Trendyol hakediş (settlement) API'si bağlanmadı; komisyon şu an **tahmini**. Gerçek tutar manuel girilebilir.
 * Amazon Finances API (gerçek ücretler) ve Amazon ilan okuma (Reports API) yok.
 * Hepsiburada sipariş/ilan okuma yok.
-* Stok/fiyat gönderimi bilinçli olarak kapalı ve uygulanmadı.
+* Stok/fiyat gönderimi bilinçli olarak kapalı ve uygulanmadı. Ürün aktarımı taslak + CSV ile sınırlıdır; pazaryeri ürün oluşturma API'leri resmi dokümantasyonla doğrulanmadan yazılmayacak.
+* Çanta Bayim'in gerçek XML alan adları bu ortamdan doğrulanamadı: şablon alan adı içermez, önizlemede eşanlamlılardan öneri üretir; ilk kurulumda eşleştirme panelden kontrol edilmeli.
+* Pazaryeri kategori ağaçları ve zorunlu özellikler (attributes) API'den çekilmiyor; kategori ID'si elle girilir, varsayılan zorunlu alanlar düzenlenebilir varsayımlardır.
+* Otomatik tedarikçi seçimi stratejileri katalog stok/maliyetini günceller; sipariş anında tedarikçiye yönlendirme yapılmaz (canlı otomasyon ayrı sistemde).
 * Tedarikçi (Çanta Bayim) aktarım kayıtları production sisteminden okunmuyor. Entegrasyon yöntemi (salt okunur DB/replika, dosya veya API) kararlaştırılmalı.
 * KDV: tahmini KDV ve KDV sonrası net kâr var; gerçek beyanname/muhasebe entegrasyonu yok.
 * Rate limit süreç içindedir. Birden fazla worker çalıştırılırsa limit worker başına uygulanır.
