@@ -506,7 +506,7 @@ def test_marketplace_rules_show_connection_and_publish_is_disabled(client, engin
     for code in ("trendyol", "hepsiburada", "amazon_tr"):
         c = items[code]["connector"]
         assert c["exists"] and c["connected"] is False and c["can_publish"] is False
-        assert "CONNECTOR_WRITE_ENABLED=false" in c["reason"]
+        assert "yazma sunucu genelinde kapalı" in c["reason"] and "CONNECTOR_WRITE" not in c["reason"]
     from app.connectors.base import WriteDisabled
     from app.connectors.registry import all_connectors
     for c in all_connectors():
@@ -603,7 +603,7 @@ def test_publish_preview_is_read_only_and_explains_status(client, engine):
         before = c.execute(text("SELECT updated_at, status FROM listing_drafts WHERE id = :i"), {"i": d["id"]}).one()
     p = client.get(f"/api/listing-drafts/{d['id']}/preview").json()
     assert p["publish"]["will_send"] is False and p["publish"]["can_publish"] is False
-    assert "CONNECTOR_WRITE_ENABLED=false" in p["publish"]["message"]
+    assert "yazma sunucu genelinde kapalı" in p["publish"]["message"] and "CONNECTOR_WRITE" not in p["publish"]["message"]
     assert p["valid"] and p["payload"]["barcode"] == "8690000000017" and p["payload"]["category_id"] == "HB-1"
     pr = p["pricing"]
     D = lambda k: Decimal(str(pr[k]))  # noqa: E731 - JSON sayıları
