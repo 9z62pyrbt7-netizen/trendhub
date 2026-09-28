@@ -19,12 +19,12 @@ ORDERS_DEEP_SYNC = "orders.deep_sync"
 LISTINGS_SYNC = "listings.sync"
 INTEGRATION_CHECK = "integration.check"
 DEFAULT_LOOKBACK_DAYS = 14
-DEEP_LOOKBACK_DAYS = 60
-MAX_LOOKBACK_DAYS = 90
+DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
+MAX_LOOKBACK_DAYS = 30
 
 JOB_LABELS_TR = {
     ORDERS_SYNC: "Sipariş senkronizasyonu",
-    ORDERS_DEEP_SYNC: "Derin sipariş senkronizasyonu (60 gün)",
+    ORDERS_DEEP_SYNC: "Derin sipariş senkronizasyonu (30 gün)",
     LISTINGS_SYNC: "Ürün/ilan senkronizasyonu",
     INTEGRATION_CHECK: "Bağlantı testi",
 }

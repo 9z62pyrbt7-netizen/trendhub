@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     trendyol_api_secret: str = ""
     trendyol_base_url: str = "https://apigw.trendyol.com"
     trendyol_rate_per_minute: int = 60
+    # Ürün V1 servisi kapatılıyor, V2 şeması doğrulanmadı: varsayılan KAPALI.
+    trendyol_listings_enabled: bool = False
 
     # Hepsiburada
     hepsiburada_merchant_id: str = ""

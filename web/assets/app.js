@@ -745,7 +745,7 @@ PAGES.integrations = {
 };
 const JOB_LABELS = { queued: ['Kuyrukta', 'tone-info'], running: ['Çalışıyor', 'tone-warn'], succeeded: ['Başarılı', 'tone-good'], failed: ['Başarısız', 'tone-bad'], dead: ['Deneme bitti', 'tone-bad'] };
 const CAPABILITY_LABELS = { 'orders.read': 'sipariş okuma', 'products.read': 'ilan okuma' };
-const DEFAULT_JOB_LABELS = { 'orders.sync': 'Sipariş senkronizasyonu', 'orders.deep_sync': 'Derin sipariş senkronizasyonu (60 gün)', 'listings.sync': 'Ürün/ilan senkronizasyonu', 'integration.check': 'Bağlantı testi' };
+const DEFAULT_JOB_LABELS = { 'orders.sync': 'Sipariş senkronizasyonu', 'orders.deep_sync': 'Derin sipariş senkronizasyonu (30 gün)', 'listings.sync': 'Ürün/ilan senkronizasyonu', 'integration.check': 'Bağlantı testi' };
 const jobLabel = (t) => (state.jobLabels && state.jobLabels[t]) || DEFAULT_JOB_LABELS[t] || t || '—';
 const jobBadge = (s) => { const [l, t] = JOB_LABELS[s] || [s || '—', '']; return html`<span class="badge ${t}">${l}</span>`; };
 

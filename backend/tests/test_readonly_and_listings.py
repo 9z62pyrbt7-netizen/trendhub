@@ -18,7 +18,8 @@ from app.services.listings_sync import import_unlinked_as_products, upsert_listi
 from app.services.orders_sync import ensure_store
 
 BASE = dict(database_url="postgresql://x@y/z")
-TY = dict(trendyol_seller_id="555", trendyol_api_key="k", trendyol_api_secret="s", trendyol_rate_per_minute=6000)
+TY = dict(trendyol_seller_id="555", trendyol_api_key="k", trendyol_api_secret="s", trendyol_rate_per_minute=6000,
+          trendyol_listings_enabled=True)
 AMZ = dict(amazon_sp_seller_id="A1SELLER", amazon_sp_client_id="cid", amazon_sp_client_secret="csec",
            amazon_sp_refresh_token="rt")
 

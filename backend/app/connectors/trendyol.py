@@ -1,8 +1,24 @@
 """Trendyol connector (salt okunur).
 
-Sipariş paketleri `GET /integration/order/sellers/{sellerId}/orders` ile okunur.
+Sipariş paketleri getShipmentPackages servisiyle okunur:
+  GET /integration/order/sellers/{sellerId}/v2/orders   (15.10.2026'dan itibaren zorunlu)
+  GET /integration/order/sellers/{sellerId}/orders      (v1; v2 404 dönerse yedek)
 Aynı `orderNumber`a ait birden çok paket tek siparişte birleştirilir; her
 paket ayrı bir sevkiyat (shipment) kaydıdır.
+
+Resmî dokümantasyon/changelog'dan (developers.trendyol.com) alınan kurallar:
+  * En fazla 1 ay (30 gün) geriye sorgu; sorgu başına en fazla 10.000 kayıt,
+    sayfa başına en fazla 200 paket; 1000 istek/dk üst sınırı.
+  * `orderDate` GMT+3 zaman damgası (ms) olarak gelir -> UTC'ye çevrilirken 3 saat düşülür.
+  * 6 Nisan 2026'da alan adları değişti; yeni adlar önceliklidir, eskiler yedek:
+      paket: id -> shipmentPackageId, grossAmount -> packageGrossAmount
+      satır: id -> lineId, merchantSku -> stockCode, amount -> lineGrossAmount,
+             price -> lineUnitPrice, discount -> lineSellerDiscount (+ lineTyDiscount),
+             vatBaseAmount -> vatRate, merchantId -> sellerId
+
+Ürün/ilan okuma: Trendyol Ürün V1 servisleri kapatılıyor ve V2 filtre servisinin
+yanıt şeması bu ortamdan doğrulanamadı. Bu yüzden ilan senkronu varsayılan olarak
+KAPALIDIR (TRENDYOL_LISTINGS_ENABLED=false) ve doğrulanmamış olarak gösterilir.
 
 ÖNEMLİ: Canlı Trendyol → Çanta Bayim otomasyonu aynı satıcı hesabını
 kullanıyor. Bu connector pazaryerinde HİÇBİR değişiklik yapmaz (statü
@@ -41,7 +57,9 @@ STATUS_MAP = {
     "returned": S.RETURNED,
 }
 
-MAX_WINDOW = timedelta(days=14)   # Trendyol tek sorguda en fazla ~2 hafta aralık kabul eder
+MAX_WINDOW = timedelta(days=14)   # sorgu penceresi; tek sorgu 10.000 kayıt sınırının altında kalsın
+MAX_LOOKBACK = timedelta(days=30)  # servis en fazla 1 ay geriye izin verir
+ORDER_DATE_OFFSET = timedelta(hours=3)  # orderDate GMT+3 olarak gönderilir
 PAGE_SIZE = 200
 PRODUCT_PAGE_SIZE = 100
 MAX_PRODUCT_PAGES = 500      # güvenlik sınırı: en fazla 50.000 ilan
@@ -61,6 +79,20 @@ def _dec(value) -> Decimal | None:
     if value is None or value == "":
         return None
     return Decimal(str(value))
+
+
+def _first(d: dict, *keys):
+    """Yeni alan adı önce, eski ad yedek (6 Nisan 2026 yeniden adlandırması)."""
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def order_date_to_utc(value) -> datetime | None:
+    dt = _ms_to_dt(value)
+    return dt - ORDER_DATE_OFFSET if dt else None
 
 
 _PRIORITY = [S.NEEDS_REVIEW, S.NEW, S.PREPARING, S.SENT_TO_SUPPLIER, S.AWAITING_SHIPMENT,
@@ -84,7 +116,7 @@ def aggregate_status(statuses: list[str]) -> str:
 class TrendyolConnector(MarketplaceConnector):
     code = "trendyol"
     name = "Trendyol"
-    capabilities = frozenset({CAP_ORDERS_READ, CAP_PRODUCTS_READ})
+    capabilities = frozenset({CAP_ORDERS_READ})
     credential_fields = [
         CredentialField("TRENDYOL_SELLER_ID", "Satıcı ID (Supplier ID)", secret=False),
         CredentialField("TRENDYOL_API_KEY", "API Key"),
@@ -96,6 +128,14 @@ class TrendyolConnector(MarketplaceConnector):
         self._transport = transport
         self._sleep = sleep
         self._client: ResilientClient | None = None
+        self._orders_version = "v2"
+        # İlan okuma yalnızca açıkça etkinleştirilirse (V2 şeması doğrulanmadı)
+        if getattr(settings, "trendyol_listings_enabled", False):
+            self.capabilities = frozenset({CAP_ORDERS_READ, CAP_PRODUCTS_READ})
+        self.implementation_note = (
+            "Salt okunur sipariş senkronu (Order V2 alan adlarıyla). Canlı hesapla henüz doğrulanmadı. "
+            "İlan senkronu: " + ("AÇIK (doğrulanmamış V1 servisi)" if CAP_PRODUCTS_READ in self.capabilities
+                                 else "kapalı — Ürün V2 şeması doğrulanmadı"))
 
     def credential_values(self) -> dict[str, str]:
         s = self.settings
@@ -125,16 +165,27 @@ class TrendyolConnector(MarketplaceConnector):
         return self._client
 
     def _orders_path(self) -> str:
-        return f"/integration/order/sellers/{self.store_external_id()}/orders"
+        suffix = "v2/orders" if self._orders_version == "v2" else "orders"
+        return f"/integration/order/sellers/{self.store_external_id()}/{suffix}"
+
+    def _get_orders(self, params: dict):
+        """v2 uç noktası; hesap/ortam henüz v2 sunmuyorsa (404) bir kez v1'e düşer."""
+        try:
+            return self.client.get_json(self._orders_path(), params=params)
+        except ConnectorError as exc:
+            if self._orders_version == "v2" and "HTTP 404" in str(exc):
+                self._orders_version = "v1"
+                return self.client.get_json(self._orders_path(), params=params)
+            raise
 
     def _fetch_packages(self, since: datetime, until: datetime) -> list[dict]:
         packages: list[dict] = []
-        window_start = since
+        window_start = max(since, until - MAX_LOOKBACK)
         while window_start < until:
             window_end = min(window_start + MAX_WINDOW, until)
             page = 0
             while True:
-                data = self.client.get_json(self._orders_path(), params={
+                data = self._get_orders({
                     "startDate": int(window_start.timestamp() * 1000),
                     "endDate": int(window_end.timestamp() * 1000),
                     "page": page,
@@ -157,7 +208,7 @@ class TrendyolConnector(MarketplaceConnector):
             return ConnectionCheck(False, "Bağlı değil: eksik bilgiler " + ", ".join(self.missing_credentials()))
         now = datetime.now(timezone.utc)
         try:
-            data = self.client.get_json(self._orders_path(), params={
+            data = self._get_orders({
                 "startDate": int((now - timedelta(days=1)).timestamp() * 1000),
                 "endDate": int(now.timestamp() * 1000), "page": 0, "size": 1,
             })
@@ -229,7 +280,7 @@ class TrendyolConnector(MarketplaceConnector):
             # en son değişeni tut.
             by_id: dict[str, dict] = {}
             for p in pkgs:
-                pid = str(p.get("id") or p.get("shipmentPackageId") or number)
+                pid = str(_first(p, "shipmentPackageId", "id") or number)
                 prev = by_id.get(pid)
                 if prev is None or int(p.get("lastModifiedDate") or 0) >= int(prev.get("lastModifiedDate") or 0):
                     by_id[pid] = p
@@ -247,7 +298,7 @@ class TrendyolConnector(MarketplaceConnector):
             for pkg, raw, st in zip(pkgs, raw_statuses, internal):
                 if st == S.NEEDS_REVIEW:
                     review_reasons.append(f"Trendyol statüsü eşlenemedi/sorunlu: {raw or 'boş'}")
-                pid = str(pkg.get("id") or pkg.get("shipmentPackageId") or number)
+                pid = str(_first(pkg, "shipmentPackageId", "id") or number)
                 shipments.append(NormalizedShipment(
                     external_package_id=pid,
                     carrier=pkg.get("cargoProviderName"),
@@ -258,18 +309,21 @@ class TrendyolConnector(MarketplaceConnector):
                 ))
                 for ln in pkg.get("lines") or []:
                     qty = int(ln.get("quantity") or 1)
-                    price = _dec(ln.get("price"))
+                    price = _dec(_first(ln, "lineUnitPrice", "price"))
                     if price is None:
-                        price = _dec(ln.get("amount")) or Decimal("0")
+                        gross = _dec(_first(ln, "lineGrossAmount", "amount"))
+                        price = (gross / qty).quantize(Decimal("0.01")) if gross is not None else Decimal("0")
+                    line_id = _first(ln, "lineId", "id")
                     lines.append(NormalizedLine(
-                        external_line_id=str(ln.get("id") or f"{pid}:{ln.get('barcode')}"),
-                        sku=ln.get("merchantSku") or ln.get("sku"),
+                        external_line_id=str(line_id if line_id is not None else f"{pid}:{ln.get('barcode')}"),
+                        sku=_first(ln, "stockCode", "merchantSku", "sku"),
                         barcode=ln.get("barcode"),
                         product_name=ln.get("productName") or "",
                         quantity=qty,
                         unit_price=price,
-                        discount=_dec(ln.get("discount")) or Decimal("0"),
-                        vat_rate=_dec(ln.get("vatRate")),
+                        # Satıcının üstlendiği indirim (Trendyol indirimi satıcı maliyeti değildir)
+                        discount=_dec(_first(ln, "lineSellerDiscount", "discount")) or Decimal("0"),
+                        vat_rate=_dec(_first(ln, "vatRate", "vatBaseAmount")),
                         line_status=ln.get("orderLineItemStatusName") or raw or None,
                     ))
 
@@ -279,7 +333,7 @@ class TrendyolConnector(MarketplaceConnector):
                 external_order_id=number,
                 marketplace_status=",".join(sorted(set(r for r in raw_statuses if r))) or "",
                 internal_status=aggregate_status(internal),
-                order_date=_ms_to_dt(first.get("orderDate")) or datetime.now(timezone.utc),
+                order_date=order_date_to_utc(first.get("orderDate")) or datetime.now(timezone.utc),
                 currency=first.get("currencyCode") or "TRY",
                 customer_name=customer,
                 customer_city=address.get("city"),
