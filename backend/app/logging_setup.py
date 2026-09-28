@@ -40,19 +40,35 @@ class RedactSecretsFilter(logging.Filter):
                 text = text.replace(v, MASK)
         return text
 
+    def _clean_arg(self, a):
+        if isinstance(a, str):
+            return self._clean(a)
+        if isinstance(a, (int, float, bool)) or a is None:
+            return a
+        text = str(a)
+        cleaned = self._clean(text)
+        return cleaned if cleaned != text else a
+
     def filter(self, record: logging.LogRecord) -> bool:
+        """Mesajı ve argümanları yerinde maskeler; args'ın yapısını (tuple/dict) KORUR.
+
+        Bazı formatter'lar (ör. uvicorn access log) args'ı tuple olarak açar; args'ı
+        None yapmak her istekte 'Logging error' üretir.
+        """
         if not self.values:
             return True
-        try:
-            msg = record.getMessage()
-        except Exception:  # noqa: BLE001
-            return True
-        cleaned = self._clean(msg)
+        if isinstance(record.msg, str):
+            record.msg = self._clean(record.msg)
+        elif record.msg is not None:
+            record.msg = self._clean_arg(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._clean_arg(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: self._clean_arg(v) for k, v in record.args.items()}
         if record.exc_info and not record.exc_text:
             record.exc_text = logging.Formatter().formatException(record.exc_info)
         if record.exc_text:
             record.exc_text = self._clean(record.exc_text)
-        record.msg, record.args = cleaned, None
         return True
 
 

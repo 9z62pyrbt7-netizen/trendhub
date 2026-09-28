@@ -92,6 +92,10 @@ jobs:
           chmod 600 .env
           TRENDHUB_GIT_PULL=0 TRENDHUB_BUILD=0 ADMIN_USER=admin ADMIN_PASSWORD=ci-admin-password-123 ./deploy/deploy.sh
           ls -l backups/ | grep -q '\.dump' || { echo "yedek dosyası yok"; exit 1; }
+      - name: api/worker loglarında log biçimleme hatası yok ve access log yazılıyor
+        run: |
+          if docker compose logs api worker | grep -E "Logging error|TypeError"; then echo "::error::log hatası"; exit 1; fi
+          docker compose logs api | grep -q '"GET /api/health' || { echo "::error::access log yok"; exit 1; }
       - name: Loglar
         if: always()
         run: docker compose logs --no-color | tail -n 300

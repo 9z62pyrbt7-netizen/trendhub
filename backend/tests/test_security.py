@@ -79,3 +79,18 @@ def test_security_headers_on_api_and_sql_injection_is_inert(client_factory):
     assert client.get("/api/orders").status_code == 200
     # bilinmeyen statü parametresi reddedilir (whitelist)
     assert client.get("/api/orders", params={"status": "x' OR '1'='1"}).status_code == 422
+
+
+def test_log_filter_keeps_uvicorn_access_log_format_working():
+    """Maskeleme, uvicorn access log'unun args yapısını bozmamalı (prod'da 'Logging error' çıkıyordu)."""
+    from uvicorn.logging import AccessFormatter
+    f = RedactSecretsFilter(["TY-SECRET-cok-gizli-222"])
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                            ("1.2.3.4:5", "GET", "/api/x?k=TY-SECRET-cok-gizli-222", "1.1", 200), None)
+    f.filter(rec)
+    line = AccessFormatter(fmt='%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False).format(rec)
+    assert "TY-SECRET" not in line and "***" in line and "GET /api/x" in line and "200" in line
+    # string olmayan argüman içindeki secret da maskelenir
+    rec2 = logging.LogRecord("t", logging.INFO, __file__, 1, "veri=%s", ({"k": "TY-SECRET-cok-gizli-222"},), None)
+    f.filter(rec2)
+    assert "TY-SECRET" not in rec2.getMessage()
