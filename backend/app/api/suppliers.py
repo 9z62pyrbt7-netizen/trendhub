@@ -24,7 +24,8 @@ from ..domain.suppliers import STRATEGIES, STRATEGY_LABELS, select_offer
 from ..services import jobs
 from ..services.audit import log_audit
 from ..services.supplier_catalog import load_offers, refresh_catalog
-from ..services.supplier_sync import SupplierSyncError, download, load_config, parse_records, run_supplier_sync
+from ..services.supplier_sync import SupplierSyncError, fetch_records, load_config, run_supplier_sync
+from ..suppliers.connectors import CONNECTORS, get_supplier_connector
 from ..suppliers.fetch import MAX_BYTES
 from ..suppliers.fields import FIELD_NAMES, PRESETS, TARGET_FIELDS, suggest_mapping
 from ..suppliers.mapping import apply_mapping
@@ -61,6 +62,12 @@ class ConnectionIn(BaseModel):
     delimiter: str | None = Field(None, max_length=1)
     encoding: str | None = Field(None, pattern=r"^(|utf-8|utf-8-sig|cp1254|iso-8859-9)$")
     allow_mass_missing: bool = False
+    # JSON API sayfalama (boşsa tek istek)
+    page_param: str | None = Field(None, max_length=50, pattern=r"^[A-Za-z0-9_\-.]*$")
+    page_size_param: str | None = Field(None, max_length=50, pattern=r"^[A-Za-z0-9_\-.]*$")
+    page_size: int | None = Field(None, ge=1, le=5000)
+    start_page: int | None = Field(None, ge=0, le=100000)
+    max_pages: int | None = Field(None, ge=1, le=500)
 
     @field_validator("secret_env")
     @classmethod
@@ -141,7 +148,10 @@ def _save_connection(conn: Connection, supplier_id: int, c: ConnectionIn) -> Non
     if c.auth_type == "none":
         secret_enc = None
     options = {k: v for k, v in {"delimiter": c.delimiter or None, "encoding": c.encoding or None,
-                                 "allow_mass_missing": c.allow_mass_missing}.items() if v}
+                                 "allow_mass_missing": c.allow_mass_missing,
+                                 "page_param": c.page_param or None, "page_size_param": c.page_size_param or None,
+                                 "page_size": c.page_size, "start_page": c.start_page,
+                                 "max_pages": c.max_pages}.items() if v not in (None, "", False)}
     conn.execute(text("""
         INSERT INTO supplier_connections(supplier_id, integration_type, source_url_enc, source_url_display, auth_type,
                auth_username, auth_param_name, secret_enc, secret_env, record_path, options, updated_at)
@@ -211,6 +221,8 @@ def supplier_overview(conn: Connection) -> list[dict]:
 def supplier_meta(_: CurrentUser = Depends(viewer)):
     return {"fields": [{"name": n, "label": label, "type": t, "required": req} for n, label, t, req in TARGET_FIELDS],
             "integration_types": INTEGRATION_TYPES, "auth_types": AUTH_TYPES,
+            "connectors": [{"type": k, "label": c.label, "description": c.description, "remote": c.remote}
+                           for k, c in CONNECTORS.items()],
             "strategies": STRATEGY_LABELS, "product_statuses": STATUS_TR,
             "presets": [{"key": k, **{f: v[f] for f in ("name", "integration_type", "sync_interval_minutes", "note")}}
                         for k, v in PRESETS.items()],
@@ -343,10 +355,13 @@ async def _read_body(request: Request) -> bytes:
 
 def _preview(supplier_id: int, content: bytes | None) -> dict:
     with get_engine().begin() as conn:
-        cfg = load_config(conn, supplier_id)
+        try:
+            cfg = load_config(conn, supplier_id)
+        except SupplierSyncError:
+            raise not_found("Tedarikçi") from None
     try:
-        data = content if content else download(cfg)
-        records, used_path = parse_records(cfg, data)
+        fetched = fetch_records(cfg, content or None)
+        records, used_path = fetched.records, fetched.record_path
     except ConnectorError as exc:
         raise HTTPException(422, str(exc)) from None
     fields = field_paths(records)
@@ -369,6 +384,22 @@ async def preview(supplier_id: int, request: Request, _: CurrentUser = Depends(o
     content = await _read_body(request)
     from starlette.concurrency import run_in_threadpool
     return await run_in_threadpool(_preview, supplier_id, content or None)
+
+
+@router.post("/api/suppliers/{supplier_id}/test")
+def test_supplier_connection(supplier_id: int, request: Request, user: CurrentUser = Depends(operator)):
+    """Kaynağa bağlanıp ayrıştırır; ürün yazmaz. Sonuç denetim kaydına yazılır (URL/secret hariç)."""
+    with get_engine().begin() as conn:
+        try:
+            cfg = load_config(conn, supplier_id)
+        except SupplierSyncError:
+            raise not_found("Tedarikçi") from None
+    check = get_supplier_connector(cfg["connection"] or {"integration_type": "manual"}).test_connection()
+    with get_engine().begin() as conn:
+        log_audit(conn, actor=user.username, user_id=user.id, action="supplier.connection_tested",
+                  entity_type="supplier", entity_id=supplier_id, ip=client_ip(request),
+                  details={"ok": check.ok, "records": check.records})
+    return {"ok": check.ok, "message": check.message, "records": check.records, "record_path": check.record_path}
 
 
 @router.post("/api/suppliers/{supplier_id}/sync", status_code=202)
@@ -514,6 +545,53 @@ def product_offers(product_id: int, _: CurrentUser = Depends(viewer), conn: Conn
                                **{k: v for k, v in detail.get(o.supplier_product_id, {}).items() if k != "id"},
                                "status_label": STATUS_TR.get(detail.get(o.supplier_product_id, {}).get("status"), "")}
                               for o in offers], key=lambda x: (x["cost"] is None, x["cost"] or 0))}
+
+
+@router.get("/api/supplier-comparison")
+def supplier_comparison(page: Page = Depends(), q: str | None = Query(None, max_length=100),
+                        only_savings: bool = False, _: CurrentUser = Depends(viewer),
+                        conn: Connection = Depends(get_conn)):
+    """Birden fazla tedarikçi teklifi olan katalog ürünleri: fiyat/stok karşılaştırması ve olası tasarruf.
+
+    Tasarruf = şu an seçili teklifin alış fiyatı − stokta olan en ucuz teklif (adet başı)."""
+    where, params = ["TRUE"], {}
+    if q:
+        where.append("(p.sku ILIKE :q OR p.barcode ILIKE :q OR p.name ILIKE :q)")
+        params["q"] = f"%{q.strip()}%"
+    base = f"""FROM products p JOIN (SELECT product_id, COUNT(*) AS n FROM supplier_products
+                                     WHERE product_id IS NOT NULL GROUP BY product_id HAVING COUNT(*) > 1) x
+                 ON x.product_id = p.id WHERE {' AND '.join(where)}"""
+    prods = rows(conn, f"""SELECT p.id, p.sku, p.barcode, p.name, p.stock, p.cost, p.preferred_supplier_id,
+                                  COALESCE(p.supplier_strategy, 'manual') AS strategy, x.n AS offer_count
+                             {base} ORDER BY p.name""", **params)
+    offers = load_offers(conn, [p["id"] for p in prods])
+    items = []
+    for p in prods:
+        os_ = offers.get(p["id"], [])
+        usable = [o for o in os_ if o.usable]
+        cheapest = select_offer(os_, "cheapest", None)
+        most = select_offer(os_, "highest_stock", None)
+        sel = select_offer(os_, p["strategy"], p["preferred_supplier_id"])
+        costs = [o.cost for o in os_ if o.cost is not None]
+        saving = (sel.cost - cheapest.cost) if sel and cheapest and sel.cost is not None else None
+        if only_savings and not (saving and saving > 0):
+            continue
+        items.append({**p, "strategy_label": STRATEGY_LABELS.get(p["strategy"], p["strategy"]),
+                      "usable_offers": len(usable), "min_cost": min(costs) if costs else None,
+                      "max_cost": max(costs) if costs else None,
+                      "total_stock": sum(o.stock for o in usable),
+                      "cheapest_supplier": cheapest.supplier_name if cheapest else None,
+                      "cheapest_cost": cheapest.cost if cheapest else None,
+                      "highest_stock_supplier": most.supplier_name if most else None,
+                      "highest_stock": most.stock if most else None,
+                      "selected_supplier": sel.supplier_name if sel else None,
+                      "selected_cost": sel.cost if sel else None, "saving_per_unit": saving,
+                      "offers": [{"supplier_name": o.supplier_name, "cost": o.cost, "stock": o.stock,
+                                  "usable": o.usable} for o in sorted(os_, key=lambda o: (o.cost is None, o.cost or 0))]})
+    total = len(items)
+    summary = {"products": total, "with_saving": sum(1 for i in items if i["saving_per_unit"] and i["saving_per_unit"] > 0),
+               "no_usable_offer": sum(1 for i in items if not i["usable_offers"])}
+    return {**paged(items[page.offset:page.offset + page.page_size], total, page), "summary": summary}
 
 
 @router.put("/api/products/{product_id}/sourcing")

@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -7,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.connectors.amazon_tr import AmazonTrConnector
-from app.connectors.base import AuthError, NotSupported, RetryableError, WriteDisabled
+from app.connectors.base import CAP_ORDERS_READ, AuthError, RetryableError, WriteDisabled
 from app.connectors.hepsiburada import HepsiburadaConnector
 from app.connectors.http import RateLimiter, ResilientClient, backoff_delay
 from app.connectors.trendyol import TrendyolConnector, aggregate_status, map_status
@@ -46,13 +45,15 @@ def test_placeholder_values_count_as_missing():
     assert c.missing_credentials() == ["TRENDYOL_SELLER_ID"]
 
 
-def test_unimplemented_connectors_do_not_pretend():
+def test_hepsiburada_configured_but_unreachable_does_not_pretend():
+    """Bilgi girilmiş ama API reddediyorsa bağlantı başarılı görünmez; ilan okuma varsayılan kapalı."""
     s = settings(hepsiburada_merchant_id="m", hepsiburada_username="u", hepsiburada_password="p")
-    hb = HepsiburadaConnector(s)
-    assert hb.is_configured() and not hb.capabilities
-    assert hb.test_connection().ok is False
-    with pytest.raises(NotSupported):
-        hb.fetch_orders(datetime.now(timezone.utc), datetime.now(timezone.utc))
+    hb = HepsiburadaConnector(s, transport=httpx.MockTransport(lambda r: httpx.Response(401)), sleep=lambda _: None)
+    assert hb.is_configured() and hb.capabilities == frozenset({CAP_ORDERS_READ})
+    check = hb.test_connection()
+    assert check.ok is False and "Yetkisiz" in check.message
+    with pytest.raises(AuthError):
+        hb.fetch_orders(datetime.now(timezone.utc) - timedelta(days=1), datetime.now(timezone.utc))
 
 
 def test_write_operations_disabled_by_default():

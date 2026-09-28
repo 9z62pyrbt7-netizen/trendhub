@@ -27,3 +27,10 @@ def test_cli_healthchecks(engine):
     with engine.begin() as c:
         c.execute(text("INSERT INTO worker_heartbeats(worker_id, hostname) VALUES ('w', :h)"), {"h": socket.gethostname()})
     assert cli.healthcheck("worker") == 0
+
+
+def test_cli_has_admin(engine, monkeypatch):
+    assert cli.main(["has-admin"]) == 3
+    monkeypatch.setenv("TRENDHUB_NEW_PASSWORD", "Cli-Password-12345")
+    assert cli.main(["create-user", "--username", "yonetici", "--role", "admin"]) == 0
+    assert cli.main(["has-admin"]) == 0
