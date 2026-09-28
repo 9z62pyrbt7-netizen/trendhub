@@ -354,7 +354,7 @@ PAGES.dashboard = {
         ${al && al.total ? html`<a class="attention-box ${al.items.some((a) => a.severity === 'critical') ? 'bad' : 'warn'}" href="#/alerts">
           <span class="big num">${num(al.total)}</span><span><b>konu ilgilenmeni bekliyor</b>
           <span class="small">${al.items.slice(0, 3).map((a) => `${SEV_ICON[a.severity]} ${a.title}: ${a.description || ''}`).join(' · ')}</span></span><span class="go">Uyarılar →</span></a>` : ''}
-        ${connected === 0 ? html`<div class="notice info" style="margin-bottom:16px">Henüz bağlı bir pazaryeri yok. Sipariş verisi, <a href="#/integrations">Entegrasyonlar</a> sayfasındaki API bilgileri sunucuya tanımlanıp senkronizasyon çalıştığında görünecek. Aşağıdaki değerler gerçek kayıtlardan hesaplanır; veri yoksa 0 gösterilir.</div>` : ''}
+        ${connected === 0 ? html`<div class="notice info" style="margin-bottom:16px">Henüz bağlı bir pazaryeri yok. <a href="#/integrations">Entegrasyonlar → Mağaza Ekle</a> ile mağazanızı bağladığınızda siparişler otomatik gelir. Aşağıdaki değerler gerçek kayıtlardan hesaplanır; veri yoksa 0 gösterilir.</div>` : ''}
         <div class="grid grid-4">
           ${kpi('Bugünkü satış', money0(d.today.revenue), `${num(d.today.orders)} sipariş`)}
           ${kpi('Toplam ciro', money0(t.revenue), `${date(d.range.from)} – ${date(d.range.to)} · iptaller hariç`)}

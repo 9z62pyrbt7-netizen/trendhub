@@ -106,10 +106,10 @@ nav a .count { margin-left: auto; background: var(--bad); color: #fff; font-size
 
 .main { min-width: 0; display: flex; flex-direction: column; }
 .topbar {
-  display: flex; align-items: center; gap: 12px; padding: 18px 28px; background: var(--bg);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 18px 28px; background: var(--bg);
   position: sticky; top: 0; z-index: 5; border-bottom: 1px solid transparent;
 }
-.topbar-title { flex: 1; min-width: 0; }
+.topbar-title { flex: 1 1 240px; min-width: 200px; }
 .topbar h1 { font-size: 22px; }
 .topbar p { margin: 2px 0 0; color: var(--text-3); font-size: 13px; }
 .topbar-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -414,3 +414,12 @@ details.adv code { display: block; white-space: pre-wrap; overflow-wrap: anywher
 .life-head h2 { margin: 0 0 4px; overflow-wrap: anywhere; }
 .life-tabs { flex-wrap: wrap; }
 .life-tabs small { opacity: .7; }
+@media (max-width: 640px) {
+  .filters > select, .filters > input:not([type="search"]) { flex: 1 1 calc(50% - 4px); min-width: 0; width: auto; }
+  .filters > .btn { flex: 1 1 100%; }
+}
+/* Başlık + zil + tema üst satırda; sayfa eylemleri her zaman alt satırda */
+#bell, #theme-toggle { order: 2; }
+.topbar-actions { order: 3; flex-basis: 100%; justify-content: flex-start; }
+.topbar-actions:empty { display: none; }
+@media (max-width: 640px) { .topbar-title { flex: 1 1 0; min-width: 0; } }
