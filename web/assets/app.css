@@ -284,6 +284,24 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 pre.json { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 4px 0 0; max-height: 160px; overflow: auto; }
 .skeleton { color: var(--text-3); padding: 24px; }
 
+/* Tedarikçi / ürün aktarımı */
+td .muted.small { display: block; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+.steps li { padding: 6px 12px; border-radius: 999px; background: var(--neutral-soft); color: var(--text-2); font-size: 13px; font-weight: 600; }
+.steps li.on { background: var(--primary); color: #fff; }
+.steps li.done { background: var(--good-soft); color: var(--good); }
+.sticky-bar { position: sticky; bottom: 12px; margin-top: 12px; box-shadow: var(--shadow-lg); z-index: 5; }
+.fieldset { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 0; display: grid; gap: 12px; min-width: 0; }
+.fieldset legend { padding: 0 6px; font-weight: 700; font-size: 13px; }
+.fieldset[hidden], [data-auth][hidden], [data-csv][hidden] { display: none; }
+details > summary { cursor: pointer; font-weight: 600; }
+.mp-pick { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+.mp-pick input { min-height: 0; }
+.price-in { width: 110px; text-align: right; }
+.cat-in { width: 120px; }
+td .price-in, td .cat-in { min-height: 32px; padding: 4px 8px; }
+.nowrap-cell { white-space: nowrap; }
+
 /* Duyarlı */
 @media (max-width: 1200px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -316,6 +334,8 @@ pre.json { white-space: pre-wrap; word-break: break-word; font-size: 12px; backg
   .kpi .value { font-size: 20px; word-break: break-word; }
   .kpi .sub { font-size: 11px; }
   .filters input[type="search"] { min-width: 0; flex: 1 1 100%; }
+  .steps li { font-size: 12px; padding: 5px 10px; }
+  .sticky-bar { bottom: 8px; }
   .drawer-panel { padding: 18px 16px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

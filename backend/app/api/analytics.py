@@ -16,6 +16,7 @@ from ..deps import CurrentUser, client_ip, operator, viewer
 from ..domain import order_status as S
 from ..services import jobs
 from ..services.audit import log_audit
+from .suppliers import supplier_overview
 from .common import DateRange, Page, not_found, paged
 from .integrations import integration_state
 
@@ -167,6 +168,10 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
         "alerts": alerts,
         "integrations": [integration_state(c, mp_rows.get(c.code)) for c in all_connectors()],
         "queue": jobs.queue_stats(conn),
+        "suppliers": [{k: sp[k] for k in ("id", "code", "name", "is_active", "integration_type", "product_count",
+                                         "active_count", "missing_count", "in_stock_count", "out_of_stock_count",
+                                         "linked_count", "last_sync_at", "last_sync_status", "last_sync_error", "health")}
+                      for sp in supplier_overview(conn)],
     }
 
 

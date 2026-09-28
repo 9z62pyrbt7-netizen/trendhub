@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
 
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, operator, viewer
@@ -209,63 +208,8 @@ def update_shipment(shipment_id: int, body: ShipmentPatch, request: Request,
     return {"ok": True}
 
 
-# -------------------------------------------------------------- tedarikçiler
-class SupplierIn(BaseModel):
-    code: str = Field(min_length=1, max_length=50, pattern=r"^[a-z0-9_\-]+$")
-    name: str = Field(min_length=1, max_length=200)
-    contact_name: str | None = None
-    phone: str | None = None
-    email: str | None = None
-    lead_time_days: int | None = Field(None, ge=0, le=365)
-    integration_type: str = Field("manual", pattern=r"^(manual|external|api)$")
-    notes: str | None = Field(None, max_length=2000)
-    is_active: bool = True
-
-
-@router.get("/api/suppliers")
-def list_suppliers(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
-    return rows(conn, """
-        SELECT sp.*,
-               (SELECT COUNT(*) FROM supplier_products x WHERE x.supplier_id = sp.id) AS product_count,
-               (SELECT COUNT(*) FROM supplier_orders so WHERE so.supplier_id = sp.id) AS order_count,
-               (SELECT COUNT(*) FROM supplier_orders so WHERE so.supplier_id = sp.id AND so.last_error IS NOT NULL) AS error_count
-          FROM suppliers sp ORDER BY sp.name
-    """)
-
-
-@router.post("/api/suppliers", status_code=201)
-def create_supplier(body: SupplierIn, request: Request, user: CurrentUser = Depends(operator),
-                    conn: Connection = Depends(get_conn)):
-    try:
-        with conn.begin_nested():
-            sid = conn.execute(text("""
-                INSERT INTO suppliers(code, name, contact_name, phone, email, lead_time_days, integration_type, notes, is_active)
-                VALUES (:code, :name, :contact_name, :phone, :email, :lead_time_days, :integration_type, :notes, :is_active)
-                RETURNING id
-            """), body.model_dump()).scalar()
-    except IntegrityError:
-        raise HTTPException(409, "Bu tedarikçi kodu zaten kayıtlı") from None
-    log_audit(conn, actor=user.username, user_id=user.id, action="supplier.created", entity_type="supplier",
-              entity_id=sid, ip=client_ip(request), details=body.model_dump())
-    return {"id": sid}
-
-
-@router.put("/api/suppliers/{supplier_id}")
-def update_supplier(supplier_id: int, body: SupplierIn, request: Request, user: CurrentUser = Depends(operator),
-                    conn: Connection = Depends(get_conn)):
-    n = conn.execute(text("""
-        UPDATE suppliers SET name = :name, contact_name = :contact_name, phone = :phone, email = :email,
-               lead_time_days = :lead_time_days, integration_type = :integration_type, notes = :notes,
-               is_active = :is_active, updated_at = NOW()
-         WHERE id = :id
-    """), {**body.model_dump(), "id": supplier_id}).rowcount
-    if not n:
-        raise not_found("Tedarikçi")
-    log_audit(conn, actor=user.username, user_id=user.id, action="supplier.updated", entity_type="supplier",
-              entity_id=supplier_id, ip=client_ip(request), details=body.model_dump())
-    return {"ok": True}
-
-
+# -------------------------------------------------------------- tedarikçi siparişleri
+# Tedarikçi yönetimi: api/suppliers.py
 @router.get("/api/supplier-orders")
 def list_supplier_orders(page: Page = Depends(), _: CurrentUser = Depends(viewer),
                          conn: Connection = Depends(get_conn)):

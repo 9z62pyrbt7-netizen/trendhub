@@ -91,6 +91,21 @@ Tarayıcıdan `http://SUNUCU_IP:8081` (veya deploy çıktısındaki port). Telef
 * İlan (ürün/stok/fiyat) okuma `TRENDYOL_LISTINGS_ENABLED=false` ile kapalıdır. Trendyol Ürün V1
   servisleri kapatılıyor ve V2 yanıt şeması doğrulanmadı.
 
+## 4a. Tedarikçi ekleme (ör. Çanta Bayim)
+
+1. Panel → **Tedarikçiler → + Yeni Tedarikçi Ekle** (yönetici). Şablon olarak “Çanta Bayim”i
+   seçin, XML adresini girin. Adres ve şifre/token **şifreli** saklanır (anahtar `APP_SECRET`;
+   `deploy.sh` boşsa üretir — sonradan değiştirmeyin). İsterseniz token'ı `.env` içinde
+   `SUPPLIER_CANTABAYIM_TOKEN=...` olarak tutup panelde yalnızca adını yazabilirsiniz.
+2. **Alan eşleştirme → Kaynaktan önizle**: alanlar ve örnek kayıtlar görünür, otomatik öneri
+   gelir. Kontrol edip **Eşleştirmeyi kaydet**. Önizleme veritabanına yazmaz.
+3. **Şimdi senkronize et** (veya seçtiğiniz sıklıkta worker otomatik yapar). Tedarikçiden
+   kaybolan ürünler silinmez, “Kaynağında bulunamadı” olur.
+4. Başka tedarikçiler aynı yolla eklenir (XML / JSON API / CSV URL veya manuel dosya yükleme).
+
+TrendHub tedarikçiden yalnızca **okur** (GET); `/opt/trendcantamiz-xml` otomasyonuna dokunmaz.
+Ürün Aktarımı pazaryerine gönderim yapmaz; hazır taslaklar CSV olarak indirilir.
+
 ## 5. Yedek ve geri dönüş
 
 ```bash

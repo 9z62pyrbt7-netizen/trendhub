@@ -18,6 +18,7 @@ ORDERS_SYNC = "orders.sync"
 ORDERS_DEEP_SYNC = "orders.deep_sync"
 LISTINGS_SYNC = "listings.sync"
 INTEGRATION_CHECK = "integration.check"
+SUPPLIER_SYNC = "supplier.sync"
 DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
@@ -27,6 +28,7 @@ JOB_LABELS_TR = {
     ORDERS_DEEP_SYNC: "Derin sipariş senkronizasyonu (30 gün)",
     LISTINGS_SYNC: "Ürün/ilan senkronizasyonu",
     INTEGRATION_CHECK: "Bağlantı testi",
+    SUPPLIER_SYNC: "Tedarikçi senkronizasyonu",
 }
 
 
@@ -116,6 +118,10 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
         return run_listings_sync(engine, job["marketplace"], settings)
     if t == INTEGRATION_CHECK:
         return run_integration_check(engine, job["marketplace"], settings)
+    if t == SUPPLIER_SYNC:
+        from .supplier_sync import run_supplier_sync
+        return run_supplier_sync(engine, int(payload["supplier_id"]), trigger=payload.get("trigger") or "schedule",
+                                 job_id=job["id"])
     raise NotSupported(f"Bilinmeyen iş tipi: {t}")
 
 
@@ -155,4 +161,26 @@ def schedule_due_jobs(conn, interval_minutes: int, settings=None) -> list[int]:
                                   idempotency_key=f"{job_type}:{c.code}", max_attempts=max_attempts)
             if job_id:
                 created.append(job_id)
+    return created
+
+
+def schedule_supplier_jobs(conn) -> list[int]:
+    """Kaynak adresi olan aktif tedarikçiler için vadesi gelen `supplier.sync` işlerini kuyruğa ekler.
+
+    Senkron sıklığı 0 olan tedarikçi otomatik senkronize edilmez (yalnızca elle)."""
+    created = []
+    due = conn.execute(text("""
+        SELECT s.id FROM suppliers s JOIN supplier_connections c ON c.supplier_id = s.id
+         WHERE s.is_active AND s.sync_interval_minutes > 0 AND c.integration_type IN ('xml','api','csv')
+           AND c.source_url_enc IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sync_jobs j WHERE j.idempotency_key = 'supplier.sync:' || s.id
+                            AND (j.status IN ('queued','running')
+                                 OR j.created_at > NOW() - make_interval(mins => s.sync_interval_minutes)))
+         ORDER BY s.id
+    """)).scalars().all()
+    for sid in due:
+        job_id = jobs.enqueue(conn, SUPPLIER_SYNC, payload={"supplier_id": sid, "trigger": "schedule"},
+                              idempotency_key=f"{SUPPLIER_SYNC}:{sid}", max_attempts=3)
+        if job_id:
+            created.append(job_id)
     return created

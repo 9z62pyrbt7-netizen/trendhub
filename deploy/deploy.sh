@@ -60,6 +60,16 @@ done
 case "$(envget DATABASE_URL)" in *CHANGE_ME*) die "DATABASE_URL hâlâ CHANGE_ME içeriyor" ;; esac
 [ "$(envget CONNECTOR_WRITE_ENABLED | tr 'A-Z' 'a-z')" = "false" ] || [ -z "$(envget CONNECTOR_WRITE_ENABLED)" ] \
   || die "CONNECTOR_WRITE_ENABLED=false olmalı (pazaryerine yazma kapalı kalmalı)"
+# Tedarikçi secret'ları APP_SECRET'tan türetilen anahtarla şifrelenir: yoksa üret (değer yazdırılmaz).
+case "$(envget APP_SECRET)" in
+  ""|CHANGE_ME|changeme|change_me)
+    NEW_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    if grep -qE '^APP_SECRET=' .env; then sed -i "s/^APP_SECRET=.*/APP_SECRET=$NEW_SECRET/" .env
+    else printf '\nAPP_SECRET=%s\n' "$NEW_SECRET" >> .env; fi
+    unset NEW_SECRET
+    ok "APP_SECRET üretildi (.env; değer gösterilmez)" ;;
+esac
+[ "$(envget APP_SECRET | wc -c)" -gt 16 ] || die "APP_SECRET en az 16 karakter olmalı"
 ok ".env zorunlu değerler tanımlı; pazaryeri yazma kapalı (değerler gösterilmez)"
 
 # ------------------------------------------------ 1. mevcut durum ve proje adı

@@ -65,6 +65,7 @@ class Worker:
         with self.engine.begin() as conn:
             jobs.requeue_stale(conn)
             sync_service.schedule_due_jobs(conn, self.settings.sync_interval_minutes, self.settings)
+            sync_service.schedule_supplier_jobs(conn)
 
     @contextmanager
     def _keepalive(self, job_id: int):

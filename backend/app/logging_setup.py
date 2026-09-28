@@ -29,10 +29,29 @@ def secret_values(settings=None) -> list[str]:
     return sorted({v for v in values if is_set(v) and len(v) >= 4}, key=len, reverse=True)
 
 
+# Çalışma anında çözülen secret'lar (ör. DB'de şifreli tutulan tedarikçi token'ları).
+_RUNTIME_SECRETS: set[str] = set()
+_FILTERS: list["RedactSecretsFilter"] = []
+
+
+def register_secret(value: str | None) -> None:
+    """Çalışma anında öğrenilen bir secret'ı tüm log maskeleyicilerine ekler."""
+    if not value or len(value) < 4 or value in _RUNTIME_SECRETS:
+        return
+    _RUNTIME_SECRETS.add(value)
+    for f in _FILTERS:
+        f.add(value)
+
+
 class RedactSecretsFilter(logging.Filter):
     def __init__(self, values: list[str]):
         super().__init__()
-        self.values = values
+        self.values = sorted(set(values) | _RUNTIME_SECRETS, key=len, reverse=True)
+        _FILTERS.append(self)
+
+    def add(self, value: str) -> None:
+        if value not in self.values:
+            self.values = sorted([*self.values, value], key=len, reverse=True)
 
     def _clean(self, text: str) -> str:
         for v in self.values:
