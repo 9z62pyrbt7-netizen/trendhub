@@ -14,7 +14,7 @@ from ..connectors.registry import all_connectors
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, finance_editor, operator, viewer
 from ..domain import order_status as S
-from ..services import app_settings, jobs
+from ..services import app_settings, finance_view, jobs
 from ..services.audit import log_audit
 from .suppliers import supplier_overview
 from .common import DateRange, Page, not_found, paged
@@ -36,41 +36,20 @@ def _ratio(a: Decimal, b: Decimal) -> Decimal | None:
     return (a / b).quantize(Decimal("0.0001")) if b else None
 
 
-# Kalem bazlı TAHMİNİ KDV: (net satış − maliyet) içindeki KDV. İptal ve iade edilen
-# siparişlerde satış tersine döndüğü için 0 kabul edilir. Oran: kalem > ürün > %20.
-TAX_SQL = """COALESCE(SUM(CASE WHEN o.internal_status = 'returned' THEN 0 ELSE
-               ((i.unit_price * i.quantity) - COALESCE(i.refund_amount, 0) - COALESCE(i.unit_cost, 0) * i.quantity)
-               * COALESCE(i.vat_rate, p.vat_rate, 20) / (100 + COALESCE(i.vat_rate, p.vat_rate, 20)) END), 0)"""
-
-
+# Tüm finans rakamları TEK kaynaktan: services/finance_view (sipariş, dashboard, finans, rapor aynı sayıyı verir)
 def order_totals(conn: Connection, rng: DateRange, marketplace: str | None = None) -> dict:
-    extra = "AND m.code = :mp" if marketplace else ""
-    r = row(conn, f"""
-        SELECT COUNT(*) AS orders,
-               COALESCE(SUM(o.gross_revenue), 0) AS revenue,
-               COALESCE(SUM(o.product_cost), 0) AS product_cost,
-               COALESCE(SUM(o.commission), 0) AS commission,
-               COALESCE(SUM(o.service_fee), 0) AS service_fee,
-               COALESCE(SUM(o.shipping_cost), 0) AS shipping,
-               COALESCE(SUM(o.advertising_cost), 0) AS advertising,
-               COALESCE(SUM(o.refund_cost), 0) AS refund,
-               COALESCE(SUM(o.other_cost), 0) AS other,
-               COALESCE(SUM(o.net_profit), 0) AS net_profit,
-               COUNT(*) FILTER (WHERE o.finance_is_estimate) AS estimated_orders
-          FROM orders o LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
-         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}
-    """, **rng.params(), mp=marketplace)
-    out = {k: (_num(v) if k not in ("orders", "estimated_orders") else int(v)) for k, v in r.items()}
+    t = finance_view.totals(conn, rng.start, rng.end, marketplace)
+    out = {k: t[k] for k in ("orders", "estimated_orders", "orders_without_items", "missing_cost_orders", "revenue",
+                             "refund", "net_sales", "product_cost", "commission", "service_fee", "shipping",
+                             "advertising", "other", "discount", "margin_before_vat", "margin_after_vat",
+                             "markup_before_vat", "markup_after_vat", "vat_complete")}
+    # Geriye uyumlu alan adları: net_profit = KDV öncesi kâr, tax_estimate = tahmini KDV
+    out["net_profit"] = t["profit_before_vat"]
+    out["tax_estimate"] = t["vat_estimate"]
+    out["net_profit_after_tax"] = t["profit_after_vat"]
+    out["margin"] = t["margin_before_vat"]
     out["total_cost"] = sum((out[k] for k in ("product_cost", "commission", "service_fee", "shipping",
                                               "advertising", "refund", "other")), Decimal("0"))
-    r2 = row(conn, f"""
-        SELECT COALESCE(SUM(i.discount), 0) AS discount, {TAX_SQL} AS tax_estimate
-          FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
-          LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
-         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}
-    """, **rng.params(), mp=marketplace)
-    out["discount"] = _num(r2["discount"]).quantize(Decimal("0.01"))
-    out["tax_estimate"] = _num(r2["tax_estimate"]).quantize(Decimal("0.01"))
     out["average_order_value"] = (out["revenue"] / out["orders"]).quantize(Decimal("0.01")) if out["orders"] else None
     return out
 
@@ -88,28 +67,43 @@ def period_expenses(conn: Connection, rng: DateRange) -> dict:
 
 
 def summary(conn: Connection, rng: DateRange) -> dict:
+    """Dönem özeti. Dashboard, Finans ve Finans tablosu AYNI fonksiyonu kullanır.
+
+    net_profit_after_expenses = KDV öncesi sipariş kârı − dönem giderleri − reklam harcaması (Reklamlar)
+    net_profit_after_tax      = yukarıdaki − tahmini KDV   (ana gösterge: "Tahmini KDV sonrası kâr")
+    Marjların paydası net satıştır (ciro − iade)."""
+    from .ads import spend_total
     t = order_totals(conn, rng)
     exp = period_expenses(conn, rng)
-    net_after = t["net_profit"] - exp["total"]
+    ads = spend_total(conn, rng)
+    net_after = t["net_profit"] - exp["total"] - ads
     net_after_tax = net_after - t["tax_estimate"]
-    return {"orders": t, "expenses": exp, "net_profit_after_expenses": net_after,
-            "tax_estimate": t["tax_estimate"], "net_profit_after_tax": net_after_tax,
-            "margin": _ratio(t["net_profit"], t["revenue"]),
-            "margin_after_expenses": _ratio(net_after, t["revenue"]),
-            "margin_after_tax": _ratio(net_after_tax, t["revenue"]),
+    cfg = finance_view.load(conn)
+    return {"orders": t, "expenses": exp, "ad_spend": ads, "net_sales": t["net_sales"],
+            "net_profit_after_expenses": net_after, "tax_estimate": t["tax_estimate"],
+            "net_profit_after_tax": net_after_tax,
+            "margin": finance_view.ratio(t["net_profit"], t["net_sales"]),
+            "margin_after_expenses": finance_view.ratio(net_after, t["net_sales"]),
+            "margin_after_tax": finance_view.ratio(net_after_tax, t["net_sales"]),
+            "markup_after_tax": finance_view.ratio(net_after_tax, t["product_cost"]),
+            "vat": {**cfg.as_dict(), "orders_without_items": t["orders_without_items"],
+                    "complete": t["vat_complete"]},
             # Gerçek hakediş verisi bağlanmadığı sürece tüm finans rakamları tahminidir.
             "is_estimate": True}
 
 
 def daily_series(conn: Connection, rng: DateRange) -> list[dict]:
+    cfg = finance_view.load(conn)
+    where = "o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled'"
     return [{"day": r["day"].isoformat(), "orders": int(r["orders"]), "revenue": _num(r["revenue"]),
-             "net_profit": _num(r["net_profit"])} for r in rows(conn, f"""
-        SELECT d::date AS day, COUNT(o.id) AS orders, COALESCE(SUM(o.gross_revenue), 0) AS revenue,
-               COALESCE(SUM(o.net_profit), 0) AS net_profit
+             "net_profit": _num(r["net_profit"]), "net_profit_after_tax": _num(r["after"])} for r in rows(conn, f"""
+        SELECT d::date AS day, COUNT(x.id) AS orders, COALESCE(SUM(x.revenue), 0) AS revenue,
+               COALESCE(SUM(x.profit_before_vat), 0) AS net_profit, COALESCE(SUM(x.profit_after_vat), 0) AS after
           FROM generate_series(CAST(:start_date AS DATE), CAST(:end_date AS DATE), INTERVAL '1 day') d
-          LEFT JOIN orders o ON {LOCAL_DAY} = d::date AND o.internal_status <> 'cancelled'
+          LEFT JOIN ({finance_view.order_from(cfg, where)}) x
+                 ON (x.order_date AT TIME ZONE 'Europe/Istanbul')::date = d::date
          GROUP BY d ORDER BY d
-    """, **rng.params())]
+    """, **rng.params(), **cfg.params())]
 
 
 # ---------------------------------------------------------------- dashboard
@@ -125,8 +119,14 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
           FROM orders o LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
          ORDER BY o.order_date DESC NULLS LAST, o.id DESC LIMIT 8
     """)
+    fin = finance_view.order_metrics(conn, [r["id"] for r in recent])
     for r in recent:
         r["status_label"] = S.LABELS_TR.get(r["internal_status"], r["internal_status"])
+        f = fin.get(r["id"], {})
+        r["net_profit"] = f.get("profit_before_vat")
+        r["net_profit_after_tax"] = f.get("profit_after_vat")
+        r["margin"] = f.get("margin_before_vat")
+        r["margin_after_tax"] = f.get("margin_after_vat")
     alerts = row(conn, """
         SELECT (SELECT COUNT(*) FROM orders WHERE internal_status = 'needs_review') AS needs_review,
                (SELECT COUNT(DISTINCT i.order_id) FROM order_items i JOIN orders o ON o.id = i.order_id
@@ -144,28 +144,26 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
          WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status NOT IN ('cancelled', 'returned')
          GROUP BY 1 ORDER BY revenue DESC NULLS LAST LIMIT 5
     """, **rng.params())
-    by_marketplace = rows(conn, """
-        SELECT m.code, m.name, COUNT(o.id) AS orders, COALESCE(SUM(o.gross_revenue), 0) AS revenue,
-               COALESCE(SUM(o.net_profit), 0) AS net_profit
-          FROM marketplaces m
-          LEFT JOIN stores s ON s.marketplace_id = m.id
-          LEFT JOIN orders o ON o.store_id = s.id AND o.order_date >= :start AND o.order_date < :end
-                             AND o.internal_status <> 'cancelled'
-         GROUP BY m.id, m.code, m.name ORDER BY m.id
-    """, **rng.params())
+    by_marketplace = []
+    for m in rows(conn, "SELECT code, name FROM marketplaces ORDER BY id"):
+        t = order_totals(conn, rng, m["code"])
+        by_marketplace.append({"code": m["code"], "name": m["name"], "orders": t["orders"], "revenue": t["revenue"],
+                               "net_profit": t["net_profit"], "net_profit_after_tax": t["net_profit_after_tax"]})
     from .ads import spend_total
     from ..services.alerts import summary as alert_summary
     today_rng = DateRange(period="today", date_from=None, date_to=None)
-    most_profitable = rows(conn, """
-        SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, MAX(i.product_name) AS product_name,
-               SUM(i.quantity) AS quantity,
-               SUM(i.unit_price * i.quantity - COALESCE(i.unit_cost, 0) * i.quantity - COALESCE(i.commission, 0)
-                   - COALESCE(i.shipping_cost, 0) - COALESCE(i.service_fee, 0) - COALESCE(i.refund_amount, 0)
-                   - COALESCE(i.other_cost, 0)) AS profit
-          FROM order_items i JOIN orders o ON o.id = i.order_id
-         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status NOT IN ('cancelled', 'returned')
-         GROUP BY 1 HAVING SUM(COALESCE(i.unit_cost, 0)) > 0 ORDER BY profit DESC NULLS LAST LIMIT 5
-    """, **rng.params())
+    cfg = finance_view.load(conn)
+    # En kârlı ürünler: KDV sonrası tahmini kâr (tek finans kaynağı); maliyeti eksik ürünler hariç
+    most_profitable = rows(conn, f"""
+        SELECT sku, MAX(product_name) AS product_name, SUM(quantity) AS quantity, SUM(profit_after_vat) AS profit,
+               SUM(profit_before_vat) AS profit_before_vat
+          FROM (SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, i.product_name, i.quantity, i.unit_cost,
+                       {finance_view.item_columns(cfg)}
+                  FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
+                 WHERE o.order_date >= :start AND o.order_date < :end
+                   AND o.internal_status NOT IN ('cancelled', 'returned')) x
+         GROUP BY sku HAVING BOOL_AND(COALESCE(unit_cost, 0) > 0) ORDER BY profit DESC NULLS LAST LIMIT 5
+    """, **rng.params(), **cfg.params())
     threshold = int(app_settings.get(conn, "alerts.critical_stock_threshold", 2))
     critical_stock = rows(conn, """
         SELECT p.id, p.sku, p.name, p.stock FROM products p
@@ -177,7 +175,7 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
         "range": rng.as_dict(),
         "summary": summary(conn, rng),
         "today": {"orders": today["orders"], "revenue": today["revenue"], "net_profit": today["net_profit"],
-                  "ad_spend": spend_total(conn, today_rng)},
+                  "net_profit_after_tax": today["net_profit_after_tax"], "ad_spend": spend_total(conn, today_rng)},
         "ad_spend": spend_total(conn, rng),
         "alert_summary": alert_summary(conn),
         "most_profitable": most_profitable,
@@ -207,7 +205,7 @@ def finance_summary(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer)
     by_mp = []
     for m in rows(conn, "SELECT code, name FROM marketplaces ORDER BY id"):
         t = order_totals(conn, rng, m["code"])
-        by_mp.append({"code": m["code"], "name": m["name"], **t, "margin": _ratio(t["net_profit"], t["revenue"])})
+        by_mp.append({"code": m["code"], "name": m["name"], **t})
     return {"range": rng.as_dict(), **summary(conn, rng), "by_marketplace": by_mp,
             "daily": daily_series(conn, rng)}
 
@@ -272,28 +270,24 @@ def delete_expense(expense_id: int, request: Request, user: CurrentUser = Depend
 
 # ------------------------------------------------------------------ raporlar
 def sku_report(conn: Connection, rng: DateRange, marketplace: str | None = None) -> list[dict]:
-    from ..services import app_settings
+    """SKU kârlılığı: kalem kolonları finance_view.item_columns'tan (sipariş ekranıyla aynı formül)."""
+    cfg = finance_view.load(conn)
     extra = "AND m.code = :mp" if marketplace else ""
-    ret_loss = bool(app_settings.get(conn, "finance.return_product_cost_is_loss", False))
     items = rows(conn, f"""
-        SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, MAX(i.product_name) AS product_name,
-               SUM(i.quantity) AS quantity, COUNT(DISTINCT o.id) AS orders,
-               COUNT(DISTINCT o.id) FILTER (WHERE o.internal_status = 'returned') AS returns,
-               SUM(i.unit_price * i.quantity) AS revenue,
-               -- İade edilen ürün varsayılan olarak stoğa döner (sipariş hesabıyla aynı kural)
-               SUM(CASE WHEN o.internal_status = 'returned' AND NOT :ret_loss THEN 0
-                        ELSE COALESCE(i.unit_cost, 0) * i.quantity END) AS product_cost,
-               SUM(COALESCE(i.discount, 0)) AS discount, {TAX_SQL} AS tax_estimate,
-               SUM(COALESCE(i.commission, 0)) AS commission, SUM(COALESCE(i.service_fee, 0)) AS service_fee,
-               SUM(COALESCE(i.shipping_cost, 0)) AS shipping, SUM(COALESCE(i.advertising_cost, 0)) AS advertising,
-               SUM(COALESCE(i.refund_amount, 0)) AS refund, SUM(COALESCE(i.other_cost, 0)) AS other,
-               BOOL_OR(COALESCE(i.unit_cost, 0) = 0) AS missing_cost,
-               BOOL_OR(i.finance_is_estimate) AS is_estimate
-          FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
-          LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
-         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}
-         GROUP BY 1
-    """, **rng.params(), mp=marketplace, ret_loss=ret_loss)
+        SELECT sku, MAX(product_name) AS product_name, SUM(quantity) AS quantity, COUNT(DISTINCT order_id) AS orders,
+               COUNT(DISTINCT order_id) FILTER (WHERE internal_status = 'returned') AS returns,
+               SUM(revenue) AS revenue, SUM(refund) AS refund, SUM(net_sales) AS net_sales,
+               SUM(product_cost) AS product_cost, SUM(discount) AS discount, SUM(commission) AS commission,
+               SUM(service_fee) AS service_fee, SUM(shipping) AS shipping, SUM(advertising) AS advertising,
+               SUM(other) AS other, SUM(profit_before_vat) AS profit_before_vat, SUM(vat_estimate) AS vat_estimate,
+               BOOL_OR(COALESCE(unit_cost, 0) = 0) AS missing_cost, BOOL_OR(finance_is_estimate) AS is_estimate
+          FROM (SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, i.product_name, i.quantity, i.order_id,
+                       o.internal_status, i.unit_cost, i.finance_is_estimate, {finance_view.item_columns(cfg)}
+                  FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
+                  LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
+                 WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}) x
+         GROUP BY sku
+    """, **rng.params(), mp=marketplace, **cfg.params())
     # SKU'ya doğrudan girilmiş dönem reklam giderleri (expenses.sku)
     direct_ads = {r["sku"]: _num(r["amount"]) for r in rows(conn, """
         SELECT sku, SUM(amount) AS amount FROM expenses
@@ -302,13 +296,14 @@ def sku_report(conn: Connection, rng: DateRange, marketplace: str | None = None)
     out = []
     for it in items:
         r = {k: (_num(v) if isinstance(v, Decimal) else v) for k, v in it.items()}
-        r["advertising"] = r["advertising"] + direct_ads.get(r["sku"], Decimal("0"))
-        r["tax_estimate"] = r["tax_estimate"].quantize(Decimal("0.01"))
-        cost = sum((r[k] for k in ("product_cost", "commission", "service_fee", "shipping", "advertising",
-                                   "refund", "other")), Decimal("0"))
-        r["net_profit"] = (r["revenue"] - cost).quantize(Decimal("0.01"))
-        r["net_profit_after_tax"] = r["net_profit"] - r["tax_estimate"]
-        r["margin"] = _ratio(r["net_profit"], r["revenue"])
+        extra_ads = direct_ads.get(r["sku"], Decimal("0"))
+        r["advertising"] = r["advertising"] + extra_ads
+        r["profit_before_vat"] = r["profit_before_vat"] - extra_ads
+        r["profit_after_vat"] = r["profit_before_vat"] - r["vat_estimate"]
+        finance_view.decorate(r)
+        # Geriye uyumlu alan adları
+        r["net_profit"], r["tax_estimate"] = r["profit_before_vat"], r["vat_estimate"]
+        r["net_profit_after_tax"], r["margin"] = r["profit_after_vat"], r["margin_before_vat"]
         r["return_rate"] = _ratio(Decimal(r["returns"]), Decimal(r["orders"])) if r["orders"] else None
         out.append(r)
     out.sort(key=lambda x: x["net_profit"], reverse=True)
@@ -366,64 +361,77 @@ def report_statuses(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer)
 @router.get("/api/reports/top-loss")
 def report_loss_orders(rng: DateRange = Depends(), limit: int = Query(20, le=100), _: CurrentUser = Depends(viewer),
                        conn: Connection = Depends(get_conn)):
-    return rows(conn, """
-        SELECT o.id, o.external_order_id, o.order_date, o.gross_revenue, o.net_profit, o.internal_status
-          FROM orders o WHERE o.order_date >= :start AND o.order_date < :end AND o.net_profit < 0
-         ORDER BY o.net_profit ASC LIMIT :limit
-    """, **rng.params(), limit=limit)
+    cfg = finance_view.load(conn)
+    where = "o.order_date >= :start AND o.order_date < :end"
+    out = rows(conn, f"""
+        SELECT x.id, x.external_order_id, x.order_date, x.revenue AS gross_revenue, x.profit_before_vat AS net_profit,
+               x.profit_after_vat AS net_profit_after_tax, x.internal_status
+          FROM ({finance_view.order_from(cfg, where)}) x WHERE x.profit_before_vat < 0
+         ORDER BY x.profit_before_vat ASC LIMIT :limit
+    """, **rng.params(), **cfg.params(), limit=limit)
+    for r in out:
+        for k in ("gross_revenue", "net_profit", "net_profit_after_tax"):
+            r[k] = finance_view.q2(r[k])
+    return out
 
 
 # ------------------------------------------------ finans tablosu (gerçek / tahmini)
-BASIS_TR = {"actual": "Gerçek", "estimate": "Tahmini", "entered": "Girilen", "mixed": "Kısmen tahmini"}
+BASIS_TR = {"actual": "Gerçek", "estimate": "Tahmini", "entered": "Girilen", "mixed": "Kısmen tahmini", "info": "Bilgi"}
 
 
 def statement(conn: Connection, rng: DateRange) -> dict:
-    """Dönem finans tablosu. Her satır kaynağına göre etiketlenir:
+    """Dönem finans tablosu — summary() ile AYNI kaynak (Dashboard ve Finans kartlarıyla birebir tutar).
+
+    Satıcı indirimi ciroya zaten yansımıştır (birim fiyat indirim sonrasıdır); yalnızca BİLGİ satırıdır,
+    tekrar düşülmez. Net satış = ciro − iade. Her satır kaynağına göre etiketlenir:
     Gerçek = pazaryerinden gelen tutar / hakediş, Tahmini = TrendHub hesabı, Girilen = kullanıcı kaydı."""
-    from .ads import spend_total
-    t = order_totals(conn, rng)
-    exp = period_expenses(conn, rng)
-    ads = spend_total(conn, rng)
+    sm = summary(conn, rng)
+    t, exp, ads = sm["orders"], sm["expenses"], sm["ad_spend"]
     n, est = t["orders"], t["estimated_orders"]
     fee_basis = "actual" if n and not est else "estimate" if est == n else "mixed"
-    gross, refunds = t["revenue"], t["refund"]
-    net_sales = gross - refunds - t["discount"]
+    net_sales = t["net_sales"]
     contribution = net_sales - t["product_cost"] - t["commission"] - t["service_fee"] - t["shipping"]
     other_exp = sum((e["amount"] for e in exp["by_category"] if e["category"] != "advertising"), Decimal("0"))
     adv_exp = exp["total"] - other_exp
-    net = contribution - t["advertising"] - ads - adv_exp - t["other"] - other_exp
+    net = sm["net_profit_after_expenses"]   # tek kaynak: kartlarla tablo aynı sayı
     lines = [
-        ("gross_sales", "Brüt satış", gross, "actual"),
-        ("refunds", "İadeler", -refunds, "actual"),
-        ("discounts", "İndirimler", -t["discount"], "actual"),
-        ("net_sales", "Net satış", net_sales, "actual"),
-        ("product_cost", "Ürün maliyeti", -t["product_cost"], "entered"),
-        ("commission", "Komisyon", -t["commission"], fee_basis),
-        ("service_fee", "Hizmet bedeli", -t["service_fee"], fee_basis),
-        ("shipping", "Kargo", -t["shipping"], fee_basis),
-        ("contribution", "Katkı payı", contribution, "estimate" if fee_basis != "actual" else "actual"),
-        ("marketplace_ads", "Pazaryeri reklam kesintisi (sipariş bazlı)", -t["advertising"], fee_basis),
-        ("ad_spend", "Reklam harcaması (Reklamlar)", -ads, "entered"),
-        ("ad_expenses", "Reklam gideri (Giderler)", -adv_exp, "entered"),
-        ("other_order_costs", "Diğer sipariş giderleri", -t["other"], fee_basis),
-        ("other_expenses", "Diğer giderler", -other_exp, "entered"),
-        ("net_profit", "Net kâr (vergi öncesi)", net, "estimate"),
-        ("vat_estimate", "Tahmini KDV", -t["tax_estimate"], "estimate"),
-        ("net_after_vat", "KDV sonrası net", net - t["tax_estimate"], "estimate"),
+        ("gross_sales", "Brüt satış (indirim sonrası fiyatla)", t["revenue"], "actual", True),
+        ("discounts", "Satıcı indirimi (bilgi — ciroya yansımış, tekrar düşülmez)", t["discount"], "info", False),
+        ("refunds", "İadeler", -t["refund"], "actual", True),
+        ("net_sales", "Net satış", net_sales, "actual", True),
+        ("product_cost", "Ürün maliyeti", -t["product_cost"], "entered", True),
+        ("commission", "Komisyon" + (" (KDV dahil)" if sm["vat"]["commission_vat_mode"] == "excluded" else ""),
+         -t["commission"], fee_basis, True),
+        ("service_fee", "Hizmet bedeli", -t["service_fee"], fee_basis, True),
+        ("shipping", "Kargo", -t["shipping"], fee_basis, True),
+        ("contribution", "Katkı payı", contribution, "estimate" if fee_basis != "actual" else "actual", True),
+        ("marketplace_ads", "Pazaryeri reklam kesintisi (sipariş bazlı)", -t["advertising"], fee_basis, True),
+        ("ad_spend", "Reklam harcaması (Reklamlar)", -ads, "entered", True),
+        ("ad_expenses", "Reklam gideri (Giderler)", -adv_exp, "entered", True),
+        ("other_order_costs", "Diğer sipariş giderleri", -t["other"], fee_basis, True),
+        ("other_expenses", "Diğer giderler", -other_exp, "entered", True),
+        ("net_profit", "KDV öncesi kâr", net, "estimate", True),
+        ("vat_estimate", "Tahmini ödenecek KDV", -sm["tax_estimate"], "estimate", True),
+        ("net_after_vat", "Tahmini KDV sonrası kâr", sm["net_profit_after_tax"], "estimate", True),
     ]
-    warnings = []
+    warnings = list(sm["vat"]["notes"])
+    if t["orders_without_items"]:
+        warnings.append(f"{t['orders_without_items']} eski siparişte kalem bilgisi yok: KDV'leri hesaplanamadı.")
     if ads and (t["advertising"] or adv_exp):
         warnings.append("Reklam harcaması birden fazla kaynakta var (Reklamlar, Giderler, pazaryeri kesintisi). "
                         "Aynı harcamayı iki yere girmediğinizden emin olun.")
     if est:
         warnings.append(f"{est} siparişte komisyon/kargo/hizmet bedeli tahmini (pazaryeri hakedişi henüz gelmedi).")
+    if t["missing_cost_orders"]:
+        warnings.append(f"{t['missing_cost_orders']} siparişte ürün maliyeti eksik: kâr olduğundan yüksek görünür.")
     if not n:
         warnings.append("Bu dönemde sipariş yok.")
     return {"range": rng.as_dict(), "orders": n, "estimated_orders": est,
             "lines": [{"key": k, "label": l, "amount": v.quantize(Decimal("0.01")), "basis": b,
-                       "basis_label": BASIS_TR[b]} for k, l, v, b in lines],
-            "margin": _ratio(net, net_sales), "contribution_margin": _ratio(contribution, net_sales),
-            "warnings": warnings}
+                       "basis_label": BASIS_TR[b], "in_total": tot} for k, l, v, b, tot in lines],
+            "margin": sm["margin_after_expenses"], "margin_after_tax": sm["margin_after_tax"],
+            "contribution_margin": _ratio(contribution, net_sales), "markup_after_tax": sm["markup_after_tax"],
+            "vat": sm["vat"], "warnings": warnings}
 
 
 @router.get("/api/finance/statement")
@@ -463,15 +471,19 @@ def expenses_csv(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), c
 
 @router.get("/api/finance/orders.csv")
 def orders_csv(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
-    items = rows(conn, """
-        SELECT o.external_order_id, (o.order_date AT TIME ZONE 'Europe/Istanbul') AS order_date_tr, m.name AS marketplace,
-               o.internal_status, o.gross_revenue, o.refund_cost, o.product_cost, o.commission, o.service_fee,
-               o.shipping_cost, o.advertising_cost, o.other_cost, o.net_profit, o.finance_is_estimate
-          FROM orders o LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
-         WHERE o.order_date >= :start AND o.order_date < :end ORDER BY o.order_date, o.id""", **rng.params())
+    cfg = finance_view.load(conn)
+    items = rows(conn, f"""SELECT x.*, (x.order_date AT TIME ZONE 'Europe/Istanbul') AS order_date_tr
+                             FROM ({finance_view.order_from(cfg, "o.order_date >= :start AND o.order_date < :end")}) x
+                            ORDER BY x.order_date, x.id""", **rng.params(), **cfg.params())
+    items = [finance_view.decorate(i) for i in items]
+    pct = lambda v: None if v is None else (v * 100).quantize(Decimal("0.01"))  # noqa: E731
     return _csv_response(f"trendhub-siparisler-{rng.start_date}-{rng.end_date}.csv",
-                         ["Sipariş no", "Tarih (TR)", "Pazaryeri", "Durum", "Ciro", "İade", "Ürün maliyeti", "Komisyon",
-                          "Hizmet bedeli", "Kargo", "Reklam", "Diğer", "Net kâr", "Tahmini mi"],
-                         [[i["external_order_id"], i["order_date_tr"], i["marketplace"], S.LABELS_TR.get(i["internal_status"], i["internal_status"]), i["gross_revenue"], i["refund_cost"],
-                           i["product_cost"], i["commission"], i["service_fee"], i["shipping_cost"], i["advertising_cost"],
-                           i["other_cost"], i["net_profit"], "Evet" if i["finance_is_estimate"] else "Hayır"] for i in items])
+                         ["Sipariş no", "Tarih (TR)", "Pazaryeri", "Durum", "Ciro", "İade", "Net satış", "Ürün maliyeti",
+                          "Komisyon", "Hizmet bedeli", "Kargo", "Reklam", "Diğer", "KDV öncesi kâr", "Tahmini KDV",
+                          "Tahmini KDV sonrası kâr", "Net marj % (KDV sonrası)", "Markup % (KDV sonrası)", "Tahmini mi"],
+                         [[i["external_order_id"], i["order_date_tr"], i["marketplace_name"],
+                           S.LABELS_TR.get(i["internal_status"], i["internal_status"]), i["revenue"], i["refund"],
+                           i["net_sales"], i["product_cost"], i["commission"], i["service_fee"], i["shipping"],
+                           i["advertising"], i["other"], i["profit_before_vat"], i["vat_estimate"], i["profit_after_vat"],
+                           pct(i["margin_after_vat"]), pct(i["markup_after_vat"]),
+                           "Evet" if i["finance_is_estimate"] else "Hayır"] for i in items])

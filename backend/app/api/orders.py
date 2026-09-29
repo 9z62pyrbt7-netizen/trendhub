@@ -11,8 +11,8 @@ from sqlalchemy.engine import Connection
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, operator, viewer
 from ..domain import order_status as S
-from ..domain.finance import COMPONENT_LABELS_TR, ZERO, estimated_vat_payable, money
-from ..services import app_settings, shipping_plan
+from ..domain.finance import COMPONENT_LABELS_TR, ZERO
+from ..services import finance_view, shipping_plan
 from ..services.audit import log_audit
 from ..services.finance_service import recalculate_order
 from .common import TZ, Page, not_found, paged
@@ -70,12 +70,31 @@ def list_orders(page: Page = Depends(), status: str | None = None, marketplace: 
                (SELECT string_agg(DISTINCT sh.carrier, ', ') FROM shipments sh WHERE sh.order_id = o.id) AS carrier
         {base} ORDER BY {order_by} LIMIT :limit OFFSET :offset
     """, **params, limit=page.page_size, offset=page.offset)
+    fin = finance_view.order_metrics(conn, [it["id"] for it in items])
     for it in items:
         it["status_label"] = S.LABELS_TR.get(it["internal_status"], it["internal_status"])
-        rev = it["gross_revenue"] or 0
-        it["margin"] = float(it["net_profit"] / rev) if rev else None
+        _apply_finance(it, fin.get(it["id"]))
     shipping_plan.attach(conn, items)
     return paged(items, total, page)
+
+
+def _apply_finance(o: dict, f: dict | None) -> None:
+    """Sipariş satırına tek kaynaktan finans alanlarını ekler (iptalde kâr/KDV 0)."""
+    f = f or {}
+    cancelled = o.get("internal_status") == S.CANCELLED
+    z = lambda v: ZERO if cancelled else v  # noqa: E731
+    o["net_sales"] = z(f.get("net_sales"))
+    o["profit_before_vat"] = z(f.get("profit_before_vat"))
+    o["vat_estimate"] = z(f.get("vat_estimate"))
+    o["profit_after_vat"] = z(f.get("profit_after_vat"))
+    for k in ("margin_before_vat", "margin_after_vat", "markup_before_vat", "markup_after_vat"):
+        o[k] = None if cancelled else f.get(k)
+    # Geriye uyumlu alanlar: net_profit = KDV öncesi kâr; margin = KDV öncesi net marj (net satış paydası)
+    o["net_profit"] = o["profit_before_vat"]
+    o["tax_estimate"] = o["vat_estimate"]
+    o["net_profit_after_tax"] = o["profit_after_vat"]
+    o["margin"] = o["margin_before_vat"]
+    o["vat_known"] = f.get("vat_estimate") is not None
 
 
 @router.get("/{order_id}")
@@ -94,30 +113,27 @@ def get_order(order_id: int, _: CurrentUser = Depends(viewer), conn: Connection 
     o["items"] = rows(conn, """SELECT i.*, p.vat_rate AS product_vat_rate FROM order_items i
                                 LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = :id ORDER BY i.id""",
                       id=order_id)
-    status = o["internal_status"]
-    restocked = status == S.RETURNED and not app_settings.get(conn, "finance.return_product_cost_is_loss", False)
-    tax_total = discount_total = ZERO
+    # Kalem ve sipariş finansı TEK kaynaktan (finance_view): liste, dashboard ve raporlarla aynı sayılar
+    cfg = finance_view.load(conn)
+    im = finance_view.item_metrics(conn, order_id, cfg)
+    cancelled = o["internal_status"] == S.CANCELLED
     for it in o["items"]:
-        qty = it["quantity"] or 0
-        revenue = money(Decimal(it["unit_price"] or 0) * qty)
-        product_cost = ZERO if restocked else money(Decimal(it["unit_cost"] or 0) * qty)
-        costs = product_cost + sum((Decimal(it[k] or 0) for k in ("commission", "service_fee", "shipping_cost",
-                                                                   "advertising_cost", "refund_amount", "other_cost")), ZERO)
-        rate = it["vat_rate"] if it["vat_rate"] is not None else it.pop("product_vat_rate", None)
+        rate = it["vat_rate"] if it["vat_rate"] is not None else it.get("product_vat_rate")
         it.pop("product_vat_rate", None)
-        tax = ZERO if status in (S.CANCELLED, S.RETURNED) else estimated_vat_payable(
-            revenue, product_cost, it["refund_amount"] or 0, rate)
-        it["revenue"] = revenue
-        it["product_cost"] = product_cost
-        it["net_profit"] = ZERO if status == S.CANCELLED else revenue - costs
-        it["tax_estimate"] = tax
-        it["net_profit_after_tax"] = it["net_profit"] - tax
-        it["margin"] = float(it["net_profit"] / revenue) if revenue and status != S.CANCELLED else None
-        tax_total += tax
-        discount_total += Decimal(it["discount"] or 0)
-    o["tax_estimate"] = tax_total
-    o["discount"] = discount_total
-    o["net_profit_after_tax"] = (o["net_profit"] or ZERO) - tax_total
+        it["vat_rate"] = rate
+        f = im.get(it["id"], {})
+        for k in ("revenue", "net_sales", "product_cost", "profit_before_vat", "vat_estimate", "profit_after_vat",
+                  "margin_before_vat", "margin_after_vat", "markup_before_vat", "markup_after_vat"):
+            it[k] = None if cancelled and k != "revenue" else f.get(k)
+        it["commission_incl_vat"] = f.get("commission")
+        # Geriye uyumlu alan adları
+        it["net_profit"] = ZERO if cancelled else f.get("profit_before_vat")
+        it["tax_estimate"] = ZERO if cancelled else f.get("vat_estimate")
+        it["net_profit_after_tax"] = ZERO if cancelled else f.get("profit_after_vat")
+        it["margin"] = None if cancelled else f.get("margin_before_vat")
+    _apply_finance(o, finance_view.order_metrics(conn, [order_id], cfg).get(order_id))
+    o["discount"] = sum((Decimal(it["discount"] or 0) for it in o["items"]), ZERO)
+    o["finance_config"] = cfg.as_dict()
     o["shipments"] = rows(conn, "SELECT * FROM shipments WHERE order_id = :id ORDER BY id", id=order_id)
     o["history"] = rows(conn, """
         SELECT h.*, u.username FROM order_status_history h LEFT JOIN users u ON u.id = h.user_id

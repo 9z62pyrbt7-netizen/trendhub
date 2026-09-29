@@ -17,6 +17,11 @@ EDITABLE = {
     "finance.service_fee_per_order": ("money", "Sipariş başı hizmet bedeli (₺)"),
     "finance.default_shipping_cost": ("money", "Kargo ücreti bilinmiyorsa varsayılan (₺)"),
     "finance.include_vat": ("bool", "Tutarlar KDV dahil"),
+    "finance.commission_vat_mode": ("choice", "Komisyon oranı ve hakediş komisyonu KDV durumu"),
+    "finance.commission_vat_rate": ("percent", "Komisyon faturası KDV oranı (%)"),
+    "finance.expense_vat_mode": ("choice", "Kargo / hizmet bedeli / reklam giderleri KDV durumu"),
+    "finance.expense_vat_rate": ("percent", "Gider KDV oranı (%)"),
+    "finance.fx_rates": ("fx", "Döviz kurları (1 birim = ? TL) — tanımsız döviz maliyeti finansa girmez"),
     "finance.return_product_cost_is_loss": ("bool", "İade edilen ürünün maliyeti zarar sayılsın (stoğa geri dönmüyorsa)"),
     "stock.low_stock_threshold": ("int", "Düşük stok eşiği"),
     "shipping.same_day_before": ("time", "Kargo kesim saati: bu saatten ÖNCE gelen sipariş bugün kargoya verilir"),
@@ -26,6 +31,15 @@ EDITABLE = {
     "alerts.price_change_pct": ("percent", "Fiyat değişim uyarısı: alış fiyatı bu oranın üzerinde değişirse (%)"),
     "alerts.shipping_overdue_hours": ("int", "Kargo gecikme uyarısı: planlanan günden bu kadar saat sonra"),
     "notifications.in_app": ("bool", "Panel içi bildirimler (zil)"),
+}
+
+# Seçimli ayarların geçerli değerleri (arayüzde açılır liste)
+CHOICES = {
+    "finance.commission_vat_mode": {"unset": "Belirtilmedi (komisyon KDV'si hesaba katılmaz)",
+                                    "included": "Komisyon tutarı KDV dahil",
+                                    "excluded": "Komisyon KDV hariç (faturada ayrıca KDV eklenir)"},
+    "finance.expense_vat_mode": {"unset": "Belirtilmedi (gider KDV'si indirilmez)",
+                                 "included": "Giderler KDV dahil (KDV'si indirilir)"},
 }
 
 # Ayarlar ekranındaki bölümler (anahtar önekine göre)
@@ -89,7 +103,45 @@ def validate(key: str, value):
         if isinstance(value, bool):
             return value
         raise ValueError("true/false olmalı")
+    if kind == "choice":
+        if value not in CHOICES[key]:
+            raise ValueError("Geçersiz seçim: " + ", ".join(CHOICES[key].values()))
+        return value
+    if kind == "fx":
+        return validate_fx(value)
     return value
+
+
+def validate_fx(value) -> dict:
+    """{"USD": "34.10", "EUR": "37.2"} — 3 harfli para birimi kodu, pozitif kur. TRY tanımlanamaz (her zaman 1)."""
+    import re
+    if isinstance(value, str):
+        value = json.loads(value or "{}")
+    if not isinstance(value, dict):
+        raise ValueError("Kurlar {\"USD\": 34.1} biçiminde olmalı")
+    out = {}
+    for k, v in value.items():
+        code = str(k).strip().upper()
+        if not re.match(r"^[A-Z]{3}$", code) or code == "TRY":
+            raise ValueError(f"Geçersiz para birimi: {k}")
+        rate = Decimal(str(v))
+        if rate <= 0 or rate > 100000:
+            raise ValueError(f"{code} kuru pozitif olmalı")
+        out[code] = str(rate)
+    return out
+
+
+def fx_rates(conn: Connection) -> dict[str, Decimal]:
+    """TRY = 1 ve tanımlı kurlar. Tanımsız döviz için kur YOKTUR (sessizce TL sayılmaz)."""
+    raw = get(conn, "finance.fx_rates", {}) or {}
+    out = {"TRY": Decimal("1")}
+    for k, v in (raw.items() if isinstance(raw, dict) else []):
+        try:
+            if Decimal(str(v)) > 0:
+                out[str(k).upper()] = Decimal(str(v))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def set_value(conn: Connection, key: str, value, user_id: int | None) -> None:

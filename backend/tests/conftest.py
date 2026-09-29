@@ -104,7 +104,9 @@ def engine():
             ('stock.low_stock_threshold', '3'), ('shipping.same_day_before', '"11:00"'),
             ('shipping.next_day_from', '"12:00"'), ('alerts.critical_stock_threshold', '2'),
             ('alerts.price_change_pct', '20'), ('alerts.shipping_overdue_hours', '24'),
-            ('notifications.in_app', 'true') ON CONFLICT (key) DO NOTHING"""))
+            ('notifications.in_app', 'true'), ('finance.commission_vat_mode', '"unset"'),
+            ('finance.commission_vat_rate', '20'), ('finance.expense_vat_mode', '"unset"'),
+            ('finance.expense_vat_rate', '20'), ('finance.fx_rates', '{}') ON CONFLICT (key) DO NOTHING"""))
         c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
         c.execute(text("UPDATE marketplaces SET last_check_at = NULL, last_check_ok = NULL, last_check_message = NULL, last_sync_at = NULL"))
     from app.security import login_limiter

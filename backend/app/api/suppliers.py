@@ -20,8 +20,8 @@ from ..config import get_settings, is_set
 from ..connectors.base import ConnectorError
 from ..db import get_conn, get_engine, row, rows
 from ..deps import CurrentUser, admin, client_ip, operator, viewer
-from ..domain.suppliers import STRATEGIES, STRATEGY_LABELS, select_offer
-from ..services import jobs
+from ..domain.suppliers import STRATEGIES, STRATEGY_LABELS, effective_cost, select_offer
+from ..services import app_settings, jobs
 from ..services.audit import log_audit
 from ..services.supplier_catalog import load_offers, refresh_catalog
 from ..services.supplier_sync import SupplierSyncError, fetch_records, load_config, run_supplier_sync
@@ -93,6 +93,8 @@ class SupplierIn(BaseModel):
     integration_type: str | None = Field(None, pattern=r"^(xml|api|csv|manual|external)$")
     connection: ConnectionIn | None = None
     preset: str | None = Field(None, max_length=50)
+    # Tedarikçi fiyatları KDV dahil mi hariç mi? None = belirtilmedi (KDV dahil varsayılır, uyarı gösterilir)
+    price_vat_mode: str | None = Field(None, pattern=r"^(included|excluded)$")
 
 
 class MappingItem(BaseModel):
@@ -152,6 +154,13 @@ def _save_connection(conn: Connection, supplier_id: int, c: ConnectionIn) -> Non
                                  "page_param": c.page_param or None, "page_size_param": c.page_size_param or None,
                                  "page_size": c.page_size, "start_page": c.start_page,
                                  "max_pages": c.max_pages}.items() if v not in (None, "", False)}
+    # Sihirbazda onaylanan varyant yolu formdan gelmez: korunur
+    if (cur.get("options") or {}).get("variant_path"):
+        options["variant_path"] = cur["options"]["variant_path"]
+    new_rp = (c.record_path or "").strip() or None
+    if cur and (c.source_url is not None or new_rp != cur.get("record_path")):
+        # Kaynak ya da ürün node'u değişti: eşleştirme yeniden onaylanmadan kaynaktan aktarım yapılmaz
+        conn.execute(text("UPDATE suppliers SET mapping_approved_at = NULL WHERE id = :id"), {"id": supplier_id})
     conn.execute(text("""
         INSERT INTO supplier_connections(supplier_id, integration_type, source_url_enc, source_url_display, auth_type,
                auth_username, auth_param_name, secret_enc, secret_env, record_path, options, updated_at)
@@ -180,7 +189,7 @@ def _audit_connection(c: ConnectionIn) -> dict:
 SUPPLIER_STATS_SQL = """
     SELECT sp.id, sp.code, sp.name, sp.contact_name, sp.phone, sp.email, sp.lead_time_days, sp.notes, sp.is_active,
            sp.priority, sp.sync_interval_minutes, sp.stock_rules, sp.last_sync_at, sp.last_sync_status,
-           sp.last_sync_error, sp.created_at, sp.updated_at,
+           sp.last_sync_error, sp.created_at, sp.updated_at, sp.price_vat_mode, sp.mapping_approved_at,
            COALESCE(sc.integration_type, CASE WHEN sp.integration_type IN ('xml','api','csv') THEN sp.integration_type
                                                ELSE 'manual' END) AS integration_type,
            sc.source_url_display, (sc.source_url_enc IS NOT NULL) AS has_source_url,
@@ -249,9 +258,9 @@ def create_supplier(body: SupplierIn, request: Request, user: CurrentUser = Depe
         with conn.begin_nested():
             sid = conn.execute(text("""
                 INSERT INTO suppliers(code, name, contact_name, phone, email, lead_time_days, integration_type, notes,
-                                      is_active, priority, sync_interval_minutes, stock_rules)
+                                      is_active, priority, sync_interval_minutes, stock_rules, price_vat_mode)
                 VALUES (:code, :name, :contact_name, :phone, :email, :lead_time_days, :it, :notes, :is_active,
-                        :priority, :interval, CAST(:rules AS JSONB))
+                        :priority, :interval, CAST(:rules AS JSONB), :price_vat_mode)
                 RETURNING id
             """), {**body.model_dump(exclude={"connection", "stock_rules", "code", "preset", "integration_type"}),
                    "code": code, "it": connection.integration_type, "interval": body.sync_interval_minutes,
@@ -290,7 +299,8 @@ def update_supplier(supplier_id: int, body: SupplierIn, request: Request, user: 
     n = conn.execute(text("""
         UPDATE suppliers SET name = :name, contact_name = :contact_name, phone = :phone, email = :email,
                lead_time_days = :lead_time_days, notes = :notes, is_active = :is_active, priority = :priority,
-               sync_interval_minutes = :interval, stock_rules = CAST(:rules AS JSONB), updated_at = NOW()
+               sync_interval_minutes = :interval, stock_rules = CAST(:rules AS JSONB),
+               price_vat_mode = COALESCE(:price_vat_mode, price_vat_mode), updated_at = NOW()
          WHERE id = :id
     """), {**body.model_dump(exclude={"connection", "stock_rules", "code", "preset", "integration_type"}),
            "interval": body.sync_interval_minutes, "rules": body.stock_rules.model_dump_json(), "id": supplier_id}).rowcount
@@ -325,9 +335,19 @@ def update_mappings(supplier_id: int, body: MappingsIn, request: Request, user: 
                     conn: Connection = Depends(get_conn)):
     if not conn.execute(text("SELECT 1 FROM suppliers WHERE id = :id"), {"id": supplier_id}).first():
         raise not_found("Tedarikçi")
+    before = {r["target_field"]: (r["source_path"], r["default_value"]) for r in rows(conn, """
+        SELECT target_field, source_path, default_value FROM supplier_field_mappings WHERE supplier_id = :s""",
+        s=supplier_id)}
+    changed = False
     for m in body.mappings:
         if m.target_field not in FIELD_NAMES:
             raise HTTPException(422, f"Bilinmeyen TrendHub alanı: {m.target_field}")
+        new = ((m.source_path or "").strip() or None, (m.default_value or "").strip() or None)
+        if before.get(m.target_field, (None, None)) != new:
+            changed = True
+            # Değişen alanın önceki "doğrulandı" işareti geçersizdir
+            conn.execute(text("""UPDATE supplier_field_mappings SET confirmed = FALSE
+                                 WHERE supplier_id = :s AND target_field = :f"""), {"s": supplier_id, "f": m.target_field})
         conn.execute(text("""
             INSERT INTO supplier_field_mappings(supplier_id, target_field, source_path, default_value, updated_at)
             VALUES (:s, :f, :p, :d, NOW())
@@ -335,10 +355,13 @@ def update_mappings(supplier_id: int, body: MappingsIn, request: Request, user: 
                    default_value = EXCLUDED.default_value, updated_at = NOW()
         """), {"s": supplier_id, "f": m.target_field, "p": (m.source_path or "").strip() or None,
                "d": (m.default_value or "").strip() or None})
+    if changed:
+        # Eşleştirme değişti: kaynaktan aktarım/zamanlanmış senkron için yeniden onay gerekir
+        conn.execute(text("UPDATE suppliers SET mapping_approved_at = NULL WHERE id = :id"), {"id": supplier_id})
     log_audit(conn, actor=user.username, user_id=user.id, action="supplier.mapping_updated", entity_type="supplier",
               entity_id=supplier_id, ip=client_ip(request),
               details={m.target_field: m.source_path for m in body.mappings})
-    return {"ok": True}
+    return {"ok": True, "approval_reset": changed}
 
 
 async def _read_body(request: Request) -> bytes:
@@ -405,12 +428,14 @@ def test_supplier_connection(supplier_id: int, request: Request, user: CurrentUs
 @router.post("/api/suppliers/{supplier_id}/sync", status_code=202)
 def trigger_supplier_sync(supplier_id: int, request: Request, user: CurrentUser = Depends(operator),
                           conn: Connection = Depends(get_conn)):
-    s = row(conn, """SELECT s.id, s.code, s.is_active, c.integration_type, c.source_url_enc FROM suppliers s
+    s = row(conn, """SELECT s.id, s.code, s.is_active, s.mapping_approved_at, c.integration_type, c.source_url_enc FROM suppliers s
                       LEFT JOIN supplier_connections c ON c.supplier_id = s.id WHERE s.id = :id""", id=supplier_id)
     if s is None:
         raise not_found("Tedarikçi")
     if (s["integration_type"] or "manual") == "manual" or not s["source_url_enc"]:
         raise HTTPException(409, "Bu tedarikçinin kaynak adresi yok; dosya yükleyerek senkronize edin.")
+    if not s["mapping_approved_at"]:
+        raise HTTPException(409, "Alan eşleştirmesi onaylanmadı. İçe aktarma sihirbazında önizleyip onaylayın.")
     job_id = jobs.enqueue(conn, SUPPLIER_SYNC, payload={"supplier_id": supplier_id, "trigger": "manual"},
                           idempotency_key=f"{SUPPLIER_SYNC}:{supplier_id}", max_attempts=3)
     log_audit(conn, actor=user.username, user_id=user.id, action="supplier.sync_requested", entity_type="supplier",
@@ -520,6 +545,7 @@ def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str
     items = rows(conn, f"""
         SELECT sp.id, sp.supplier_id, s.name AS supplier_name, sp.supplier_sku, sp.barcode, sp.model_code, sp.name,
                sp.brand, sp.category, sp.cost, sp.sale_price, sp.stock, sp.vat_rate, sp.desi, sp.color, sp.variant,
+               sp.size, sp.parent_code, sp.currency, s.price_vat_mode,
                COALESCE(sp.status, 'active') AS status, sp.images, sp.last_seen_at, sp.missing_since, sp.product_id,
                sp.updated_at,
                (SELECT COALESCE(json_agg(DISTINCT m.name), '[]'::json) FROM marketplace_listings l
@@ -536,15 +562,20 @@ def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str
           LEFT JOIN products p ON p.id = sp.product_id
          WHERE {w} ORDER BY sp.name NULLS LAST, sp.id LIMIT :limit OFFSET :offset
     """, **params, limit=page.page_size, offset=page.offset)
+    fx = app_settings.fx_rates(conn)
     for it in items:
         it["status_label"] = STATUS_TR.get(it["status"], it["status"])
+        # Finansta kullanılacak maliyet (TL, KDV dahil) ve nedeni; kur yoksa maliyet YOK
+        it["effective_cost"], it["cost_note"] = effective_cost(it["cost"], it["currency"], it["vat_rate"],
+                                                               it.pop("price_vat_mode"), fx)
         imgs = it.pop("images") or []
         it["image"] = imgs[0] if imgs else None
         it["image_count"] = len(imgs)
         it["problems"] = [t for c, t in (
             (it["status"] == "missing", "Kaynakta bulunamadı"), (not it["barcode"], "Barkod yok"),
             (it["cost"] is None, "Alış fiyatı yok"), (not imgs, "Görsel yok"),
-            ((it["stock"] or 0) <= 0, "Stok yok"), (it["open_alerts"], "Açık uyarı var")) if c]
+            ((it["stock"] or 0) <= 0, "Stok yok"), (it["open_alerts"], "Açık uyarı var"),
+            (it["cost"] is not None and it["effective_cost"] is None, it["cost_note"] or "Maliyet kullanılamıyor")) if c]
     summary = row(conn, """
         SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE COALESCE(status,'active') = 'active') AS active,
                COUNT(*) FILTER (WHERE status = 'missing') AS missing,
@@ -645,3 +676,79 @@ def set_sourcing(product_id: int, body: SourcingIn, request: Request, user: Curr
     log_audit(conn, actor=user.username, user_id=user.id, action="product.sourcing_updated", entity_type="product",
               entity_id=product_id, ip=client_ip(request), details=body.model_dump())
     return {"ok": True}
+
+
+# ------------------------------------------------------------ içe aktarma sihirbazı
+class AnalyzeIn(BaseModel):
+    record_path: str | None = Field(None, max_length=300)
+    variant_path: str | None = Field(None, max_length=300)
+    mappings: list[MappingItem] | None = Field(None, max_length=60)
+    limit: int = Field(10, ge=1, le=20)
+
+
+class ApproveIn(BaseModel):
+    record_path: str | None = Field(None, max_length=300)
+    variant_path: str | None = Field(None, max_length=300)
+    mappings: list[MappingItem] = Field(max_length=60)
+    confirm_price: bool = False
+    price_vat_mode: str = Field(pattern=r"^(included|excluded)$")
+    run_import: bool = True
+
+
+def _analyze(supplier_id: int, body: AnalyzeIn) -> dict:
+    from ..services import supplier_import
+    with get_engine().begin() as conn:
+        try:
+            cfg = supplier_import.load(conn, supplier_id)
+        except SupplierSyncError:
+            raise not_found("Tedarikçi") from None
+        try:
+            return supplier_import.analyze(conn, cfg, record_path=body.record_path, variant_path=body.variant_path,
+                                           mappings=[m.model_dump() for m in body.mappings] if body.mappings is not None
+                                           else None, limit=body.limit)
+        except supplier_import.ImportError_ as exc:
+            raise HTTPException(422, str(exc)) from None
+
+
+@router.post("/api/suppliers/{supplier_id}/import/analyze")
+async def import_analyze(supplier_id: int, body: AnalyzeIn, _: CurrentUser = Depends(operator)):
+    """Kaynağı okur: ürün node adayları, alanlar, öneri (güven düzeyli), eşleştirilmiş 5-20 ürün ve
+    eksik alan uyarıları. Veritabanına hiçbir şey yazmaz, pazaryerine hiçbir istek göndermez."""
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(_analyze, supplier_id, body)
+
+
+def _approve(supplier_id: int, body: ApproveIn, user: CurrentUser, ip: str | None) -> dict:
+    from ..services import supplier_import
+    with get_engine().begin() as conn:
+        try:
+            cfg = supplier_import.load(conn, supplier_id)
+        except SupplierSyncError:
+            raise not_found("Tedarikçi") from None
+        try:
+            result = supplier_import.approve(conn, cfg, record_path=body.record_path, variant_path=body.variant_path,
+                                             mappings=[m.model_dump() for m in body.mappings],
+                                             confirm_price=body.confirm_price, price_vat_mode=body.price_vat_mode,
+                                             user_id=user.id)
+        except supplier_import.ImportError_ as exc:
+            raise HTTPException(422, str(exc)) from None
+        log_audit(conn, actor=user.username, user_id=user.id, action="supplier.import_approved", entity_type="supplier",
+                  entity_id=supplier_id, ip=ip, details=result)
+        remote = (cfg["connection"] or {}).get("integration_type") in ("xml", "api", "csv") and \
+            (cfg["connection"] or {}).get("source_url_enc")
+    run = None
+    if body.run_import and remote:
+        try:
+            run = run_supplier_sync(get_engine(), supplier_id, trigger="approval")
+        except ConnectorError as exc:
+            raise HTTPException(422, f"Onay kaydedildi ancak aktarım başarısız: {exc}") from None
+    return {"approved": True, **result, "import": run,
+            "message": ("Onaylandı ve Ürün Havuzu'na aktarıldı. Pazaryerine hiçbir şey gönderilmedi." if run
+                        else "Onaylandı. Manuel tedarikçide dosyayı yükleyerek aktarın.")}
+
+
+@router.post("/api/suppliers/{supplier_id}/import/approve")
+async def import_approve(supplier_id: int, body: ApproveIn, request: Request, user: CurrentUser = Depends(operator)):
+    """Kullanıcı onayı: eşleştirmeyi kaydeder ve ilk aktarımı Ürün Havuzu'na yapar (yalnızca TrendHub DB)."""
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(_approve, supplier_id, body, user, client_ip(request))

@@ -197,12 +197,14 @@ def schedule_due_jobs(conn, interval_minutes: int, settings=None) -> list[int]:
 def schedule_supplier_jobs(conn) -> list[int]:
     """Kaynak adresi olan aktif tedarikçiler için vadesi gelen `supplier.sync` işlerini kuyruğa ekler.
 
-    Senkron sıklığı 0 olan tedarikçi otomatik senkronize edilmez (yalnızca elle)."""
+    Senkron sıklığı 0 olan tedarikçi otomatik senkronize edilmez (yalnızca elle). Alan eşleştirmesi
+    kullanıcı tarafından onaylanmamış tedarikçi hiç planlanmaz (ilk aktarım onayla başlar)."""
     created = []
     due = conn.execute(text("""
         SELECT s.id FROM suppliers s JOIN supplier_connections c ON c.supplier_id = s.id
          WHERE s.is_active AND s.sync_interval_minutes > 0 AND c.integration_type IN ('xml','api','csv')
            AND c.source_url_enc IS NOT NULL
+           AND s.mapping_approved_at IS NOT NULL      -- onaylanmamış eşleştirmeyle zamanlanmış senkron YOK
            AND NOT EXISTS (SELECT 1 FROM sync_jobs j WHERE j.idempotency_key = 'supplier.sync:' || s.id
                             AND (j.status IN ('queued','running')
                                  OR j.created_at > NOW() - make_interval(mins => s.sync_interval_minutes)))

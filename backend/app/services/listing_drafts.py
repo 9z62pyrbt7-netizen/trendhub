@@ -27,6 +27,13 @@ from .supplier_catalog import load_offers
 DEFAULT_REQUIRED = ["barcode", "brand", "category", "images"]
 
 
+def _vat_rule(conn: Connection) -> dict:
+    from .finance_view import load
+    cfg = load(conn)
+    return {"commission_vat_mode": cfg.commission_vat_mode, "commission_vat_rate": cfg.commission_vat_rate,
+            "expense_vat_mode": cfg.expense_vat_mode, "expense_vat_rate": cfg.expense_vat_rate}
+
+
 def marketplace_rule(conn: Connection, marketplace: dict) -> tuple[PricingRule, dict]:
     r = row(conn, "SELECT * FROM marketplace_rules WHERE marketplace_id = :m", m=marketplace["id"]) or {}
     commission = r.get("commission_rate")
@@ -38,7 +45,8 @@ def marketplace_rule(conn: Connection, marketplace: dict) -> tuple[PricingRule, 
                        fixed_cost=Decimal(str(r.get("fixed_cost", "0"))),
                        shipping_cost=Decimal(str(r.get("shipping_cost", "0"))),
                        min_margin_rate=Decimal(str(r.get("min_margin_rate", "0.05"))),
-                       rounding=r.get("rounding") or "x.90", include_vat=include_vat)
+                       rounding=r.get("rounding") or "x.90", include_vat=include_vat,
+                       **_vat_rule(conn))
     extra = {"stock_buffer": r.get("stock_buffer") or 0, "min_stock": r.get("min_stock") if r.get("min_stock") is not None else 1,
              "max_stock": r.get("max_stock"), "title_max_length": r.get("title_max_length"),
              "required_fields": r.get("required_fields") if r.get("required_fields") is not None else DEFAULT_REQUIRED}
@@ -90,7 +98,13 @@ def compute(conn: Connection, product: dict, marketplace: dict, offers, rule: Pr
                            min_stock=int(extra["min_stock"] or 0), existing_listing=bool(existing),
                            attributes=attributes, required_attributes=required_attrs)
     if offer is None:
-        check.errors.insert(0, "Kullanılabilir tedarikçi teklifi yok (stokta ve fiyatı olan)")
+        blocked = sorted({o.cost_note for o in offers if o.cost is None and o.cost_note})
+        check.errors.insert(0, "Kullanılabilir tedarikçi teklifi yok (stokta ve fiyatı olan)"
+                            + (": " + "; ".join(blocked) if blocked else ""))
+    elif offer.cost is None and offer.cost_note:
+        check.errors.insert(0, offer.cost_note)        # ör. kur tanımsız: maliyet yok, kâr hesaplanamaz
+    elif offer.cost_note:
+        check.warnings.append(offer.cost_note)
     return {"supplier_product_id": offer.supplier_product_id if offer else None,
             "supplier_name": offer.supplier_name if offer else None,
             "price": price, "stock": stock, "cost_basis": cost, "commission_rate": rule.commission_rate,

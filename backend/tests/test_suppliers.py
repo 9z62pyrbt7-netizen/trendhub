@@ -264,6 +264,9 @@ def test_worker_job_downloads_feed_over_http(client, engine, monkeypatch):
                         auth_type="none")
     client.put(f"/api/suppliers/{sid}", json={"name": "Çanta Bayim", "sync_interval_minutes": 60}, headers=H)
     with engine.begin() as c:
+        # Eşleştirme onaylanmadan zamanlanmış senkron planlanmaz
+        assert sync_service.schedule_supplier_jobs(c) == []
+        c.execute(text("UPDATE suppliers SET mapping_approved_at = NOW() WHERE id = :s"), {"s": sid})
         created = sync_service.schedule_supplier_jobs(c)
         assert len(created) == 1 and sync_service.schedule_supplier_jobs(c) == []   # idempotent
     urls = []
@@ -286,6 +289,11 @@ def test_worker_job_downloads_feed_over_http(client, engine, monkeypatch):
 
 def test_failed_download_marks_supplier_error(client, engine, monkeypatch):
     sid = make_supplier(client, "Kırık", MAP_A, integration_type="xml", source_url="https://broken.example/x.xml")
+    # Onaysız kaynak senkronu hiç başlamaz (çalıştırma kaydı açılmaz)
+    assert "skipped" in supplier_sync.run_supplier_sync(engine, sid)
+    assert client.get(f"/api/suppliers/{sid}").json()["runs"] == []
+    with engine.begin() as c:
+        c.execute(text("UPDATE suppliers SET mapping_approved_at = NOW() WHERE id = :s"), {"s": sid})
     with pytest.raises(Exception):
         supplier_sync.run_supplier_sync(engine, sid, transport=httpx.MockTransport(lambda r: httpx.Response(404)))
     s = client.get(f"/api/suppliers/{sid}").json()

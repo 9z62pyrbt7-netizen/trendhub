@@ -132,6 +132,18 @@ document.addEventListener('keydown', (e) => {
 const statusBadge = (code, label) => html`<span class="badge st-${code}">${label || statusLabel(code)}</span>`;
 const statusLabel = (code) => state.meta?.statuses.find((s) => s.code === code)?.label || code;
 const empty = (title, text) => html`<div class="empty"><b>${title}</b>${text}</div>`;
+// KDV hesabında eksik bilgi varsa (komisyon/gider KDV durumu belirtilmemiş, kalemsiz sipariş) açıkça göster
+const vatNote = (v) => {
+  if (!v) return '';
+  const complete = v.complete ?? v.vat_complete;
+  if (complete) return '';
+  const notes = (v.notes || []).join(' ');
+  return html` <span class="badge plain tone-warn est" title="${notes}">KDV bilgisi eksik</span>`;
+};
+// Kâr hücresi: KDV biliniyorsa tahmini KDV sonrası kâr; değilse KDV öncesi kâr açıkça etiketli
+const profitCell = (o) => (o.vat_known === false || o.profit_after_vat === null || o.profit_after_vat === undefined
+  ? html`${money(o.net_profit)} <span class="badge plain tone-warn est" title="KDV hesaplanamadı (kalem bilgisi yok)">KDV öncesi</span>`
+  : html`${money(o.profit_after_vat)}${estimateBadge(true)}`);
 const estimateBadge = (flag) => (flag ? html` <span class="badge plain tone-warn est" title="Komisyon/kargo/hizmet bedeli veya ürün maliyeti tahmini ya da eksik">TAHMİNİ</span>` : '');
 
 function pager(p, onGo) {
@@ -358,14 +370,14 @@ PAGES.dashboard = {
         <div class="grid grid-4">
           ${kpi('Bugünkü satış', money0(d.today.revenue), `${num(d.today.orders)} sipariş`)}
           ${kpi('Toplam ciro', money0(t.revenue), `${date(d.range.from)} – ${date(d.range.to)} · iptaller hariç`)}
-          ${kpi('Tahmini net kâr', money0(s.net_profit_after_expenses), `Marj ${pct(s.margin_after_expenses)} · KDV sonrası ${money0(s.net_profit_after_tax)}`, signClass(s.net_profit_after_expenses), TAHMINI)}
+          ${kpi('Tahmini KDV sonrası kâr', money0(s.net_profit_after_tax), html`Net marj ${pct(s.margin_after_tax)} · KDV öncesi ${money0(s.net_profit_after_expenses)}${vatNote(s.vat)}`, signClass(s.net_profit_after_tax), TAHMINI)}
           ${kpi('Sipariş sayısı', num(t.orders), 'Seçili dönem, iptaller hariç')}
         </div>
         <div class="grid grid-4 mt">
           ${kpi('Bekleyen sipariş', num(d.pending_orders), 'Yeni · hazırlanıyor · tedarikçide · kargo bekliyor', d.pending_orders ? 'warn-text' : '')}
           ${kpi('İade', num(d.returns.period), `Dönem içi · toplam ${num(d.returns.open_total)}`, d.returns.period ? 'neg' : '')}
           ${kpi('Ortalama sipariş tutarı', t.average_order_value === null ? '—' : money(t.average_order_value), 'Ciro / sipariş')}
-          ${kpi('Tahmini KDV', money0(s.tax_estimate), 'Satış KDV − maliyet KDV', '', TAHMINI)}
+          ${kpi('Tahmini KDV', money0(s.tax_estimate), 'Satış KDV − maliyet, komisyon ve gider KDV\'si', '', TAHMINI)}
         </div>
         <div class="grid grid-4 mt">
           ${kpi('Bugünkü reklam harcaması', money0(d.today.ad_spend), html`<a href="#/ads">Reklamlar →</a>`)}
@@ -401,8 +413,8 @@ PAGES.dashboard = {
               ${statusBadge(st.code, st.label)}<b>${num(st.count)}</b><span class="muted small">(${num(st.period_count)})</span></button>`)}</div></div>
         <div class="grid grid-main mt">
           <div class="card"><div class="card-head"><h2>Son siparişler</h2><a href="#/orders" class="small">Tümü →</a></div>
-            ${d.recent_orders.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Durum</th><th class="r">Ciro</th><th class="r">Net kâr</th></tr></thead><tbody>
-            ${d.recent_orders.map((o) => html`<tr class="click" data-order="${o.id}"><td>${o.external_order_id}</td><td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td>${statusBadge(o.internal_status, o.status_label)}</td><td class="r num">${money(o.gross_revenue)}</td><td class="r num ${signClass(o.net_profit)}">${money(o.net_profit)}</td></tr>`)}
+            ${d.recent_orders.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Durum</th><th class="r">Ciro</th><th class="r" title="Tahmini KDV sonrası kâr">KDV sonrası kâr</th></tr></thead><tbody>
+            ${d.recent_orders.map((o) => html`<tr class="click" data-order="${o.id}"><td>${o.external_order_id}</td><td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td>${statusBadge(o.internal_status, o.status_label)}</td><td class="r num">${money(o.gross_revenue)}</td><td class="r num ${signClass(o.net_profit_after_tax ?? o.net_profit)}">${profitCell({ ...o, profit_after_vat: o.net_profit_after_tax, vat_known: o.net_profit_after_tax !== null })}</td></tr>`)}
             </tbody></table></div>` : empty('Henüz sipariş yok', 'Pazaryeri senkronizasyonu çalıştığında siparişler burada listelenir.')}</div>
           <div class="card"><div class="card-head"><h2>Uyarılar</h2></div><div class="stack">
             ${alertRow(d.alerts.needs_review, 'inceleme bekleyen sipariş', '#/orders?status=needs_review', 'bad')}
@@ -517,11 +529,11 @@ PAGES.orders = {
     const load = async (page) => {
       const d = await api('/api/orders', { query: { ...f, loss_only: f.loss_only ? 'true' : '', page, page_size: 25 } });
       $('#order-list').innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr>
-        <th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Müşteri</th><th>Durum</th><th>Kargo Planı</th><th class="r">Adet</th><th class="r">Ciro</th><th class="r">Net kâr</th><th class="r">Marj</th></tr></thead><tbody>
+        <th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Müşteri</th><th>Durum</th><th>Kargo Planı</th><th class="r">Adet</th><th class="r">Ciro</th><th class="r" title="Tahmini KDV sonrası kâr">KDV sonrası kâr</th><th class="r" title="Net marj = kâr ÷ net satış">Net marj</th></tr></thead><tbody>
         ${d.items.map((o) => html`<tr class="click" data-order="${o.id}"><td><b>${o.external_order_id}</b>${o.review_reason ? html`<span class="ellipsis small neg" title="${o.review_reason}">${o.review_reason}</span>` : ''}</td>
           <td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td><span class="ellipsis">${o.customer_name || '—'}</span><span class="muted small">${o.customer_city || ''}</span></td>
           <td>${statusBadge(o.internal_status, o.status_label)}</td><td>${shipPlanBadge(o.shipping_plan)}</td><td class="r num">${num(o.item_count)}</td><td class="r num">${money(o.gross_revenue)}</td>
-          <td class="r num ${signClass(o.net_profit)}">${money(o.net_profit)}${estimateBadge(o.finance_is_estimate)}</td><td class="r num">${pct(o.margin)}</td></tr>`)}
+          <td class="r num ${signClass(o.profit_after_vat ?? o.net_profit)}">${profitCell(o)}</td><td class="r num">${pct(o.margin_after_vat ?? o.margin_before_vat)}</td></tr>`)}
         </tbody></table></div>${pager(d, load)}` : empty('Sipariş bulunamadı', 'Filtreleri değiştirin veya pazaryeri senkronizasyonunu bekleyin.'));
       $$('#order-list [data-order]').forEach((r) => r.addEventListener('click', () => showOrder(r.dataset.order)));
     };
@@ -562,12 +574,16 @@ async function showOrder(id) {
         <dt>Sipariş tarihi</dt><dd>${dateTime(o.order_date)}</dd><dt>Müşteri</dt><dd>${o.customer_name || '—'} ${o.customer_city ? `(${o.customer_city})` : ''}</dd>
         <dt>Mağaza</dt><dd>${o.store_name || '—'}</dd><dt>Son senkron</dt><dd>${dateTime(o.last_synced_at)}</dd><dt>Kaynak</dt><dd>${o.source || '—'}</dd></dl></div>
       <div class="card"><h3>Kârlılık ${TAHMINI}</h3><div class="mt">${profitBars({ ...t, discount: o.discount }, { net: o.net_profit, tax: o.tax_estimate, netAfterTax: o.net_profit_after_tax })}</div>
-        <p class="small muted">Marj: <b>${pct(o.margin)}</b></p></div>
+        <dl class="kv small mt"><dt>Net satış</dt><dd>${money(o.net_sales)}</dd><dt>KDV öncesi kâr</dt><dd>${money(o.profit_before_vat)}</dd>
+          <dt>Tahmini KDV</dt><dd>${o.vat_known ? money(o.vat_estimate) : 'hesaplanamadı'}</dd><dt><b>Tahmini KDV sonrası kâr</b></dt><dd><b>${o.vat_known ? money(o.profit_after_vat) : '—'}</b></dd>
+          <dt title="kâr ÷ net satış">Net marj</dt><dd>${pct(o.margin_after_vat ?? o.margin_before_vat)}</dd>
+          <dt title="kâr ÷ ürün maliyeti">Maliyet üzeri kâr (Markup)</dt><dd>${pct(o.markup_after_vat ?? o.markup_before_vat)}</dd></dl>
+        ${vatNote(o.finance_config)}${o.discount && Number(o.discount) ? html`<p class="small muted">Satıcı indirimi ${money(o.discount)} ciroya yansımıştır; ayrıca düşülmez.</p>` : ''}</div>
     </div>
-    <div class="card mt"><h3>Ürünler</h3><div class="table-wrap mt"><table><thead><tr><th>SKU / Ürün</th><th class="r">Adet</th><th class="r">Birim fiyat</th><th class="r">Birim maliyet</th><th class="r">Komisyon</th><th class="r">Kargo</th><th class="r">Net</th><th class="r">Marj</th></tr></thead><tbody>
+    <div class="card mt"><h3>Ürünler</h3><div class="table-wrap mt"><table><thead><tr><th>SKU / Ürün</th><th class="r">Adet</th><th class="r">Birim fiyat</th><th class="r">Birim maliyet</th><th class="r">Komisyon</th><th class="r">Kargo</th><th class="r" title="Tahmini KDV sonrası">KDV sonrası kâr</th><th class="r">Net marj</th></tr></thead><tbody>
       ${o.items.map((i) => html`<tr><td><b>${i.sku || i.barcode || '—'}</b><span class="ellipsis small muted">${i.product_name}</span></td><td class="r num">${num(i.quantity)}</td>
         <td class="r num">${money(i.unit_price)}</td><td class="r num">${Number(i.unit_cost) ? money(i.unit_cost) : html`<span class="badge plain tone-warn">Eksik</span>`}</td>
-        <td class="r num">${money(i.commission)}</td><td class="r num">${money(i.shipping_cost)}</td><td class="r num ${signClass(i.net_profit)}">${money(i.net_profit)}</td><td class="r num">${pct(i.margin)}</td></tr>`)}
+        <td class="r num">${money(i.commission)}</td><td class="r num">${money(i.shipping_cost)}</td><td class="r num ${signClass(i.profit_after_vat)}">${money(i.profit_after_vat)}</td><td class="r num">${pct(i.margin_after_vat)}</td></tr>`)}
       </tbody></table></div>${o.items.length ? '' : html`<p class="muted small">Bu kayıt eski sistemden geldi; kalem bilgisi yok. Tutarlar olduğu gibi korunuyor.</p>`}</div>
     <div class="grid grid-2 mt">
       <div class="card"><h3>Kargo</h3>${o.shipments.length ? html`<ul class="timeline mt">${o.shipments.map((s) => html`<li><b>${s.carrier || 'Kargo firması yok'}</b> · ${s.tracking_url ? html`<a href="${s.tracking_url}" target="_blank" rel="noopener noreferrer">${s.tracking_number || 'Takip'}</a>` : (s.tracking_number || '—')}<br><span class="muted small">${[`Paket ${s.external_package_id || s.id}`, s.marketplace_status || s.status, `Ücret: ${s.cost === null ? 'bilinmiyor' : money(s.cost)}`].filter(Boolean).join(' · ')}</span></li>`)}</ul>` : html`<p class="muted small mt">Sevkiyat kaydı yok.</p>`}</div>
@@ -890,6 +906,8 @@ async function supplierForm(detail) {
       <label>Entegrasyon türü<select name="integration_type">${opt(Object.entries(meta.integration_types), c.integration_type || 'xml')}</select>
         <span class="small muted" id="conn-desc"></span></label>
       <label>Senkronizasyon sıklığı<select name="sync_interval_minutes">${opt(INTERVALS, s?.sync_interval_minutes ?? 60)}</select></label>
+      <label class="full">Tedarikçi fiyatları (alış fiyatı)<select name="price_vat_mode">${opt([['', 'Belirtilmedi — KDV dahil varsayılır (uyarı gösterilir)'], ['included', 'KDV DAHİL'], ['excluded', 'KDV HARİÇ — ürünün KDV oranı eklenerek maliyet hesaplanır']], s?.price_vat_mode || '')}</select>
+        <span class="small muted">Finanstaki ürün maliyeti KDV dahil tutardır. Döviz fiyatlar yalnızca Ayarlar'da kur tanımlıysa kullanılır.</span></label>
       <fieldset class="full fieldset" data-remote>
         <legend>Kaynak</legend>
         <label>Kaynak adresi (XML / API / CSV URL)<input name="source_url" type="url" inputmode="url" maxlength="2000" placeholder="${c.has_source_url ? 'Kayıtlı: ' + (c.source_url_display || '') + ' — değiştirmek için yeni adres girin' : 'https://…'}"></label>
@@ -963,7 +981,7 @@ async function supplierForm(detail) {
         lead_time_days: d.lead_time_days ? Number(d.lead_time_days) : null, notes: d.notes || null, is_active: d.is_active === '1',
         priority: Number(d.priority || 100), sync_interval_minutes: Number(d.sync_interval_minutes || 0),
         stock_rules: { buffer: Number(d.buffer || 0), min_stock: Number(d.min_stock || 0), max_stock: d.max_stock === '' ? null : Number(d.max_stock) },
-        connection, preset: d.preset || null,
+        connection, preset: d.preset || null, price_vat_mode: d.price_vat_mode || null,
       };
       if (s) {
         await api(`/api/suppliers/${s.id}`, { method: 'PUT', body: payload });
@@ -978,7 +996,7 @@ async function supplierForm(detail) {
   });
 }
 
-const SUP_TABS = [['overview', 'Genel'], ['mapping', 'Alan eşleştirme'], ['products', 'Ürünler'], ['runs', 'Senkron geçmişi'], ['changes', 'Değişiklikler']];
+const SUP_TABS = [['overview', 'Genel'], ['import', 'İçe aktarma sihirbazı'], ['mapping', 'Alan eşleştirme'], ['products', 'Ürünler'], ['runs', 'Senkron geçmişi'], ['changes', 'Değişiklikler']];
 async function renderSupplierDetail(id, tab) {
   const [d, meta] = await Promise.all([api(`/api/suppliers/${id}`), supplierMeta()]);
   const s = d.supplier, c = d.connection;
@@ -995,11 +1013,12 @@ async function renderSupplierDetail(id, tab) {
       <ol class="steps setup-steps">
         <li class="done">1. Bilgiler</li>
         <li class="${state.supTested?.[id] ? 'done' : 'on'}">2. Bağlantı testi ${c.integration_type === 'manual' ? html`<span class="small muted">(manuel: dosya yükleyeceksiniz)</span>` : can('operator') && remote ? html`<button class="btn btn-sm" id="setup-test">Test et</button>` : html`<span class="small muted">(kaynak adresi yok)</span>`}</li>
-        <li class="${Number(s.mapped_fields) ? 'done' : ''}">3. Alan eşleştirme <a class="btn btn-sm" href="#/suppliers?id=${id}&tab=mapping">Eşleştir</a></li>
-        <li class="${Number(s.product_count) ? 'done' : ''}">4. Ürünleri getir ${can('operator') ? (remote ? html`<button class="btn btn-sm btn-primary" id="setup-fetch" ${raw(Number(s.mapped_fields) ? '' : 'disabled')}>Ürünleri Getir</button>` : html`<label class="btn btn-sm btn-primary" for="sup-file">Dosya seç ve getir</label>`) : ''}</li>
+        <li class="${remote ? (s.mapping_approved_at ? 'done' : '') : Number(s.mapped_fields) ? 'done' : ''}">3. ${remote ? html`Node seçimi, alan eşleştirme, önizleme ve onay <a class="btn btn-sm" href="#/suppliers?id=${id}&tab=import">İçe aktarma sihirbazı</a>` : html`Alan eşleştirme <a class="btn btn-sm" href="#/suppliers?id=${id}&tab=mapping">Eşleştir</a>`}</li>
+        <li class="${Number(s.product_count) ? 'done' : ''}">4. Ürünleri getir ${can('operator') ? (remote ? html`<button class="btn btn-sm btn-primary" id="setup-fetch" ${raw(s.mapping_approved_at ? '' : 'disabled')} title="${s.mapping_approved_at ? '' : 'Önce sihirbazda eşleştirmeyi onaylayın'}">Ürünleri Getir</button>` : html`<label class="btn btn-sm btn-primary" for="sup-file">Dosya seç ve getir</label>`) : ''}</li>
         <li class="${Number(s.product_count) ? 'done' : ''}">5. Ürün havuzu <a class="btn btn-sm" href="#/transfer">Havuzda gör →</a></li>
       </ol></div>` : ''}
-    ${!Number(s.mapped_fields) ? html`<div class="notice warn" style="margin-bottom:12px">Alan eşleştirmesi yapılmadı. <b>Alan eşleştirme</b> sekmesinde kaynağı önizleyip en az “Tedarikçi ürün kodu” ve “Ürün adı” alanlarını eşleştirin.</div>` : ''}
+    ${remote && !s.mapping_approved_at ? html`<div class="notice warn" style="margin-bottom:12px">Eşleştirme onaylanmadı: kaynaktan aktarım ve zamanlanmış senkron çalışmaz. <a href="#/suppliers?id=${id}&tab=import">İçe aktarma sihirbazını</a> tamamlayın.</div>` : ''}
+    ${!remote && !Number(s.mapped_fields) ? html`<div class="notice warn" style="margin-bottom:12px">Alan eşleştirmesi yapılmadı. <b>Alan eşleştirme</b> sekmesinde kaynağı önizleyip en az “Tedarikçi ürün kodu” ve “Ürün adı” alanlarını eşleştirin.</div>` : ''}
     <div class="grid grid-4">
       ${kpi('Ürün (aktif)', num(s.active_count), `${num(s.linked_count)} ürün kataloğa bağlı`)}
       ${kpi('Stokta', num(s.in_stock_count), `Stoksuz: ${num(s.out_of_stock_count)}`)}
@@ -1037,6 +1056,7 @@ async function renderSupplierDetail(id, tab) {
     } catch (ex) { fail(ex); } finally { e.target.value = ''; }
   });
   const box = $('#sup-tab');
+  if (tab === 'import') return renderImportWizard(box, id, d);
   if (tab === 'mapping') return renderMapping(box, id, d, meta);
   if (tab === 'products') return renderPool(box, { supplierId: id, embedded: true });
   if (tab === 'runs') return renderRuns(box, id);
@@ -1062,7 +1082,7 @@ async function renderSupplierDetail(id, tab) {
 function runsTable(runs) {
   if (!runs.length) return empty('Henüz senkron yok', 'Kaynak adresi varsa “Şimdi senkronize et”, yoksa “Dosya yükle” ile başlayın.');
   return html`<div class="table-wrap"><table><thead><tr><th>Başlangıç</th><th>Tetik</th><th>Durum</th><th class="r">Kayıt</th><th class="r">Yeni</th><th class="r">Fiyat</th><th class="r">Stok</th><th class="r">Kayıp</th><th class="r">Hata</th><th>Mesaj</th></tr></thead><tbody>
-    ${runs.map((r) => html`<tr><td>${dateTime(r.started_at)}</td><td>${{ schedule: 'Zamanlanmış', manual: 'Elle', upload: 'Dosya' }[r.trigger] || r.trigger}</td><td>${runBadge(r.status)}</td>
+    ${runs.map((r) => html`<tr><td>${dateTime(r.started_at)}</td><td>${{ schedule: 'Zamanlanmış', manual: 'Elle', upload: 'Dosya', approval: 'Onay' }[r.trigger] || r.trigger}</td><td>${runBadge(r.status)}</td>
       <td class="r num">${num(r.records_total)}</td><td class="r num">${num(r.created_count)}</td><td class="r num">${num(r.price_changed)}</td><td class="r num">${num(r.stock_changed)}</td>
       <td class="r num ${r.missing_count ? 'neg' : ''}">${num(r.missing_count)}</td><td class="r num ${r.error_count ? 'neg' : ''}">${num(r.error_count)}</td>
       <td><span class="ellipsis small" title="${[r.message, ...(r.errors || [])].filter(Boolean).join('\n')}">${r.message || (r.errors || [])[0] || ''}</span></td></tr>`)}</tbody></table></div>`;
@@ -1149,6 +1169,116 @@ async function renderMapping(box, id, d, meta) {
   draw();
 }
 
+// ---- İçe aktarma sihirbazı: test → node → eşleştirme → canlı önizleme → uyarılar → ONAY → Ürün Havuzu
+const CONF_BADGE = { high: ['tone-good', 'Güçlü öneri'], low: ['tone-warn', 'Düşük güven'], confirm: ['tone-warn', 'Doğrulayın'], manual: ['', 'Elle'] };
+const NODE_KIND = { product: ['tone-good', 'Önerilen ürün'], variant: ['tone-info', 'Varyant listesi'], nested: ['', 'Ürün içi liste'], other: ['', 'Diğer'] };
+async function renderImportWizard(box, id, d) {
+  const c = d.connection, s = d.supplier;
+  const remote = c.integration_type !== 'manual' && c.has_source_url;
+  if (!remote) {
+    box.innerHTML = renderVal(html`<div class="card">${empty('Kaynak adresi yok', 'Sihirbaz kaynak adresinden (URL) okur. Manuel tedarikçide “Alan eşleştirme” sekmesinden dosyayla önizleyip “Dosya yükle” ile aktarın.')}</div>`);
+    return;
+  }
+  const st = { a: null, tested: null, record_path: null, variant_path: null, mappings: null, confirm: false, vat: s.price_vat_mode || '', busy: false };
+  const analyze = async () => {
+    st.busy = true; draw();
+    try {
+      st.a = await api(`/api/suppliers/${id}/import/analyze`, { method: 'POST', body: { record_path: st.record_path, variant_path: st.variant_path, mappings: st.mappings, limit: 10 } });
+      st.record_path = st.a.record_path; st.variant_path = st.a.variant_path || '';
+      st.mappings = st.a.mapping.map((m) => ({ target_field: m.target_field, source_path: m.source_path || null, default_value: m.default_value || null }));
+    } catch (ex) { fail(ex); } finally { st.busy = false; draw(); }
+  };
+  const readForm = () => {
+    const f = $('#wz-map', box);
+    if (!f || !st.mappings) return;
+    st.mappings = st.mappings.map((m) => ({ ...m, source_path: f[`src_${m.target_field}`]?.value || null }));
+    st.confirm = !!$('#wz-confirm', box)?.checked;
+    st.vat = $('#wz-vat', box)?.value || st.vat;
+  };
+  const draw = () => {
+    const a = st.a;
+    const step = (n, title, body, done) => html`<div class="card mt"><div class="card-head"><h2>${done ? '✓ ' : ''}${n}. ${title}</h2></div>${body}</div>`;
+    const fields = a ? a.fields : [];
+    const opts = (cur) => html`<option value="">— eşleştirilmedi —</option>${cur && !fields.some((p) => p.path === cur) ? html`<option value="${cur}" selected>${cur}</option>` : ''}
+      ${fields.map((p) => html`<option value="${p.path}" ${raw(p.path === cur ? 'selected' : '')}>${p.path} (${pct(p.fill_rate)} dolu${p.all_same ? ' · hepsi aynı' : ''} · ör. ${String(p.sample || '').slice(0, 30)})</option>`)}`;
+    const priceRow = a?.mapping.find((m) => m.target_field === 'purchase_price');
+    box.innerHTML = renderVal(html`
+      <div class="notice" style="margin-bottom:4px">Sihirbaz kaynağı yalnızca <b>okur</b>. Onay verene kadar Ürün Havuzu'na ürün yazılmaz ve zamanlanmış senkron çalışmaz. Onaydan sonra da pazaryerine hiçbir şey gönderilmez.
+        ${s.mapping_approved_at ? html`<br><span class="pos">Mevcut eşleştirme ${dateTime(s.mapping_approved_at)} tarihinde onaylandı.</span>` : html`<br><span class="neg">Bu tedarikçinin eşleştirmesi henüz onaylanmadı.</span>`}</div>
+      ${step(1, 'Bağlantıyı test et', html`<div class="row"><code>${c.source_url_display}</code><span class="spacer"></span>
+        <button class="btn" id="wz-test">Bağlantıyı test et</button> <button class="btn btn-primary" id="wz-analyze" ${raw(st.busy ? 'disabled' : '')}>${st.busy ? 'Okunuyor…' : a ? 'Yeniden analiz et' : 'Kaynağı analiz et'}</button></div>
+        ${st.tested ? html`<p class="small ${st.tested.ok ? 'pos' : 'neg'}">${st.tested.message}</p>` : ''}`, !!a)}
+      ${a ? html`
+      ${step(2, 'Ürün node seçimi', html`<p class="small muted">Tekrar eden elemanlar. Öneri en çok tekrar eden değil, ürüne en çok benzeyen elemandır (ad, SKU, fiyat, stok, barkod, görsel).</p>
+        ${a.nodes ? html`<div class="table-wrap"><table><thead><tr><th></th><th>Eleman yolu</th><th>Tür</th><th class="r">Adet</th><th>Alanlar</th></tr></thead><tbody>
+          ${a.nodes.candidates.map((n) => html`<tr><td><input type="radio" name="wz-node" value="${n.path}" ${raw(n.path === st.record_path ? 'checked' : '')} ${raw(n.kind === 'variant' || n.kind === 'nested' ? 'disabled' : '')} aria-label="${n.path}"></td>
+            <td><code>${n.path}</code></td><td><span class="badge ${NODE_KIND[n.kind][0]}">${NODE_KIND[n.kind][1]}</span></td><td class="r num">${num(n.count)}</td>
+            <td><span class="ellipsis small" title="${n.fields.join(', ')}">${n.fields.slice(0, 8).join(', ')}</span></td></tr>`)}</tbody></table></div>
+          <label class="mt" style="display:block">Varyant listesi (her varyant ayrı ürün olur, ana ürün alanlarını miras alır)
+            <select id="wz-variant" style="max-width:100%"><option value="">Varyant yok (her ürün tek kayıt)</option>
+              ${a.nodes.variant_candidates.map((v) => html`<option value="${v.path}" ${raw(v.path === st.variant_path ? 'selected' : '')}>${v.path} (${num(v.count)} adet · ${v.fields.slice(0, 5).join(', ')})</option>`)}
+              ${st.variant_path && !a.nodes.variant_candidates.some((v) => v.path === st.variant_path) ? html`<option value="${st.variant_path}" selected>${st.variant_path}</option>` : ''}</select></label>`
+          : html`<p class="muted small">Bu kaynak XML değil; kayıt yolu: <code>${a.record_path || '—'}</code></p>`}
+        <p class="small">Seçili: <code>${a.record_path || '—'}</code>${a.variant_path ? html` · varyant <code>${a.variant_path}</code>` : ''} → <b>${num(a.total)}</b> kayıt</p>`, true)}
+      ${step(3, 'Alan eşleştirme', html`<form id="wz-map"><div class="table-wrap"><table><thead><tr><th>TrendHub alanı</th><th>Tedarikçi alanı</th><th>Güven</th><th>Örnek (1. ürün)</th></tr></thead><tbody>
+        ${a.mapping.map((m) => {
+          const cur = (st.mappings.find((x) => x.target_field === m.target_field) || {}).source_path;
+          const conf = cur ? (cur === m.source_path ? (m.confidence || 'manual') : 'manual') : null;
+          const v = a.samples[0]?.values?.[m.target_field];
+          return html`<tr><td><b>${m.label}</b>${m.required ? html` <span class="badge plain tone-warn">zorunlu</span>` : ''}</td>
+            <td><select name="src_${m.target_field}" aria-label="${m.label} kaynak alanı">${opts(cur)}</select></td>
+            <td>${conf ? html`<span class="badge ${CONF_BADGE[conf]?.[0] || ''}">${CONF_BADGE[conf]?.[1] || conf}</span>` : ''}</td>
+            <td><span class="ellipsis small">${Array.isArray(v) ? `${v.length} görsel` : v ?? ''}</span></td></tr>`;
+        })}</tbody></table></div>
+        ${priceRow?.source_path ? html`<div class="notice ${a.price_needs_confirmation ? 'warn' : ''} mt"><label class="wz-check"><input type="checkbox" id="wz-confirm" ${raw(st.confirm || priceRow.confirmed ? 'checked' : '')}>
+          <b>'${priceRow.source_path}'</b> alanı tedarikçi <b>ALIŞ fiyatı</b> mı? (Satış fiyatı olarak kullanılmaz; pazaryeri fiyatı fiyat kurallarıyla hesaplanır.)</label></div>` : ''}
+        <div class="row mt"><span class="spacer"></span><button class="btn" type="submit">Önizlemeyi güncelle</button></div></form>`, true)}
+      ${step(4, `Canlı önizleme (${a.samples.length} ürün)`, html`<div class="table-wrap"><table><thead><tr><th>SKU</th><th>Barkod</th><th>Ürün adı</th><th>Renk/Beden</th><th>Kategori</th><th class="r">XML fiyatı</th><th>Para</th><th class="r">KDV</th><th class="r">Maliyet (TL, KDV dahil)</th><th class="r">Stok</th><th class="r">Görsel</th><th>Durum</th></tr></thead><tbody>
+        ${a.samples.map((x) => html`<tr><td>${x.values.supplier_sku || '—'}</td><td>${x.values.barcode || '—'}</td><td><span class="ellipsis">${x.values.name || '—'}</span></td>
+          <td class="small">${[x.values.color, x.values.size].filter(Boolean).join(' / ') || '—'}</td><td><span class="ellipsis small">${x.values.category || '—'}</span></td>
+          <td class="r num">${x.values.purchase_price ?? '—'}</td><td>${x.values.currency || 'TRY?'}</td><td class="r num">${x.values.vat_rate ?? '—'}</td>
+          <td class="r num" title="${x.cost_note || ''}">${x.effective_cost === null ? html`<span class="neg">—</span>` : money(x.effective_cost)}${x.cost_note ? html`<span class="muted small" style="display:block">${x.cost_note}</span>` : ''}</td>
+          <td class="r num ${Number(x.values.stock) <= 0 ? 'neg' : ''}">${num(x.values.stock)}</td><td class="r num">${num((x.values.images || []).length)}</td>
+          <td class="small ${x.errors.length ? 'neg' : 'pos'}">${x.errors.length ? x.errors.join('; ') : 'Uygun'}</td></tr>`)}</tbody></table></div>
+        <p class="small muted">Özet: ${num(a.summary.importable)} aktarılabilir · ${num(a.summary.invalid)} hatalı · ${num(a.summary.zero_stock)} stoksuz · ${num(a.summary.duplicate_skus)} tekrar eden SKU</p>`, true)}
+      ${step(5, 'Eksik alan uyarıları', a.warnings.length ? html`<ul class="small">${a.warnings.map((w) => html`<li>${w}</li>`)}</ul>` : html`<p class="pos small">Uyarı yok.</p>`, !a.warnings.length)}
+      ${step(6, 'Onay ve Ürün Havuzu\'na aktarım', html`<div class="row"><label>XML fiyatları<select id="wz-vat"><option value="">— seçin —</option>
+          <option value="included" ${raw(st.vat === 'included' ? 'selected' : '')}>KDV dahil</option><option value="excluded" ${raw(st.vat === 'excluded' ? 'selected' : '')}>KDV hariç (ürün KDV oranı eklenir)</option></select></label>
+        <span class="spacer"></span>${can('operator') ? html`<button class="btn btn-primary" id="wz-approve" ${raw(a.can_approve ? '' : 'disabled')}>Onayla ve Ürün Havuzu'na aktar</button>` : ''}</div>
+        <p class="small muted">Onay eşleştirmeyi kaydeder ve ${num(a.summary.importable)} kaydı Ürün Havuzu'na alır. Mevcut ürün/sipariş, pazaryeri stok ve fiyatı değişmez. Sonraki zamanlanmış senkronlar bu onaylı eşleştirmeyi kullanır; eşleştirme değişirse onay yeniden istenir.</p>`, false)}` : ''}`);
+    $('#wz-test', box)?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { st.tested = await api(`/api/suppliers/${id}/test`, { method: 'POST' }); draw(); } catch (ex) { fail(ex); e.target.disabled = false; }
+    });
+    $('#wz-analyze', box)?.addEventListener('click', () => { readForm(); analyze(); });
+    $$('[name="wz-node"]', box).forEach((r) => r.addEventListener('change', () => { st.record_path = r.value; st.variant_path = null; st.mappings = null; analyze(); }));
+    $('#wz-variant', box)?.addEventListener('change', (e) => { st.variant_path = e.target.value; st.mappings = null; analyze(); });
+    $('#wz-map', box)?.addEventListener('submit', (e) => { e.preventDefault(); readForm(); analyze(); });
+    $('#wz-confirm', box)?.addEventListener('change', (e) => { st.confirm = e.target.checked; });
+    $('#wz-vat', box)?.addEventListener('change', (e) => { st.vat = e.target.value; });
+    $('#wz-approve', box)?.addEventListener('click', async (e) => {
+      readForm();
+      if (!st.vat) { toast('XML fiyatlarının KDV dahil mi hariç mi olduğunu seçin.', true); return; }
+      const price = st.mappings.find((m) => m.target_field === 'purchase_price')?.source_path;
+      if (price && !st.confirm && !a.mapping.find((m) => m.target_field === 'purchase_price')?.confirmed) {
+        if (a.price_needs_confirmation || !confirm(`'${price}' alanı tedarikçi alış fiyatı olarak kullanılacak. Onaylıyor musunuz?`)) {
+          if (a.price_needs_confirmation) toast(`'${price}' alanının tedarikçi alış fiyatı olduğunu işaretleyin.`, true);
+          return;
+        }
+        st.confirm = true;
+      }
+      e.target.disabled = true;
+      try {
+        const r = await api(`/api/suppliers/${id}/import/approve`, { method: 'POST', body: { record_path: st.record_path, variant_path: st.variant_path || null, mappings: st.mappings, confirm_price: st.confirm, price_vat_mode: st.vat } });
+        const imp = r.import;
+        toast(imp ? `${r.message} ${imp.created_count} yeni, ${imp.updated_count} güncellendi${imp.error_count ? `, ${imp.error_count} hata` : ''}.` : r.message);
+        location.hash = `#/suppliers?id=${id}&tab=products`;
+      } catch (ex) { fail(ex); e.target.disabled = false; }
+    });
+  };
+  draw();
+}
+
 // ---- Ürün havuzu (tedarikçi ürünleri) — Tedarikçi detayında ve Ürün Aktarımı 1. adımında kullanılır
 async function renderPool(box, { supplierId = null, embedded = false, selectable = false, onSelect } = {}) {
   const sups = embedded ? [] : await api('/api/suppliers');
@@ -1181,7 +1311,7 @@ async function renderPool(box, { supplierId = null, embedded = false, selectable
             <b class="pool-title" title="${x.name || ''}">${x.name || x.supplier_sku}</b>
             <div class="row" style="gap:4px">${embedded ? '' : html`<span class="badge plain">${x.supplier_name}</span>`}<span class="badge ${x.status === 'missing' ? 'tone-bad' : 'tone-good'}">${x.status_label}</span>
               ${(x.stores || []).map((m) => html`<span class="badge tone-info">${m}</span>`)}${(x.draft_marketplaces || []).length ? html`<span class="badge plain">taslak: ${x.draft_marketplaces.join(', ')}</span>` : ''}</div>
-            <div class="pool-prices"><span><small>Alış</small><b>${x.cost ? money(x.cost) : '—'}</b></span><span><small>Satış</small><b>${x.sale_price ? money(x.sale_price) : '—'}</b></span><span><small>Stok</small><b class="${Number(x.stock) > 0 ? '' : 'neg'}">${num(x.stock)}</b></span></div>
+            <div class="pool-prices"><span title="${x.cost_note || 'Finansta kullanılan maliyet (TL, KDV dahil)'}"><small>Alış${x.currency && x.currency !== 'TRY' ? ` (${x.currency})` : ''}</small><b>${x.cost ? (x.currency && x.currency !== 'TRY' ? `${Number(x.cost).toLocaleString('tr-TR')} ${x.currency}` : money(x.cost)) : '—'}</b>${x.effective_cost && Number(x.effective_cost) !== Number(x.cost) ? html`<small>maliyet ${money(x.effective_cost)}</small>` : ''}</span><span><small>Satış</small><b>${x.sale_price ? money(x.sale_price) : '—'}</b></span><span><small>Stok</small><b class="${Number(x.stock) > 0 ? '' : 'neg'}">${num(x.stock)}</b></span></div>
             <dl class="kv small">${kv('Tedarikçi ürün ID', x.supplier_sku)}${kv('SKU', x.product_sku)}${kv('Barkod', x.barcode || '—')}${kv('Model', x.model_code)}${kv('Marka', x.brand)}${kv('Kategori', x.category)}${kv('Renk', x.color)}${kv('Varyant', x.variant)}${kv('KDV', x.vat_rate === null ? null : `%${x.vat_rate}`)}${kv('Desi', x.desi)}${kv('Güncelleme', dateTime(x.updated_at || x.last_seen_at))}</dl>
             ${x.problems.length ? html`<p class="small neg">⚠ ${x.problems.join(' · ')}</p>` : ''}
             <div class="row">${x.product_id ? html`<button class="btn btn-sm" data-life="${x.product_id}">Ürün detayı</button>${Number(x.offer_count) > 1 ? html`<button class="btn btn-sm" data-offers="${x.product_id}">${x.offer_count} teklif</button>` : ''}` : html`<span class="muted small">Havuzda (kataloğa alınmadı)</span>`}</div>
@@ -1304,7 +1434,7 @@ PAGES.transfer = {
       const rmap = Object.fromEntries(rules.items.map((r) => [r.code, r]));
       box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Hedef pazaryerleri</h2><p>${num(T.selected.size)} ürün seçildi. Her pazaryeri kendi fiyat, komisyon, kategori ve stok kuralıyla ayrı değerlendirilir.</p></div></div>
         <div class="grid grid-3">${mps.map((m) => { const r = rmap[m.code] || {}; return html`<label class="card mp-pick"><span class="row nowrap"><input type="checkbox" name="mp" value="${m.code}" ${raw(T.marketplaces.has(m.code) ? 'checked' : '')}><b>${m.name}</b></span>
-          <span class="small muted">Komisyon ${pct(r.effective_commission_rate)} · kâr oranı ${pct(r.markup_rate)} · min. marj ${pct(r.min_margin_rate)}</span>
+          <span class="small muted">Komisyon ${pct(r.effective_commission_rate)} · maliyet üzeri kâr (markup) ${pct(r.markup_rate)} · min. net marj ${pct(r.min_margin_rate)}</span>
           <span class="small muted">Zorunlu: ${(r.required_fields || []).join(', ') || '—'}</span>
           <span class="small"><span class="dot ${r.connector?.connected ? 'good' : ''}"></span> ${r.connector?.exists ? (r.connector.connected ? 'API bağlı (salt okunur)' : 'Bağlı değil') : 'Connector yok'} · otomatik yayın kapalı</span></label>`; })}</div>
         <p class="small muted mt">Seçilen havuz ürünleri önce kataloğa alınır: barkodu katalogda olan ürün MEVCUT ürüne bağlanır (aynı ürün iki tedarikçide olsa bile tek katalog ürünü ve pazaryeri başına tek ilan).</p>
@@ -1461,7 +1591,7 @@ async function showDraftPreview(id, onChange) {
       <tr><td>− Sabit gider</td><td class="r num">${money(pr.fixed)}</td></tr>
       <tr><td>− Ürün maliyeti (${pl.supplier || '—'})</td><td class="r num">${money(pr.cost)}</td></tr>
       <tr><td>− Tahmini KDV farkı</td><td class="r num">${money(pr.vat)}</td></tr>
-      <tr><td><b>Tahmini kâr</b></td><td class="r num ${signClass(pr.profit)}"><b>${money(pr.profit)}</b> <span class="muted small">marj ${pct(pr.margin)} · min. ${pct(pr.min_margin_rate)}</span></td></tr>
+      <tr><td><b>Tahmini kâr</b></td><td class="r num ${signClass(pr.profit)}"><b>${money(pr.profit)}</b> <span class="muted small">net marj ${pct(pr.margin)} · markup ${pct(pr.markup)} · min. marj ${pct(pr.min_margin_rate)}</span></td></tr>
     </tbody></table></div>` : html`<p class="muted small">Maliyet veya fiyat olmadığı için hesaplanamadı.</p>`}
     <h3 class="mt">Kategori ve özellikler</h3>
     ${can('operator') ? html`<form class="stack" id="pv-form">
@@ -1529,10 +1659,10 @@ async function renderRules(box) {
       <p class="small muted" style="margin-top:0">${r.connector.reason}</p>
       <div class="form-grid">
         <label>Komisyon oranı<input name="commission_rate" type="number" step="0.001" min="0" max="0.99" value="${r.commission_rate ?? ''}" placeholder="${r.effective_commission_rate} (Ayarlar)"></label>
-        <label>Kâr oranı<input name="markup_rate" type="number" step="0.01" min="0" value="${r.markup_rate}"></label>
+        <label title="Fiyat hesaplanırken maliyetin üzerine eklenen oran (markup); marjla aynı şey değildir">Maliyet üzeri kâr (Markup)<input name="markup_rate" type="number" step="0.01" min="0" value="${r.markup_rate}"></label>
         <label>Kargo (₺)<input name="shipping_cost" type="number" step="0.01" min="0" value="${r.shipping_cost}"></label>
         <label>Sabit gider (₺)<input name="fixed_cost" type="number" step="0.01" min="0" value="${r.fixed_cost}"></label>
-        <label>Minimum marj<input name="min_margin_rate" type="number" step="0.01" min="-1" max="1" value="${r.min_margin_rate}"></label>
+        <label title="Tahmini KDV sonrası kâr ÷ satış fiyatı">Minimum net marj<input name="min_margin_rate" type="number" step="0.01" min="-1" max="1" value="${r.min_margin_rate}"></label>
         <label>Yuvarlama<select name="rounding">${[['x.90', 'x,90'], ['x.99', 'x,99'], ['integer', 'Tam sayı'], ['none', 'Yok']].map(([v, l]) => html`<option value="${v}" ${raw(v === r.rounding ? 'selected' : '')}>${l}</option>`)}</select></label>
         <label>Stok güvenlik payı<input name="stock_buffer" type="number" min="0" value="${r.stock_buffer}"></label>
         <label>Minimum stok<input name="min_stock" type="number" min="0" value="${r.min_stock}"></label>
@@ -1541,7 +1671,7 @@ async function renderRules(box) {
         <fieldset class="full fieldset"><legend>Zorunlu alanlar</legend><div class="row">${rules.requirable_fields.map((fld) => html`<label class="check"><input type="checkbox" name="rf" value="${fld}" ${raw((r.required_fields || []).includes(fld) ? 'checked' : '')}>${{ barcode: 'Barkod', brand: 'Marka', category: 'Kategori', images: 'Görsel', description: 'Açıklama', model_code: 'Model kodu', desi: 'Desi', vat_rate: 'KDV' }[fld] || fld}</label>`)}</div></fieldset>
       </div>
       ${can('admin') ? html`<p class="form-error"></p><div class="row mt"><span class="spacer"></span><button class="btn btn-primary btn-sm" type="submit">Kaydet</button></div>` : ''}</form>`)}</div>
-    <p class="small muted">Fiyat = (maliyet × (1 + kâr oranı) + kargo + sabit gider) ÷ (1 − komisyon), sonra yuvarlanır. Değerler varsayılandır; pazaryerinin güncel komisyon ve zorunlu alan kurallarına göre düzenleyin. Tahmini kâr TAHMİNİDİR.</p>
+    <p class="small muted">Fiyat = (maliyet × (1 + markup) + kargo + sabit gider) ÷ (1 − komisyon), sonra yuvarlanır. Markup maliyete göre, net marj satış fiyatına göre hesaplanır. Değerler varsayılandır; pazaryerinin güncel komisyon ve zorunlu alan kurallarına göre düzenleyin. Tahmini kâr TAHMİNİDİR.</p>
     <div class="card mt"><div class="card-head"><div><h2>Kategori eşleştirme</h2><p>Kaynak (tedarikçi/katalog) kategorisini pazaryeri kategori ID'sine bağlayın.</p></div>
       <select id="cat-mp" aria-label="Pazaryeri">${mps.map((m) => html`<option value="${m.code}">${m.name}</option>`)}</select></div><div id="cat-box"></div></div>`);
   $$('[data-rule]', box).forEach((form) => form.addEventListener('submit', (e) => {
@@ -1584,23 +1714,24 @@ PAGES.finance = {
       const t = f.orders;
       const qs = periodQs();
       const BASIS_TONE = { actual: 'tone-good', estimate: 'tone-warn', entered: 'tone-info', mixed: 'tone-warn' };
-      const TOTALS = new Set(['net_sales', 'contribution', 'net_profit', 'net_after_vat']);
+      const TOTALS = new Set(['net_sales', 'contribution', 'net_after_vat']);
       view().innerHTML = renderVal(html`
         <div class="card" style="margin-bottom:16px"><div class="card-head"><div><h2>Finans tablosu</h2><p>${date(st.range.from)} – ${date(st.range.to)} · ${num(st.orders)} sipariş · <b>Gerçek</b> = pazaryeri verisi, <b>Tahmini</b> = TrendHub hesabı, <b>Girilen</b> = kullanıcı kaydı</p></div>
           <div class="row"><a class="btn btn-sm" href="/api/finance/statement.csv?${qs}" download>Tablo (CSV)</a><a class="btn btn-sm" href="/api/finance/orders.csv?${qs}" download>Siparişler (CSV)</a><a class="btn btn-sm" href="/api/finance/expenses.csv?${qs}" download>Giderler (CSV)</a><a class="btn btn-sm" href="/api/ads/spend.csv?${qs}" download>Reklam (CSV)</a></div></div>
-          <div class="table-wrap"><table class="statement"><tbody>${st.lines.map((l) => html`<tr class="${TOTALS.has(l.key) ? 'total' : ''}"><td>${l.label}</td><td><span class="badge plain ${BASIS_TONE[l.basis]}">${l.basis_label}</span></td><td class="r num ${signClass(l.amount)}">${money(l.amount)}</td></tr>`)}
-            <tr class="total"><td>Net marj</td><td></td><td class="r num">${pct(st.margin)}</td></tr></tbody></table></div>
+          <div class="table-wrap"><table class="statement"><tbody>${st.lines.map((l) => html`<tr class="${TOTALS.has(l.key) ? 'total' : ''} ${l.in_total === false ? 'info-line' : ''}"><td>${l.label}</td><td><span class="badge plain ${BASIS_TONE[l.basis]}">${l.basis_label}</span></td><td class="r num ${signClass(l.amount)}">${money(l.amount)}</td></tr>`)}
+            <tr class="total"><td title="Tahmini KDV sonrası kâr ÷ net satış">Net marj (KDV sonrası)</td><td></td><td class="r num">${pct(st.margin_after_tax)}</td></tr>
+            <tr><td title="Tahmini KDV sonrası kâr ÷ ürün maliyeti">Maliyet üzeri kâr (Markup)</td><td></td><td class="r num">${pct(st.markup_after_tax)}</td></tr></tbody></table></div>
           ${st.warnings.map((w) => html`<p class="small warn-text">• ${w}</p>`)}</div>
-        <div class="notice warn" style="margin-bottom:16px"><b>TAHMİNİ:</b> Pazaryeri hakediş (settlement) verisi henüz bağlı değil. Komisyon ve hizmet bedeli Ayarlar'daki oranlarla, KDV satış − maliyet KDV'si olarak tahmin edilir. Gerçek tutarları sipariş detayından “Gerçek gider gir” ile ekleyebilirsiniz.${t.estimated_orders ? html` Bu dönemde <b>${num(t.estimated_orders)}</b> siparişte tahmini veya eksik değer var.` : ''}</div>
+        <div class="notice warn" style="margin-bottom:16px"><b>TAHMİNİ:</b> Pazaryeri hakediş (settlement) verisi henüz bağlı değil. Komisyon ve hizmet bedeli Ayarlar'daki oranlarla tahmin edilir. KDV = satış KDV'si − maliyet KDV'si − (Ayarlar'da belirtildiyse) komisyon ve gider KDV'si. Satıcı indirimi ciroya zaten yansımıştır, tekrar düşülmez; marjların paydası net satıştır (ciro − iade). Gerçek tutarları sipariş detayından “Gerçek gider gir” ile ekleyebilirsiniz.${t.estimated_orders ? html` Bu dönemde <b>${num(t.estimated_orders)}</b> siparişte tahmini veya eksik değer var.` : ''}</div>
         <div class="grid grid-4">
           ${kpi('Ciro', money0(t.revenue), `${num(t.orders)} sipariş · ort. ${t.average_order_value === null ? '—' : money(t.average_order_value)}`)}
           ${kpi('Sipariş giderleri', money0(t.total_cost), 'Maliyet + komisyon + kargo + hizmet + reklam + iade + diğer', '', TAHMINI)}
           ${kpi('Dönem giderleri', money0(f.expenses.total), 'Siparişe bağlı olmayan')}
-          ${kpi('Net kâr', money0(f.net_profit_after_expenses), `Marj ${pct(f.margin_after_expenses)}`, signClass(f.net_profit_after_expenses), TAHMINI)}
+          ${kpi('Tahmini KDV sonrası kâr', money0(f.net_profit_after_tax), html`Net marj ${pct(f.margin_after_tax)} · Markup ${pct(f.markup_after_tax)}${vatNote(f.vat)}`, signClass(f.net_profit_after_tax), TAHMINI)}
         </div>
         <div class="grid grid-4 mt">
-          ${kpi('Tahmini KDV', money0(f.tax_estimate), 'Satış KDV − maliyet KDV (KDV dahil tutarlardan)', '', TAHMINI)}
-          ${kpi('Net kâr (KDV sonrası)', money0(f.net_profit_after_tax), `Marj ${pct(f.margin_after_tax)}`, signClass(f.net_profit_after_tax), TAHMINI)}
+          ${kpi('Tahmini KDV', money0(f.tax_estimate), 'Satış KDV − maliyet, komisyon ve gider KDV\'si', '', TAHMINI)}
+          ${kpi('KDV öncesi kâr', money0(f.net_profit_after_expenses), `Net satış ${money0(f.net_sales)} · marj ${pct(f.margin_after_expenses)}`, signClass(f.net_profit_after_expenses), TAHMINI)}
           ${kpi('Satıcı indirimi', money0(t.discount), 'Ciroya yansımış; ayrıca düşülmez')}
           ${kpi('İade tutarı', money0(t.refund), 'İade edilen siparişlerin cirosu')}
         </div>
@@ -1609,7 +1740,7 @@ PAGES.finance = {
           <div class="card"><div class="card-head"><h2>Günlük</h2></div>${lineChart(f.daily, [{ key: 'revenue', label: 'Ciro', color: 'var(--series-1)' }, { key: 'net_profit', label: 'Net kâr', color: 'var(--series-2)' }])}</div>
         </div>
         <div class="card mt"><div class="card-head"><h2>Pazaryerine göre</h2></div><div class="table-wrap"><table><thead><tr><th>Pazaryeri</th><th class="r">Sipariş</th><th class="r">Ciro</th><th class="r">Ürün maliyeti</th><th class="r">Komisyon</th><th class="r">Hizmet</th><th class="r">Kargo</th><th class="r">Reklam</th><th class="r">İade</th><th class="r">Net kâr</th><th class="r">Tahmini KDV</th><th class="r">Marj</th></tr></thead><tbody>
-          ${f.by_marketplace.map((m) => html`<tr><td><b>${m.name}</b></td><td class="r num">${num(m.orders)}</td><td class="r num">${money(m.revenue)}</td><td class="r num">${money(m.product_cost)}</td><td class="r num">${money(m.commission)}</td><td class="r num">${money(m.service_fee)}</td><td class="r num">${money(m.shipping)}</td><td class="r num">${money(m.advertising)}</td><td class="r num">${money(m.refund)}</td><td class="r num ${signClass(m.net_profit)}">${money(m.net_profit)}</td><td class="r num">${money(m.tax_estimate)}</td><td class="r num">${pct(m.margin)}</td></tr>`)}
+          ${f.by_marketplace.map((m) => html`<tr><td><b>${m.name}</b></td><td class="r num">${num(m.orders)}</td><td class="r num">${money(m.revenue)}</td><td class="r num">${money(m.product_cost)}</td><td class="r num">${money(m.commission)}</td><td class="r num">${money(m.service_fee)}</td><td class="r num">${money(m.shipping)}</td><td class="r num">${money(m.advertising)}</td><td class="r num">${money(m.refund)}</td><td class="r num ${signClass(m.net_profit)}">${money(m.net_profit)}</td><td class="r num">${money(m.tax_estimate)}</td><td class="r num">${pct(m.margin_after_vat ?? m.margin_before_vat)}</td></tr>`)}
         </tbody></table></div></div>
         <div class="card mt"><div class="card-head"><div><h2>Dönem giderleri</h2><p>Reklam, ambalaj, personel gibi siparişe bağlı olmayan giderler. SKU girilen reklam giderleri SKU raporuna yansır.</p></div></div>
           ${ex.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Kategori</th><th>Açıklama</th><th>Pazaryeri</th><th>SKU</th><th class="r">Tutar</th><th></th></tr></thead><tbody>
@@ -1743,10 +1874,10 @@ PAGES.reports = {
       const table = () => {
         const sorted = [...items].sort((a, b) => ((a[sortKey] ?? -Infinity) > (b[sortKey] ?? -Infinity) ? 1 : -1) * dir);
         const th = (k, l, r = true) => html`<th class="${r ? 'r' : ''}"><a href="#" data-sort="${k}">${l}${sortKey === k ? (dir < 0 ? ' ↓' : ' ↑') : ''}</a></th>`;
-        $('#sku-table').innerHTML = renderVal(items.length ? html`<div class="table-wrap"><table><thead><tr>${th('sku', 'SKU', false)}${th('quantity', 'Adet')}${th('revenue', 'Ciro')}${th('product_cost', 'Maliyet')}${th('commission', 'Komisyon')}${th('shipping', 'Kargo')}${th('advertising', 'Reklam')}${th('refund', 'İade')}${th('return_rate', 'İade oranı')}${th('net_profit', 'Net kâr')}${th('tax_estimate', 'Tahmini KDV')}${th('margin', 'Marj')}</tr></thead><tbody>
+        $('#sku-table').innerHTML = renderVal(items.length ? html`<div class="table-wrap"><table><thead><tr>${th('sku', 'SKU', false)}${th('quantity', 'Adet')}${th('revenue', 'Ciro')}${th('product_cost', 'Maliyet')}${th('commission', 'Komisyon')}${th('shipping', 'Kargo')}${th('advertising', 'Reklam')}${th('refund', 'İade')}${th('return_rate', 'İade oranı')}${th('net_profit', 'KDV öncesi kâr')}${th('tax_estimate', 'Tahmini KDV')}${th('net_profit_after_tax', 'KDV sonrası kâr')}${th('margin_after_vat', 'Net marj')}${th('markup_after_vat', 'Markup')}</tr></thead><tbody>
           ${sorted.map((r) => html`<tr><td><b>${r.sku}</b><span class="ellipsis small muted">${r.product_name || ''}</span>${r.missing_cost ? html`<span class="badge plain tone-warn">Maliyet eksik</span>` : ''}</td>
             <td class="r num">${num(r.quantity)}</td><td class="r num">${money(r.revenue)}</td><td class="r num">${money(r.product_cost)}</td><td class="r num">${money(r.commission)}</td><td class="r num">${money(r.shipping)}</td><td class="r num">${money(r.advertising)}</td><td class="r num">${money(r.refund)}</td><td class="r num">${pct(r.return_rate)}</td>
-            <td class="r num ${signClass(r.net_profit)}">${money(r.net_profit)}${estimateBadge(r.is_estimate)}</td><td class="r num">${money(r.tax_estimate)}</td><td class="r num">${pct(r.margin)}</td></tr>`)}</tbody></table></div>` : empty('Veri yok', 'Seçilen dönemde satılan ürün yok.'));
+            <td class="r num ${signClass(r.net_profit)}">${money(r.net_profit)}${estimateBadge(r.is_estimate)}</td><td class="r num">${money(r.tax_estimate)}</td><td class="r num ${signClass(r.net_profit_after_tax)}">${money(r.net_profit_after_tax)}</td><td class="r num">${pct(r.margin_after_vat)}</td><td class="r num">${pct(r.markup_after_vat)}</td></tr>`)}</tbody></table></div>` : empty('Veri yok', 'Seçilen dönemde satılan ürün yok.'));
         $$('[data-sort]').forEach((a) => a.addEventListener('click', (e) => {
           e.preventDefault(); if (sortKey === a.dataset.sort) dir = -dir; else { sortKey = a.dataset.sort; dir = -1; } table();
         }));
@@ -1913,12 +2044,14 @@ PAGES.settings = {
       if (it.type === 'time') return html`<label>${it.label}<input name="${it.key}" type="time" step="60" value="${it.value || ''}" ${raw(dis)}></label>`;
       if (it.type === 'code') return html`<label>${it.label}<input name="${it.key}" maxlength="50" pattern="[a-z0-9_\\-]*" value="${it.value || ''}" ${raw(dis)}></label>`;
       if (it.type === 'percent') return html`<label>${it.label}<input name="${it.key}" type="number" step="1" min="0" max="1000" value="${it.value ?? ''}" ${raw(dis)}></label>`;
+      if (it.type === 'choice') return html`<label>${it.label}<select name="${it.key}" ${raw(dis)}>${Object.entries(it.choices || {}).map(([v, l]) => html`<option value="${v}" ${raw((it.value || 'unset') === v ? 'selected' : '')}>${l}</option>`)}</select></label>`;
+      if (it.type === 'fx') return html`<label>${it.label}<input name="${it.key}" value="${Object.entries(it.value || {}).map(([k, v]) => `${k}=${v}`).join(', ')}" placeholder="ör. USD=34.10, EUR=37.20 (boş = döviz kullanılmaz)" ${raw(dis)}></label>`;
       return html`<label>${it.label}<input name="${it.key}" type="number" step="${it.type === 'int' ? 1 : 0.01}" min="0" value="${it.value ?? ''}" ${raw(dis)}></label>`;
     };
     view().innerHTML = renderVal(html`
       <div class="grid grid-2">
         <form class="card" id="set-form"><div class="card-head"><div><h2>İşletme ayarları</h2><p>Tüm ayarlar buradan yönetilir; sunucu dosyası düzenlemek gerekmez. Finans varsayılanlarıyla hesaplanan tutarlar raporlarda “TAHMİNİ” olarak işaretlenir.</p></div></div>
-          ${[...new Set(s.items.map((it) => it.group))].map((g) => html`<fieldset class="fieldset mt"><legend>${g}</legend><div class="form-grid">${s.items.filter((it) => it.group === g).map((it) => html`<div class="${it.type === 'bool' || it.type === 'time' ? 'full' : ''}">${input(it)}</div>`)}</div>
+          ${[...new Set(s.items.map((it) => it.group))].map((g) => html`<fieldset class="fieldset mt"><legend>${g}</legend><div class="form-grid">${s.items.filter((it) => it.group === g).map((it) => html`<div class="${it.type === 'bool' || it.type === 'time' || it.type === 'choice' || it.type === 'fx' ? 'full' : ''}">${input(it)}</div>`)}</div>
             ${g === 'Kargo planı' ? html`<p class="small muted">Varsayılan: 11:00 öncesi bugün, 12:00 ve sonrası yarın; aradaki saatler “Kargo günü belirsiz” gösterilir. İki saati aynı yaparsanız belirsiz aralık kalmaz. Hafta sonu/tatil takvimi tanımlı değildir; tarih tahminidir.</p>` : ''}</fieldset>`)}
           ${can('admin') ? html`<p class="form-error"></p><button class="btn btn-primary mt" type="submit">Kaydet</button>` : html`<p class="muted small mt">Ayarları yalnızca yöneticiler değiştirebilir.</p>`}</form>
         <div class="stack">
@@ -1939,7 +2072,8 @@ PAGES.settings = {
         s.items.forEach((it) => {
           const el = e.target.elements[it.key];
           if (it.type === 'bool') values[it.key] = el.checked;
-          else if (it.type === 'time' || it.type === 'code') values[it.key] = el.value.trim();
+          else if (it.type === 'time' || it.type === 'code' || it.type === 'choice') values[it.key] = el.value.trim();
+          else if (it.type === 'fx') values[it.key] = Object.fromEntries(el.value.split(',').map((x) => x.trim()).filter(Boolean).map((x) => x.split('=').map((y) => y.trim())));
           else if (el.value !== '') values[it.key] = it.type === 'rate' ? Number(el.value) / 100 : it.type === 'int' ? parseInt(el.value, 10) : Number(el.value);
         });
         const r = await api('/api/settings', { method: 'PUT', body: { values } });

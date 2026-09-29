@@ -159,7 +159,8 @@ def marketplaces(_: CurrentUser = Depends(viewer), conn: Connection = Depends(ge
 @router.get("/api/settings")
 def get_app_settings(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
     values = app_settings.get_all(conn)
-    return {"items": [{"key": k, "type": t, "label": label, "value": values.get(k), "group": app_settings.group_of(k)}
+    return {"items": [{"key": k, "type": t, "label": label, "value": values.get(k), "group": app_settings.group_of(k),
+                       "choices": app_settings.CHOICES.get(k)}
                       for k, (t, label) in app_settings.EDITABLE.items()]}
 
 
