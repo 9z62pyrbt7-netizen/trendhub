@@ -1,0 +1,21 @@
+{
+  "name": "trendcantaniz-theme-dev",
+  "private": true,
+  "type": "module",
+  "description": "Trendçantanız Shopify teması için yerel test araçları (temaya yüklenmez).",
+  "scripts": {
+    "check": "node theme-check.mjs",
+    "images": "node genimg.mjs",
+    "serve": "node server.mjs",
+    "smoke": "node smoke.mjs",
+    "e2e": "node e2e.mjs"
+  },
+  "devDependencies": {
+    "@fontsource/jost": "^5.3.0",
+    "@fontsource/playfair-display": "^5.3.0",
+    "@shopify/theme-check-node": "^3.29.1",
+    "liquidjs": "^10.29.0",
+    "playwright": "^1.63.0",
+    "sharp": "^0.35.5"
+  }
+}

@@ -1,0 +1,33 @@
+{%- paginate customer.addresses by 10 -%}
+<section class="section account">
+  <div class="container container--narrow">
+    <a class="link-quiet" href="{{ routes.account_url }}">← {{ 'customer.account' | t }}</a>
+    <h1 class="page-title">{{ 'customer.addresses' | t }}</h1>
+    {%- for address in customer.addresses -%}
+      <div class="address-card">
+        {%- if address == customer.default_address -%}<p class="eyebrow">{{ 'customer.default' | t }}</p>{%- endif -%}
+        {{ address | format_address }}
+        <details>
+          <summary class="link-quiet">{{ 'customer.edit' | t }}</summary>
+          {%- form 'customer_address', address, class: 'form' -%}
+            {% render 'address-fields', form: form, address: address %}
+            <button type="submit" class="btn btn--dark">{{ 'customer.save' | t }}</button>
+          {%- endform -%}
+        </details>
+        <form method="post" action="{{ address.url }}">
+          <input type="hidden" name="_method" value="delete">
+          <button type="submit" class="link-quiet">{{ 'cart.remove' | t }}</button>
+        </form>
+      </div>
+    {%- endfor -%}
+    <details class="address-card" {% if customer.addresses.size == 0 %}open{% endif %}>
+      <summary class="btn btn--ghost">{{ 'customer.add_address' | t }}</summary>
+      {%- form 'customer_address', customer.new_address, class: 'form' -%}
+        {% render 'address-fields', form: form, address: customer.new_address %}
+        <button type="submit" class="btn btn--dark">{{ 'customer.save' | t }}</button>
+      {%- endform -%}
+    </details>
+    {% render 'pagination', paginate: paginate %}
+  </div>
+</section>
+{%- endpaginate -%}

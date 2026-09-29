@@ -1,0 +1,10 @@
+{
+  "sections": {
+    "main": { "type": "main-cart", "settings": { "show_dynamic": true } },
+    "rail": {
+      "type": "product-rail",
+      "settings": { "eyebrow": "Sepetini tamamla", "heading": "Çok Satanlar", "fallback_sort": "best-selling", "limit": 8, "view_all_label": "Tümünü gör" }
+    }
+  },
+  "order": ["main", "rail"]
+}

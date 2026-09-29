@@ -1,0 +1,16 @@
+{%- liquid
+  assign has_social = false
+  if settings.social_instagram != blank or settings.social_tiktok != blank or settings.social_facebook != blank or settings.social_pinterest != blank or settings.social_youtube != blank or settings.whatsapp_number != blank
+    assign has_social = true
+  endif
+-%}
+{%- if has_social -%}
+  <ul class="social" aria-label="{{ 'general.social' | t }}">
+    {%- if settings.social_instagram != blank -%}<li><a href="{{ settings.social_instagram }}" target="_blank" rel="noopener" aria-label="Instagram">{% render 'icon', name: 'instagram' %}</a></li>{%- endif -%}
+    {%- if settings.social_tiktok != blank -%}<li><a href="{{ settings.social_tiktok }}" target="_blank" rel="noopener" aria-label="TikTok">{% render 'icon', name: 'tiktok' %}</a></li>{%- endif -%}
+    {%- if settings.social_facebook != blank -%}<li><a href="{{ settings.social_facebook }}" target="_blank" rel="noopener" aria-label="Facebook">{% render 'icon', name: 'facebook' %}</a></li>{%- endif -%}
+    {%- if settings.social_pinterest != blank -%}<li><a href="{{ settings.social_pinterest }}" target="_blank" rel="noopener" aria-label="Pinterest">{% render 'icon', name: 'pinterest' %}</a></li>{%- endif -%}
+    {%- if settings.social_youtube != blank -%}<li><a href="{{ settings.social_youtube }}" target="_blank" rel="noopener" aria-label="YouTube">{% render 'icon', name: 'youtube' %}</a></li>{%- endif -%}
+    {%- if settings.whatsapp_number != blank -%}<li><a href="https://wa.me/{{ settings.whatsapp_number | remove: '+' | remove: ' ' }}" target="_blank" rel="noopener" aria-label="WhatsApp">{% render 'icon', name: 'whatsapp' %}</a></li>{%- endif -%}
+  </ul>
+{%- endif -%}

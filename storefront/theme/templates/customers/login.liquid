@@ -1,0 +1,33 @@
+<section class="section account-form">
+  <div class="container container--xs">
+    <div data-login-view>
+      <h1 class="page-title">{{ 'customer.log_in' | t }}</h1>
+      {%- form 'customer_login', novalidate: 'novalidate', class: 'form' -%}
+        {%- if form.errors -%}<div class="form-message form-message--error" role="alert">{{ form.errors | default_errors }}</div>{%- endif -%}
+        <label class="field"><span>{{ 'customer.email' | t }}</span><input type="email" name="customer[email]" autocomplete="email" autocapitalize="off" required></label>
+        {%- if form.password_needed -%}
+          <label class="field"><span>{{ 'customer.password' | t }}</span><input type="password" name="customer[password]" autocomplete="current-password" required></label>
+          <a href="#recover" class="link-quiet">{{ 'customer.forgot' | t }}</a>
+        {%- endif -%}
+        <button type="submit" class="btn btn--dark btn--block">{{ 'customer.log_in' | t }}</button>
+        <p class="form__alt">{{ 'customer.no_account' | t }} <a href="{{ routes.account_register_url }}">{{ 'customer.register' | t }}</a></p>
+      {%- endform -%}
+    </div>
+    <div id="recover" class="recover">
+      <h2 class="section-title">{{ 'customer.recover_title' | t }}</h2>
+      {%- form 'recover_customer_password', class: 'form' -%}
+        {%- if form.posted_successfully? -%}
+          <p class="form-message form-message--ok" role="status">{{ 'customer.recover_ok' | t }}</p>
+        {%- endif -%}
+        {%- if form.errors -%}<div class="form-message form-message--error">{{ form.errors | default_errors }}</div>{%- endif -%}
+        <label class="field"><span>{{ 'customer.email' | t }}</span><input type="email" name="email" autocomplete="email" required></label>
+        <button type="submit" class="btn btn--ghost btn--block">{{ 'customer.recover_submit' | t }}</button>
+      {%- endform -%}
+    </div>
+    {%- if shop.checkout.guest_login -%}
+      {%- form 'guest_login', class: 'form' -%}
+        <button type="submit" class="btn btn--ghost btn--block">{{ 'customer.guest' | t }}</button>
+      {%- endform -%}
+    {%- endif -%}
+  </div>
+</section>

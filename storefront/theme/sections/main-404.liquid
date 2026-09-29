@@ -1,0 +1,12 @@
+<section class="section">
+  <div class="container empty empty--page">
+    <p class="eyebrow">404</p>
+    <h1 class="page-title">{{ 'general.404.title' | t }}</h1>
+    <p>{{ 'general.404.text' | t }}</p>
+    <a class="btn btn--dark" href="{{ routes.all_products_collection_url }}"><span>{{ 'cart.continue' | t }}</span>{% render 'icon', name: 'arrow-right' %}</a>
+  </div>
+</section>
+
+{% schema %}
+{ "name": "404", "class": "section-404", "settings": [] }
+{% endschema %}

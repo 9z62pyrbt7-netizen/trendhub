@@ -1,0 +1,23 @@
+<div class="summary">
+  {%- if cart.cart_level_discount_applications.size > 0 -%}
+    <ul class="summary__discounts" role="list">
+      {%- for discount in cart.cart_level_discount_applications -%}
+        <li><span>{{ discount.title | escape }}</span><span>−{{ discount.total_allocated_amount | money }}</span></li>
+      {%- endfor -%}
+    </ul>
+  {%- endif -%}
+  <div class="summary__row summary__total">
+    <span>{{ 'cart.subtotal' | t }}</span>
+    <span data-cart-total>{{ cart.total_price | money_with_currency }}</span>
+  </div>
+  <p class="summary__note">
+    {%- if cart.taxes_included -%}{{ 'cart.taxes_included' | t }}{%- else -%}{{ 'cart.taxes_excluded' | t }}{%- endif %}
+    {{ 'cart.shipping_at_checkout' | t }}
+  </p>
+  <button type="submit" name="checkout" class="btn btn--dark btn--block" form="{{ form_id }}"{% if cart.item_count == 0 %} disabled{% endif %}>
+    {% render 'icon', name: 'lock' %}<span>{{ 'cart.checkout' | t }}</span>
+  </button>
+  {%- if settings.cart_reassurance != blank -%}
+    <div class="summary__reassure rte">{{ settings.cart_reassurance }}</div>
+  {%- endif -%}
+</div>

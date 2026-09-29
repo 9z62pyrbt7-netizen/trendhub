@@ -1,0 +1,26 @@
+<section class="section">
+  <div class="container">
+    <h1 class="page-title">{{ section.settings.heading | escape }}</h1>
+    <ul class="tiles__grid" role="list">
+      <li class="tiles__item" data-reveal>
+        {%- assign all_title = 'sections.tiles.all_bags' | t -%}
+        {% render 'collection-tile', url: routes.all_products_collection_url, title: all_title, image: collections.all.products.first.featured_media.preview_image, count: collections.all.products_count %}
+      </li>
+      {%- for c in collections -%}
+        {%- if c.handle == 'frontpage' or c.handle == 'all' or c.products_count == 0 -%}{%- continue -%}{%- endif -%}
+        {%- assign tile_image = c.image | default: c.products.first.featured_media.preview_image -%}
+        <li class="tiles__item" data-reveal style="--i: {{ forloop.index0 | modulo: 3 }}">
+          {% render 'collection-tile', url: c.url, title: c.title, image: tile_image, count: c.products_count %}
+        </li>
+      {%- endfor -%}
+    </ul>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Koleksiyon listesi",
+  "class": "section-list-collections",
+  "settings": [ { "type": "text", "id": "heading", "label": "Başlık", "default": "Koleksiyonlar" } ]
+}
+{% endschema %}

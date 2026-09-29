@@ -1,0 +1,96 @@
+{%- comment -%}
+  Koleksiyonlar. Blok eklenmemişse mağazadaki ürün içeren gerçek koleksiyonlar otomatik listelenir;
+  yeterli koleksiyon yoksa tüm ürünlerin gerçek sıralı görünümleri (Tüm Çantalar / Yeni Gelenler / Çok Satanlar) kullanılır.
+  Mağazada olmayan kategori uydurulmaz.
+{%- endcomment -%}
+{%- liquid
+  assign tile_count = 0
+  assign all_products = collections.all.products
+-%}
+<section class="section tiles" aria-labelledby="TilesTitle-{{ section.id }}">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <div>
+        {%- if section.settings.eyebrow != blank -%}<p class="eyebrow">{{ section.settings.eyebrow | escape }}</p>{%- endif -%}
+        <h2 class="section-title" id="TilesTitle-{{ section.id }}">{{ section.settings.heading | escape }}</h2>
+      </div>
+      <a class="link-arrow" href="{{ routes.collections_url }}">{{ 'sections.tiles.all_collections' | t }}{% render 'icon', name: 'arrow-right' %}</a>
+    </div>
+
+    <ul class="tiles__grid" role="list" data-tiles>
+      {%- if section.blocks.size > 0 -%}
+        {%- for block in section.blocks -%}
+          {%- assign c = block.settings.collection -%}
+          {%- if c == blank or c.products_count == 0 -%}{%- continue -%}{%- endif -%}
+          {%- assign tile_count = tile_count | plus: 1 -%}
+          {%- assign tile_image = block.settings.image | default: c.image | default: c.products.first.featured_media.preview_image -%}
+          {%- assign tile_title = block.settings.title | default: c.title -%}
+          <li class="tiles__item" data-reveal style="--i: {{ forloop.index0 }}" {{ block.shopify_attributes }}>
+            {% render 'collection-tile', url: c.url, title: tile_title, image: tile_image, count: c.products_count %}
+          </li>
+        {%- endfor -%}
+      {%- else -%}
+        {%- for c in collections -%}
+          {%- if c.handle == 'frontpage' or c.handle == 'all' or c.products_count == 0 -%}{%- continue -%}{%- endif -%}
+          {%- if tile_count >= 6 -%}{%- break -%}{%- endif -%}
+          {%- assign tile_count = tile_count | plus: 1 -%}
+          {%- assign tile_image = c.image | default: c.products.first.featured_media.preview_image -%}
+          <li class="tiles__item" data-reveal style="--i: {{ tile_count }}">
+            {% render 'collection-tile', url: c.url, title: c.title, image: tile_image, count: c.products_count %}
+          </li>
+        {%- endfor -%}
+      {%- endif -%}
+
+      {%- if tile_count < 2 and all_products.size > 0 -%}
+        {%- liquid
+          assign first_p = all_products.first
+          assign last_p = all_products.last
+          assign img_all = first_p.media[1].preview_image | default: first_p.featured_media.preview_image
+          assign img_new = last_p.featured_media.preview_image
+          assign img_best = first_p.featured_media.preview_image
+          if all_products.size > 1
+            assign img_best = last_p.media[2].preview_image | default: last_p.featured_media.preview_image
+          endif
+          assign url_new = routes.all_products_collection_url | append: '?sort_by=created-descending'
+          assign url_best = routes.all_products_collection_url | append: '?sort_by=best-selling'
+          assign title_all = 'sections.tiles.all_bags' | t
+          assign title_new = 'sections.header.new_in' | t
+          assign title_best = 'sections.header.best_sellers' | t
+        -%}
+        <li class="tiles__item" data-reveal style="--i: 0">
+          {% render 'collection-tile', url: routes.all_products_collection_url, title: title_all, image: img_all, count: collections.all.products_count %}
+        </li>
+        <li class="tiles__item" data-reveal style="--i: 1">
+          {% render 'collection-tile', url: url_new, title: title_new, image: img_new %}
+        </li>
+        <li class="tiles__item" data-reveal style="--i: 2">
+          {% render 'collection-tile', url: url_best, title: title_best, image: img_best %}
+        </li>
+      {%- endif -%}
+    </ul>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Koleksiyonlar",
+  "class": "section-tiles",
+  "max_blocks": 6,
+  "settings": [
+    { "type": "text", "id": "eyebrow", "label": "Üst başlık", "default": "Koleksiyonlar" },
+    { "type": "text", "id": "heading", "label": "Başlık", "default": "Her ana bir çanta" }
+  ],
+  "blocks": [
+    {
+      "type": "collection",
+      "name": "Koleksiyon",
+      "settings": [
+        { "type": "collection", "id": "collection", "label": "Koleksiyon" },
+        { "type": "text", "id": "title", "label": "Başlık (isteğe bağlı)" },
+        { "type": "image_picker", "id": "image", "label": "Görsel (isteğe bağlı)" }
+      ]
+    }
+  ],
+  "presets": [{ "name": "Koleksiyonlar" }]
+}
+{% endschema %}

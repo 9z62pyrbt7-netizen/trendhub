@@ -1,0 +1,30 @@
+<section class="section account">
+  <div class="container">
+    <a class="link-quiet" href="{{ routes.account_url }}">← {{ 'customer.account' | t }}</a>
+    <h1 class="page-title">{{ 'customer.order' | t }} {{ order.name }}</h1>
+    <p>{{ order.created_at | time_tag: format: 'date_at_time' }}</p>
+    {%- if order.cancelled -%}<p class="form-message form-message--error">{{ 'customer.cancelled' | t }} — {{ order.cancel_reason_label }}</p>{%- endif -%}
+    <table class="table">
+      <thead><tr><th>{{ 'customer.product' | t }}</th><th>{{ 'products.product.quantity' | t }}</th><th>{{ 'cart.subtotal' | t }}</th></tr></thead>
+      <tbody>
+        {%- for line_item in order.line_items -%}
+          <tr>
+            <td>{{ line_item.title | link_to: line_item.product.url }}{% if line_item.fulfillment %}<br><small>{{ line_item.fulfillment.tracking_company }} {{ line_item.fulfillment.tracking_number }}</small>{% endif %}</td>
+            <td>{{ line_item.quantity }}</td>
+            <td>{{ line_item.final_line_price | money }}</td>
+          </tr>
+        {%- endfor -%}
+      </tbody>
+      <tfoot>
+        <tr><td colspan="2">{{ 'cart.subtotal' | t }}</td><td>{{ order.line_items_subtotal_price | money }}</td></tr>
+        {%- for shipping_method in order.shipping_methods -%}<tr><td colspan="2">{{ shipping_method.title }}</td><td>{{ shipping_method.price | money }}</td></tr>{%- endfor -%}
+        {%- for tax_line in order.tax_lines -%}<tr><td colspan="2">{{ tax_line.title }} ({{ tax_line.rate_percentage }}%)</td><td>{{ tax_line.price | money }}</td></tr>{%- endfor -%}
+        <tr><td colspan="2"><strong>{{ 'customer.total' | t }}</strong></td><td><strong>{{ order.total_net_amount | money_with_currency }}</strong></td></tr>
+      </tfoot>
+    </table>
+    <div class="account__grid">
+      <div><h2 class="section-title section-title--sm">{{ 'customer.billing' | t }}</h2>{{ order.billing_address | format_address }}</div>
+      <div><h2 class="section-title section-title--sm">{{ 'customer.shipping' | t }}</h2>{{ order.shipping_address | format_address }}</div>
+    </div>
+  </div>
+</section>

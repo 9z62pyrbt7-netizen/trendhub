@@ -6,6 +6,11 @@ kargo, tedarikçi ve **sipariş/SKU seviyesinde kârlılık** yönetim paneli.
 Mimari, kararlar, migration politikası ve kurulum adımları için:
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
+## Trendçantanız vitrin teması
+
+`storefront/` klasörü Trendçantanız Shopify mağazasının premium vitrin temasını ve test araçlarını
+içerir. Kurulum, tasarım kararları ve testler: **[storefront/README.md](storefront/README.md)**.
+
 ## Hızlı başlangıç
 
 ```bash

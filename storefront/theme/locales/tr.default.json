@@ -1,0 +1,198 @@
+{
+  "accessibility": {
+    "skip_to_content": "İçeriğe geç"
+  },
+  "general": {
+    "home": "Ana sayfa",
+    "close": "Kapat",
+    "next": "Sonraki",
+    "previous": "Önceki",
+    "breadcrumb": "Sayfa yolu",
+    "pagination": "Sayfalar",
+    "social": "Sosyal medya",
+    "meta": {
+      "tags": "\"{{ tags }}\" etiketli",
+      "page": "Sayfa {{ page }}"
+    },
+    "404": {
+      "title": "Aradığın sayfayı bulamadık",
+      "text": "Bağlantı değişmiş ya da kaldırılmış olabilir. Koleksiyona göz atarak devam edebilirsin."
+    }
+  },
+  "sections": {
+    "announcement": { "label": "Duyuru" },
+    "header": {
+      "menu": "Menü",
+      "main_nav": "Ana menü",
+      "search": "Ara",
+      "search_placeholder": "Çanta, renk veya model ara",
+      "account": "Hesabım",
+      "cart": "Sepet",
+      "cart_count": {
+        "one": "Sepette {{ count }} ürün",
+        "other": "Sepette {{ count }} ürün"
+      },
+      "new_in": "Yeni Gelenler",
+      "best_sellers": "Çok Satanlar",
+      "all_bags": "Tüm Çantalar",
+      "view_all": "Tümünü gör"
+    },
+    "hero": {
+      "options": {
+        "one": "{{ count }} seçenek",
+        "other": "{{ count }} renk / seçenek"
+      }
+    },
+    "rail": {
+      "empty": "Bu bölüm için henüz ürün yok."
+    },
+    "tiles": {
+      "all_bags": "Tüm Çantalar",
+      "all_collections": "Tüm koleksiyonlar",
+      "discover": "Keşfet",
+      "count": {
+        "one": "{{ count }} ürün",
+        "other": "{{ count }} ürün"
+      }
+    },
+    "footer": {
+      "shop": "Alışveriş",
+      "info": "Bilgi",
+      "newsletter": "Bültene katıl",
+      "newsletter_text": "Yeni gelenlerden ve kampanyalardan ilk sen haberdar ol.",
+      "newsletter_ok": "Teşekkürler, kaydın alındı.",
+      "subscribe": "Kaydol",
+      "payments": "Ödeme yöntemleri"
+    }
+  },
+  "products": {
+    "product": {
+      "add_to_cart": "Sepete Ekle",
+      "sold_out": "Tükendi",
+      "unavailable": "Mevcut değil",
+      "on_sale": "İndirim",
+      "view": "İncele",
+      "view_details": "Detaylar",
+      "price_from": "Başlangıç {{ price }}",
+      "regular_price": "Normal fiyat",
+      "sale_price": "İndirimli fiyat",
+      "in_stock": "Stokta",
+      "low_stock": "Stokta son {{ quantity }} ürün",
+      "out_of_stock": "Şu an stokta yok",
+      "quantity": "Adet",
+      "quantity_decrease": "Adedi azalt",
+      "quantity_increase": "Adedi artır",
+      "description": "Ürün açıklaması",
+      "gallery": "Ürün görselleri",
+      "zoom": "Görseli büyüt",
+      "include_taxes": "Vergiler dahildir. ",
+      "shipping_policy_html": "<a href=\"{{ link }}\">Kargo</a> ödeme adımında hesaplanır.",
+      "ask_whatsapp": "Bu ürün hakkında WhatsApp'tan sor"
+    }
+  },
+  "collections": {
+    "filter": "Filtrele",
+    "sort_by": "Sırala",
+    "apply": "Uygula",
+    "clear_all": "Temizle",
+    "from": "En az",
+    "to": "En çok",
+    "empty": "Bu seçimde ürün bulunamadı.",
+    "product_count": {
+      "one": "{{ count }} ürün",
+      "other": "{{ count }} ürün"
+    }
+  },
+  "cart": {
+    "title": "Sepetim",
+    "added": "Sepete eklendi",
+    "error": "Ürün sepete eklenemedi. Lütfen tekrar deneyin.",
+    "remove": "Kaldır",
+    "subtotal": "Ara toplam",
+    "summary": "Sipariş özeti",
+    "taxes_included": "Vergiler dahildir.",
+    "taxes_excluded": "Vergiler ödeme adımında hesaplanır.",
+    "shipping_at_checkout": "Kargo ücreti ödeme adımında gösterilir.",
+    "checkout": "Güvenli Ödemeye Geç",
+    "view_cart": "Sepeti görüntüle",
+    "note": "Sipariş notu ekle",
+    "update": "Sepeti güncelle",
+    "continue": "Alışverişe devam et",
+    "empty": "Sepetin şu an boş",
+    "empty_text": "Tarzına eşlik edecek çantayı keşfetmeye ne dersin?",
+    "login_html": "Hesabın var mı? <a href=\"{{ link }}\">Giriş yap</a>"
+  },
+  "search": {
+    "title": "Ara",
+    "submit": "Ara",
+    "results_for": "\"{{ terms }}\" için sonuçlar",
+    "no_results": "Sonuç bulunamadı.",
+    "products": "Ürünler",
+    "collections": "Koleksiyonlar",
+    "view_all": "\"{{ terms }}\" için tüm sonuçlar",
+    "count": {
+      "one": "{{ count }} sonuç",
+      "other": "{{ count }} sonuç"
+    }
+  },
+  "contact": {
+    "name": "Ad Soyad",
+    "phone": "Telefon",
+    "message": "Mesajınız",
+    "send": "Gönder",
+    "success": "Mesajın bize ulaştı. En kısa sürede dönüş yapacağız."
+  },
+  "customer": {
+    "email": "E-posta",
+    "password": "Şifre",
+    "password_confirm": "Şifre (tekrar)",
+    "log_in": "Giriş yap",
+    "log_out": "Çıkış yap",
+    "register": "Hesap oluştur",
+    "create": "Hesabımı oluştur",
+    "no_account": "Hesabın yok mu?",
+    "forgot": "Şifreni mi unuttun?",
+    "recover_title": "Şifre sıfırlama",
+    "recover_submit": "Sıfırlama bağlantısı gönder",
+    "recover_ok": "Şifre sıfırlama bağlantısı e-posta adresine gönderildi.",
+    "guest": "Misafir olarak devam et",
+    "first_name": "Ad",
+    "last_name": "Soyad",
+    "account": "Hesabım",
+    "orders": "Siparişlerim",
+    "order": "Sipariş",
+    "date": "Tarih",
+    "payment": "Ödeme",
+    "fulfillment": "Gönderim",
+    "total": "Toplam",
+    "product": "Ürün",
+    "no_orders": "Henüz siparişin yok.",
+    "details": "Hesap bilgileri",
+    "addresses": "Adreslerim",
+    "add_address": "Yeni adres ekle",
+    "default": "Varsayılan adres",
+    "set_default": "Varsayılan adres yap",
+    "edit": "Düzenle",
+    "save": "Kaydet",
+    "billing": "Fatura adresi",
+    "shipping": "Teslimat adresi",
+    "cancelled": "Sipariş iptal edildi",
+    "address1": "Adres",
+    "address2": "Adres (devam)",
+    "city": "İlçe / Şehir",
+    "zip": "Posta kodu",
+    "country": "Ülke",
+    "province": "İl",
+    "reset_title": "Yeni şifre belirle",
+    "activate_title": "Hesabını etkinleştir",
+    "activate": "Hesabı etkinleştir",
+    "decline": "Daveti reddet"
+  },
+  "password": {
+    "notify": "Açıldığımızda ilk sen haberdar ol.",
+    "owner": "Mağaza sahibi misiniz? Şifre ile girin",
+    "password": "Mağaza şifresi",
+    "enter": "Giriş",
+    "admin_html": "Mağaza sahibiyseniz <a href=\"{{ link }}\" rel=\"nofollow\">buradan yönetici paneline</a> giriş yapabilirsiniz."
+  }
+}

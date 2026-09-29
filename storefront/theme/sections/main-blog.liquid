@@ -1,0 +1,19 @@
+{%- paginate blog.articles by 12 -%}
+  <section class="section">
+    <div class="container">
+      <h1 class="page-title">{{ blog.title | escape }}</h1>
+      <ul class="tiles__grid" role="list">
+        {%- for article in blog.articles -%}
+          <li class="tiles__item">
+            {% render 'collection-tile', url: article.url, title: article.title, image: article.image %}
+          </li>
+        {%- endfor -%}
+      </ul>
+      {% render 'pagination', paginate: paginate %}
+    </div>
+  </section>
+{%- endpaginate -%}
+
+{% schema %}
+{ "name": "Blog", "class": "section-main-blog", "settings": [] }
+{% endschema %}

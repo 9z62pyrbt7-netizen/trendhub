@@ -1,0 +1,10 @@
+<section class="section page">
+  <div class="container container--narrow">
+    <h1 class="page-title">{{ page.title | escape }}</h1>
+    <div class="rte">{{ page.content }}</div>
+  </div>
+</section>
+
+{% schema %}
+{ "name": "Sayfa", "class": "section-main-page", "settings": [] }
+{% endschema %}

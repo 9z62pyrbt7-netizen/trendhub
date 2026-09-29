@@ -1,0 +1,25 @@
+{
+  "current": "Default",
+  "presets": {
+    "Default": {
+      "brand_name": "TRENDÇANTANIZ",
+      "logo_width": 160,
+      "color_background": "#FBF8F3",
+      "color_surface": "#F3ECE1",
+      "color_sand": "#E6D9C6",
+      "color_text": "#141210",
+      "color_muted": "#6E655B",
+      "color_accent": "#9A3B2E",
+      "font_heading": "playfair_display_n4",
+      "font_body": "jost_n4",
+      "heading_scale": 100,
+      "card_show_second_image": true,
+      "card_quick_add": true,
+      "card_show_swatches": true,
+      "color_option_names": "Renk, Color, Colour",
+      "cart_type": "drawer",
+      "cart_show_note": false,
+      "enable_motion": true
+    }
+  }
+}

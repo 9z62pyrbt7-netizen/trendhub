@@ -1,0 +1,85 @@
+<footer class="footer">
+  <div class="container">
+    <div class="footer__top">
+      <div class="footer__brand">
+        <a href="{{ routes.root_url }}" class="wordmark wordmark--lg">{{ settings.brand_name | default: shop.name }}</a>
+        {%- if section.settings.tagline != blank -%}<p class="footer__tagline">{{ section.settings.tagline | escape }}</p>{%- endif -%}
+        {% render 'social-links' %}
+      </div>
+
+      <nav class="footer__col" aria-label="{{ 'sections.footer.shop' | t }}">
+        <p class="footer__heading">{{ 'sections.footer.shop' | t }}</p>
+        <ul>
+          <li><a href="{{ routes.all_products_collection_url }}">{{ 'sections.tiles.all_bags' | t }}</a></li>
+          <li><a href="{{ routes.all_products_collection_url }}?sort_by=created-descending">{{ 'sections.header.new_in' | t }}</a></li>
+          <li><a href="{{ routes.all_products_collection_url }}?sort_by=best-selling">{{ 'sections.header.best_sellers' | t }}</a></li>
+          <li><a href="{{ routes.collections_url }}">{{ 'sections.tiles.all_collections' | t }}</a></li>
+        </ul>
+      </nav>
+
+      {%- if section.settings.menu != blank and section.settings.menu.links.size > 0 -%}
+        <nav class="footer__col" aria-label="{{ section.settings.menu.title | escape }}">
+          <p class="footer__heading">{{ 'sections.footer.info' | t }}</p>
+          <ul>
+            {%- for link in section.settings.menu.links -%}
+              <li><a href="{{ link.url }}">{{ link.title | escape }}</a></li>
+            {%- endfor -%}
+          </ul>
+        </nav>
+      {%- endif -%}
+
+      {%- if section.settings.show_newsletter -%}
+        <div class="footer__newsletter">
+          <p class="footer__heading">{{ 'sections.footer.newsletter' | t }}</p>
+          <p class="footer__note">{{ 'sections.footer.newsletter_text' | t }}</p>
+          {%- form 'customer', id: 'FooterNewsletter', class: 'newsletter' -%}
+            <input type="hidden" name="contact[tags]" value="newsletter">
+            {%- if form.posted_successfully? -%}
+              <p class="form-message form-message--ok" role="status">{% render 'icon', name: 'check' %} {{ 'sections.footer.newsletter_ok' | t }}</p>
+            {%- else -%}
+              <div class="newsletter__field">
+                <label class="visually-hidden" for="FooterEmail">{{ 'customer.email' | t }}</label>
+                <input id="FooterEmail" type="email" name="contact[email]" required autocomplete="email" placeholder="{{ 'customer.email' | t }}" {% if form.errors %}aria-invalid="true" aria-describedby="FooterNewsletterError"{% endif %}>
+                <button type="submit" aria-label="{{ 'sections.footer.subscribe' | t }}">{% render 'icon', name: 'arrow-right' %}</button>
+              </div>
+              {%- if form.errors -%}
+                <p class="form-message form-message--error" id="FooterNewsletterError">{{ form.errors.translated_fields.email | capitalize }} {{ form.errors.messages.email }}</p>
+              {%- endif -%}
+            {%- endif -%}
+          {%- endform -%}
+        </div>
+      {%- endif -%}
+    </div>
+
+    <div class="footer__bottom">
+      <p>&copy; {{ 'now' | date: '%Y' }} {{ shop.name | link_to: routes.root_url }}</p>
+      {%- if shop.policies.size > 0 -%}
+        <ul class="footer__policies">
+          {%- for policy in shop.policies -%}
+            <li><a href="{{ policy.url }}">{{ policy.title | escape }}</a></li>
+          {%- endfor -%}
+        </ul>
+      {%- endif -%}
+      {%- if shop.enabled_payment_types.size > 0 -%}
+        <ul class="footer__payments" aria-label="{{ 'sections.footer.payments' | t }}">
+          {%- for type in shop.enabled_payment_types -%}
+            <li>{{ type | payment_type_svg_tag: class: 'payment-icon' }}</li>
+          {%- endfor -%}
+        </ul>
+      {%- endif -%}
+    </div>
+  </div>
+</footer>
+
+{% schema %}
+{
+  "name": "Alt bilgi",
+  "class": "section-footer",
+  "enabled_on": { "groups": ["footer"] },
+  "settings": [
+    { "type": "link_list", "id": "menu", "label": "Bilgi menüsü", "default": "footer" },
+    { "type": "text", "id": "tagline", "label": "Kısa marka cümlesi", "default": "Tarzını yanında taşı." },
+    { "type": "checkbox", "id": "show_newsletter", "label": "E-bülten kaydını göster", "default": true }
+  ]
+}
+{% endschema %}

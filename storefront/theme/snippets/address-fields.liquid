@@ -1,0 +1,16 @@
+<div class="form__row">
+  <label class="field"><span>{{ 'customer.first_name' | t }}</span><input type="text" name="address[first_name]" value="{{ form.first_name }}" autocomplete="given-name"></label>
+  <label class="field"><span>{{ 'customer.last_name' | t }}</span><input type="text" name="address[last_name]" value="{{ form.last_name }}" autocomplete="family-name"></label>
+</div>
+<label class="field"><span>{{ 'customer.address1' | t }}</span><input type="text" name="address[address1]" value="{{ form.address1 }}" autocomplete="address-line1"></label>
+<label class="field"><span>{{ 'customer.address2' | t }}</span><input type="text" name="address[address2]" value="{{ form.address2 }}" autocomplete="address-line2"></label>
+<div class="form__row">
+  <label class="field"><span>{{ 'customer.city' | t }}</span><input type="text" name="address[city]" value="{{ form.city }}" autocomplete="address-level2"></label>
+  <label class="field"><span>{{ 'customer.zip' | t }}</span><input type="text" name="address[zip]" value="{{ form.zip }}" autocomplete="postal-code"></label>
+</div>
+<div class="form__row">
+  <label class="field"><span>{{ 'customer.country' | t }}</span><select name="address[country]" data-default="{{ form.country }}" autocomplete="country">{{ all_country_option_tags }}</select></label>
+  <label class="field"><span>{{ 'customer.province' | t }}</span><input type="text" name="address[province]" value="{{ form.province }}" autocomplete="address-level1"></label>
+</div>
+<label class="field"><span>{{ 'contact.phone' | t }}</span><input type="tel" name="address[phone]" value="{{ form.phone }}" autocomplete="tel"></label>
+<label class="check"><input type="checkbox" name="address[default]" value="1"{% if address == customer.default_address %} checked{% endif %}><span class="check__box">{% render 'icon', name: 'check' %}</span><span>{{ 'customer.set_default' | t }}</span></label>

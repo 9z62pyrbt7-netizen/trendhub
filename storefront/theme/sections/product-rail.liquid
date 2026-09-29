@@ -1,0 +1,82 @@
+{%- liquid
+  assign source = section.settings.collection
+  assign uses_fallback = false
+  if source == blank
+    if collection != blank
+      assign source = collection
+    else
+      assign source = collections.all
+      assign uses_fallback = true
+    endif
+  endif
+
+  assign limit = section.settings.limit
+  assign sort = section.settings.fallback_sort
+  assign view_all_url = source.url
+  if uses_fallback
+    assign view_all_url = routes.all_products_collection_url | append: '?sort_by=' | append: sort
+  endif
+
+  assign count = source.products_count
+  if count > limit
+    assign count = limit
+  endif
+-%}
+{%- if source.products_count >= section.settings.min_products -%}
+
+<section class="section rail" data-rail aria-labelledby="RailTitle-{{ section.id }}"{% if uses_fallback %} data-rail-sort="{{ sort }}" data-rail-limit="{{ limit }}"{% endif %}>
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <div>
+        {%- if section.settings.eyebrow != blank -%}<p class="eyebrow">{{ section.settings.eyebrow | escape }}</p>{%- endif -%}
+        <h2 class="section-title" id="RailTitle-{{ section.id }}">{{ section.settings.heading | escape }}</h2>
+      </div>
+      <div class="section-head__aside">
+        <div class="rail__arrows" data-rail-arrows hidden>
+          <button type="button" class="round-btn" data-rail-prev aria-label="{{ 'general.previous' | t }}">{% render 'icon', name: 'arrow-left' %}</button>
+          <button type="button" class="round-btn" data-rail-next aria-label="{{ 'general.next' | t }}">{% render 'icon', name: 'arrow-right' %}</button>
+        </div>
+        {%- if section.settings.view_all_label != blank -%}
+          <a class="link-arrow" href="{{ view_all_url }}">{{ section.settings.view_all_label | escape }}{% render 'icon', name: 'arrow-right' %}</a>
+        {%- endif -%}
+      </div>
+    </div>
+  </div>
+
+  <div class="rail__viewport" data-rail-viewport>
+    <ul class="rail__list" data-rail-items data-count="{{ count }}" role="list">
+      {%- for product in source.products limit: limit -%}
+        <li class="rail__item" data-reveal style="--i: {{ forloop.index0 }}">
+          {% render 'product-card', product: product, sizes: '(min-width: 1200px) 24vw, (min-width: 750px) 34vw, 74vw', index: forloop.index0 %}
+        </li>
+      {%- else -%}
+        <li class="rail__empty">{{ 'sections.rail.empty' | t }}</li>
+      {%- endfor -%}
+    </ul>
+  </div>
+</section>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Ürün şeridi",
+  "class": "section-rail",
+  "settings": [
+    { "type": "text", "id": "eyebrow", "label": "Üst başlık" },
+    { "type": "text", "id": "heading", "label": "Başlık", "default": "Çok Satanlar" },
+    { "type": "collection", "id": "collection", "label": "Koleksiyon", "info": "Boşsa tüm ürünler aşağıdaki sıralamayla (Shopify satış/tarih verisi) gösterilir." },
+    {
+      "type": "select", "id": "fallback_sort", "label": "Koleksiyon seçilmediğinde sıralama",
+      "options": [
+        { "value": "best-selling", "label": "En çok satan" },
+        { "value": "created-descending", "label": "En yeni" }
+      ],
+      "default": "best-selling"
+    },
+    { "type": "range", "id": "limit", "label": "Ürün sayısı", "min": 2, "max": 16, "step": 1, "default": 8 },
+    { "type": "range", "id": "min_products", "label": "Bölümü göstermek için gereken en az ürün", "min": 1, "max": 12, "step": 1, "default": 1, "info": "Katalog küçükken aynı ürünlerin iki şeritte tekrarlanmasını önler." },
+    { "type": "text", "id": "view_all_label", "label": "Tümünü gör metni", "default": "Tümünü gör" }
+  ],
+  "presets": [{ "name": "Ürün şeridi" }]
+}
+{% endschema %}
