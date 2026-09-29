@@ -75,7 +75,8 @@ os.environ.update({
 })
 run_migrations(_APP_DB)
 
-DATA_TABLES = ["listing_drafts", "marketplace_category_mappings", "marketplace_rules", "supplier_product_changes",
+DATA_TABLES = ["listing_publications", "publish_requests", "alerts", "marketplace_connections", "ad_performance",
+               "ad_spend", "ad_campaign_products", "ad_campaigns", "ad_accounts", "listing_drafts", "marketplace_category_mappings", "marketplace_rules", "supplier_product_changes",
                "supplier_sync_runs", "supplier_field_mappings", "supplier_connections", "financial_transactions", "order_status_history", "supplier_orders", "shipments", "order_items",
                "orders", "marketplace_listings", "product_costs", "supplier_products", "suppliers", "products",
                "expenses", "sync_state", "sync_jobs", "system_events", "worker_heartbeats", "audit_logs",
@@ -100,7 +101,10 @@ def engine():
             ('finance.commission_rate.amazon_tr', '0.15'), ('finance.service_fee_per_order', '0'),
             ('finance.default_shipping_cost', '0'), ('finance.include_vat', 'true'),
             ('finance.return_product_cost_is_loss', 'false'),
-            ('stock.low_stock_threshold', '3') ON CONFLICT (key) DO NOTHING"""))
+            ('stock.low_stock_threshold', '3'), ('shipping.same_day_before', '"11:00"'),
+            ('shipping.next_day_from', '"12:00"'), ('alerts.critical_stock_threshold', '2'),
+            ('alerts.price_change_pct', '20'), ('alerts.shipping_overdue_hours', '24'),
+            ('notifications.in_app', 'true') ON CONFLICT (key) DO NOTHING"""))
         c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
         c.execute(text("UPDATE marketplaces SET last_check_at = NULL, last_check_ok = NULL, last_check_message = NULL, last_sync_at = NULL"))
     from app.security import login_limiter

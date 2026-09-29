@@ -305,6 +305,81 @@ yazmaz, pazaryerine istek göndermez; `will_send` her zaman `false`.
 iç ağ adresleri engellidir (`SUPPLIER_ALLOW_PRIVATE_URLS`); XML DTD/dış varlık reddedilir;
 bağlantı değişikliği yalnızca yönetici, eşleştirme/senkron/yükleme operatör yetkisindedir.
 
+## 8b. Kargo planı tahmini (Çanta Bayim)
+
+`app/domain/shipping_plan.py` + `app/services/shipping_plan.py`. Siparişler listesinde **Kargo Planı**
+sütunu ve sipariş detayında belirgin bir kutu olarak gösterilir. Tamamen **bilgilendirme amaçlı
+TrendHub tahminidir**: sipariş statüsünü değiştirmez, veritabanına yazmaz, pazaryerine veya
+tedarikçiye istek göndermez, canlı otomasyonu etkilemez.
+
+* Hesap backend'de, `Europe/Istanbul` saat dilimiyle yapılır (tarayıcı saatine bırakılmaz;
+  Docker imajında `tzdata` paketi var).
+* Çanta Bayim kuralı: 11:00'dan **önce** → aynı gün; 12:00 ve **sonrası** → ertesi gün.
+  **11:00:00–11:59:59 → "Kargo günü belirsiz"**: repoda veya erişilebilen kaynaklarda doğrulanmış
+  kural yok, varsayım yapılmadı.
+* Hafta sonu/resmî tatil için doğrulanmış kural yok: iş günü hesabı yapılmaz, sonuç tarihi hafta
+  sonuna düşerse uyarı notu gösterilir.
+* Metin güncel güne göredir: "Bugün kargoya verilecek · 28 Eyl", "Yarın kargoya verilecek · 29 Eyl",
+  plan günü geçmişse "Planlanan kargo günü geçti · 27 Eyl". Yalnızca kargoya verilmemiş siparişlerde
+  (yeni, hazırlanıyor, tedarikçiye aktarıldı, kargo bekliyor) gösterilir.
+* Kural tedarikçi koduna göre seçilir: sipariş için tedarikçi siparişi kaydı → kalemlerdeki ürünlerin
+  tercih edilen tedarikçisi → `shipping_plan.default_supplier_code` ayarı (varsayılan `canta_bayim`,
+  çünkü canlı Trendyol siparişleri Çanta Bayim'e aktarılıyor). Kuralı olmayan tedarikçide
+  "Kargo planı tanımlı değil" görünür.
+
+## 8c. Web üzerinden yönetim (migration 0006)
+
+Günlük kullanım için SSH, `.env` veya Docker gerekmez; aşağıdakilerin hepsi panelden yapılır.
+
+**Yeni tablolar (yalnızca ekleme):** `marketplace_connections`, `alerts`, `publish_requests`,
+`listing_publications`, `ad_accounts`, `ad_campaigns`, `ad_campaign_products`, `ad_spend`, `ad_performance`.
+`supplier_products`'a `color`, `variant` eklendi. `users.role` CHECK kısıtı `accountant` ile **genişletildi**
+(DROP + aynı migration'da yeniden ADD; mevcut satırlar değişmez). İş ayarı varsayılanları `ON CONFLICT DO NOTHING`.
+
+### Mağaza bağlantıları (Entegrasyonlar → Mağaza Ekle)
+* Alanlar connector'ın gerçekten kullandığıları ile sınırlı (`services/marketplace_credentials.FIELD_SPECS`).
+* Gizli alanlar tek bir Fernet paketinde (`secrets_enc`, anahtar APP_SECRET'tan), diğerleri JSONB.
+  API yanıtı secret değeri DÖNDÜRMEZ, yalnızca "tanımlı mı" bilgisi. Boş gönderilen secret kayıtlı olanı korur.
+* Bağlantı testi salt okunur (GET). Audit: "… bağlantı bilgileri güncellendi" + değişen alan ADLARI (değer yok).
+* Panel kaydı varsa esastır (kaldırılmışsa "Bağlı değil"); yoksa eski kurulumlar için sunucu ortam ayarları.
+* Kaldırma: secret'lar silinir, sipariş/ilan/finans verisi korunur.
+
+### Uyarı merkezi (`services/alerts.py`, `/api/alerts`)
+* Yalnızca gerçek veriden: tedarikçi stok 0 / kritik (eşik ayarlanabilir), kaynakta bulunamayan ürün, feed hatası,
+  gecikmiş senkron, pazaryeri bağlantı/senkron hatası, reddedilen ilan, stok/fiyat farkı, inceleme bekleyen sipariş,
+  planlanan kargo günü geçmiş sipariş, takipsiz kargo. Olay uyarıları: eşik üstü alış fiyatı değişimi, barkod değişimi.
+* Stok/kaynak uyarıları yalnızca **kataloğa alınmış** tedarikçi ürünleri için üretilir (havuzdaki binlerce ürün gürültü yapmaz).
+* `fingerprint` başına tek açık uyarı (partial unique index); tekrar görülürse sayaç artar. Durum tabanlı uyarılar
+  koşul ortadan kalkınca otomatik çözülür; kullanıcı "Çözüldü" derse ve sorun sürüyorsa yeni uyarı açılır.
+* Tarama: `alerts.scan` işi 15 dk'da bir + her senkrondan sonra + "Şimdi tara". Dış sisteme istek göndermez.
+* Bildirim kanalları `services/notifications.py` (şimdilik panel içi zil; e-posta/Telegram/push `Channel` alt sınıfı olarak eklenir).
+
+### Kontrollü yayın (`services/publishing.py`, `/api/publish/*`)
+Gönderim için 7 kapının hepsi açık olmalı: yönetici, önizleme + tek kullanımlık süreli onay anahtarı (hash'li saklanır),
+doğrulanmış bağlantı, onay anında yeniden doğrulanmış ürün, **resmi dokümantasyonla doğrulanmış yayın API'si**
+(connector bayrağı), sunucu yazma izni (varsayılan kapalı), mağaza yayın izni (yalnızca doğrulanmış API'de açılabilir).
+Bugün hiçbir connector'ın yayın API'si doğrulanmadığı için onaylar `blocked` kaydedilir; pazaryerine istek GİTMEZ.
+`listing_publications.idempotency_key` = pazaryeri + ürün + içerik hash'i: aynı ürün aynı içerikle iki kez gönderilmez.
+Worker kapıları gönderim anında yeniden kontrol eder. Eksik zorunlu alanlı ürün: "Bu ürün yayınlanmaya hazır değil." + eksikler.
+
+### Reklam merkezi (`/api/ads`) ve finans
+* Kanallar: Trendyol Reklam, Meta, Google (+ HB/Amazon/diğer). API bağlantısı yok → harcama/performans elle.
+* "Doğrudan ilişkilendirilmiş" = yalnızca platformun bildirdiği/girilen reklam siparişi-cirosu; ROAS/CPA/dönüşüm veri
+  yoksa `null` ("—"). "Genel dönem analizi" = tüm satış / harcama oranı, ilişkilendirme DEĞİLDİR.
+* Reklam sonrası ürün kârı: kampanya harcaması bağlı ürünlere eşit bölünür (tahmini).
+* `/api/finance/statement`: her kalem **Gerçek / Tahmini / Girilen** etiketli; dönemler today, 7d, 30d, this_month,
+  last_month, özel. CSV: finans tablosu, siparişler, giderler, reklam harcamaları (formül enjeksiyonu engellenir).
+
+### Muhasebe rolü (`accountant`)
+Okuma bakımından izleyici; ek olarak gider ve reklam harcaması/performansı girebilir (`deps.finance_editor`), CSV indirir.
+Bağlantı bilgisi, mağaza ekleme/kaldırma, yayın, kullanıcı ve ayar işlemleri backend'de 403.
+
+### Diğer
+* Kargo kesim saati Ayarlar'dan (`shipping.same_day_before`, `shipping.next_day_from`); iş takvimi kancası
+  `domain/shipping_plan.is_shipping_day` (tatil UYDURULMAZ).
+* Ürün yaşam döngüsü: `/api/products/{id}/lifecycle` (tedarikçi, eşleştirme, ilan, sipariş, kargo, iade, finans, reklam, uyarı).
+* Hatalar: 422 Türkçe ve girilen değeri geri döndürmeden; 500 referans numaralı sade mesaj; arayüzde "Gelişmiş detay".
+
 ## 9. Güvenilirlik
 
 * **Idempotency**

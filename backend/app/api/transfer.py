@@ -428,3 +428,57 @@ def add_marketplace(body: MarketplaceIn, request: Request, user: CurrentUser = D
     log_audit(conn, actor=user.username, user_id=user.id, action="marketplace.created", entity_type="marketplace",
               entity_id=mid, ip=client_ip(request), details=body.model_dump())
     return {"id": mid}
+
+
+# ------------------------------------------------------------ kontrollü yayın (WRITE)
+class PublishPreviewIn(BaseModel):
+    marketplace: str = Field(pattern=r"^[a-z0-9_]{2,40}$")
+    draft_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class PublishConfirmIn(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    confirm: bool
+
+
+@router.post("/api/publish/preview")
+def publish_preview(body: PublishPreviewIn, request: Request, user: CurrentUser = Depends(admin),
+                    conn: Connection = Depends(get_conn)):
+    """Yayın önizlemesi + tek kullanımlık onay anahtarı. Pazaryerine istek GÖNDERMEZ."""
+    from ..services import publishing
+    try:
+        pv = publishing.preview(conn, body.marketplace, body.draft_ids, user.id)
+    except publishing.PublishError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    log_audit(conn, actor=user.username, user_id=user.id, action="publish.previewed", entity_type="publish_request",
+              entity_id=pv["request_id"], ip=client_ip(request),
+              details={"marketplace": body.marketplace, "sendable": len(pv["sendable"]), "blocked": len(pv["blocked"]),
+                       "can_confirm": pv["can_confirm"]})
+    return pv
+
+
+@router.post("/api/publish/confirm")
+def publish_confirm(body: PublishConfirmIn, request: Request, user: CurrentUser = Depends(admin),
+                    conn: Connection = Depends(get_conn)):
+    from ..services import publishing
+    if not body.confirm:
+        raise HTTPException(422, "Gönderim için açık onay gerekli")
+    try:
+        result = publishing.confirm(conn, body.token, user.id)
+    except publishing.PublishError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    log_audit(conn, actor=user.username, user_id=user.id, action="publish.confirmed", entity_type="publish_request",
+              ip=client_ip(request), details={k: v for k, v in result.items() if k != "gates"})
+    return result
+
+
+@router.get("/api/publish/history")
+def publish_history(page: Page = Depends(), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    total = conn.execute(text("SELECT COUNT(*) FROM listing_publications")).scalar()
+    items = rows(conn, """
+        SELECT lp.id, lp.status, lp.message, lp.external_ref, lp.attempts, lp.created_at, lp.updated_at,
+               p.name AS product_name, p.barcode, m.name AS marketplace_name, u.username AS created_by_name
+          FROM listing_publications lp JOIN products p ON p.id = lp.product_id
+          JOIN marketplaces m ON m.id = lp.marketplace_id LEFT JOIN users u ON u.id = lp.created_by
+         ORDER BY lp.id DESC LIMIT :lim OFFSET :off""", lim=page.page_size, off=page.offset)
+    return paged(items, total, page)

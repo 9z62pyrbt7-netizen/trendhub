@@ -1,6 +1,7 @@
 """İş tiplerinin çalıştırılması (worker tarafından çağrılır)."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
@@ -14,11 +15,15 @@ from .events import record_event, resolve_fingerprint
 from .listings_sync import upsert_listings
 from .orders_sync import ensure_store, upsert_orders
 
+log = logging.getLogger("trendhub.sync")
+
 ORDERS_SYNC = "orders.sync"
 ORDERS_DEEP_SYNC = "orders.deep_sync"
 LISTINGS_SYNC = "listings.sync"
 INTEGRATION_CHECK = "integration.check"
 SUPPLIER_SYNC = "supplier.sync"
+ALERTS_SCAN = "alerts.scan"
+ALERTS_SCAN_EVERY_MINUTES = 15
 DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
@@ -29,6 +34,8 @@ JOB_LABELS_TR = {
     LISTINGS_SYNC: "Ürün/ilan senkronizasyonu",
     INTEGRATION_CHECK: "Bağlantı testi",
     SUPPLIER_SYNC: "Tedarikçi senkronizasyonu",
+    ALERTS_SCAN: "Uyarı taraması",
+    "listing.publish": "Ürün yayınlama (onaylı)",
 }
 
 
@@ -100,15 +107,42 @@ def run_integration_check(engine: Engine, marketplace: str, settings=None) -> di
     connector = get_connector(marketplace, settings)
     check = connector.test_connection()
     with engine.begin() as conn:
-        conn.execute(text("""
-            UPDATE marketplaces SET last_check_at = NOW(), last_check_ok = :ok, last_check_message = :m,
-                   updated_at = NOW() WHERE code = :c
-        """), {"ok": check.ok, "m": check.message[:500], "c": marketplace})
+        from .marketplace_credentials import record_test
+        record_test(conn, marketplace, check.ok, check.message)
     return {"ok": check.ok, "message": check.message}
+
+
+def run_alerts_scan(engine: Engine) -> dict:
+    from .alerts import scan
+    with engine.begin() as conn:
+        return scan(conn)
+
+
+def _scan_after(engine: Engine, result: dict) -> dict:
+    """Senkron sonrası uyarı taraması; tarama hatası senkron sonucunu bozmaz."""
+    try:
+        run_alerts_scan(engine)
+    except Exception:  # noqa: BLE001
+        log.exception("Senkron sonrası uyarı taraması başarısız")
+    return result
 
 
 def execute(engine: Engine, job: dict, settings=None) -> dict:
     payload = job.get("payload") or {}
+    t = job["job_type"]
+    if t == ALERTS_SCAN:
+        return run_alerts_scan(engine)
+    if t in (ORDERS_SYNC, ORDERS_DEEP_SYNC, LISTINGS_SYNC, SUPPLIER_SYNC):
+        return _scan_after(engine, _execute_sync(engine, job, payload, settings))
+    if t == INTEGRATION_CHECK:
+        return run_integration_check(engine, job["marketplace"], settings)
+    if t == "listing.publish":
+        from .publishing import run_publish_job
+        return run_publish_job(engine, job, settings)
+    raise NotSupported(f"Bilinmeyen iş tipi: {t}")
+
+
+def _execute_sync(engine: Engine, job: dict, payload: dict, settings=None) -> dict:
     t = job["job_type"]
     if t == ORDERS_SYNC:
         return run_orders_sync(engine, job["marketplace"], payload, settings)
@@ -116,13 +150,9 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
         return run_orders_sync(engine, job["marketplace"], {"lookback_days": DEEP_LOOKBACK_DAYS}, settings)
     if t == LISTINGS_SYNC:
         return run_listings_sync(engine, job["marketplace"], settings)
-    if t == INTEGRATION_CHECK:
-        return run_integration_check(engine, job["marketplace"], settings)
-    if t == SUPPLIER_SYNC:
-        from .supplier_sync import run_supplier_sync
-        return run_supplier_sync(engine, int(payload["supplier_id"]), trigger=payload.get("trigger") or "schedule",
-                                 job_id=job["id"])
-    raise NotSupported(f"Bilinmeyen iş tipi: {t}")
+    from .supplier_sync import run_supplier_sync
+    return run_supplier_sync(engine, int(payload["supplier_id"]), trigger=payload.get("trigger") or "schedule",
+                             job_id=job["id"])
 
 
 def schedule_plan(interval_minutes: int) -> list[tuple[str, str, int]]:
@@ -184,3 +214,13 @@ def schedule_supplier_jobs(conn) -> list[int]:
         if job_id:
             created.append(job_id)
     return created
+
+
+def schedule_alerts_scan(conn) -> int | None:
+    """Uyarı taramasını periyodik olarak kuyruğa ekler (yalnızca okuma + alerts tablosu)."""
+    recent = conn.execute(text("""SELECT 1 FROM sync_jobs WHERE job_type = :t
+                                   AND (status IN ('queued','running') OR created_at > NOW() - make_interval(mins => :i))
+                                 LIMIT 1"""), {"t": ALERTS_SCAN, "i": ALERTS_SCAN_EVERY_MINUTES}).first()
+    if recent:
+        return None
+    return jobs.enqueue(conn, ALERTS_SCAN, payload={}, idempotency_key=ALERTS_SCAN, max_attempts=2)

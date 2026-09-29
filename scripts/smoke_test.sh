@@ -46,7 +46,10 @@ n=$(echo "$integ" | grep -o '"state":"not_connected"' | wc -l)
 [ "$n" -eq 3 ] || fail "3 entegrasyon da not_connected olmalı: $integ"
 
 step "credential yokken hiçbir senkron işi planlanmaz"
-curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs" | grep -q '"total":0' || fail "beklenmeyen iş var"
+# Yalnızca iç (dışarıya istek atmayan) uyarı taraması beklenir; pazaryeri/tedarikçi işi olmamalı.
+jobs=$(curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs?page_size=200")
+others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v '"job_type":"alerts.scan"' || true)
+[ -z "$others" ] || fail "beklenmeyen iş var: $others"
 
 step "dashboard ve panel"
 curl -fsS -b "$JAR" "$BASE_URL/api/dashboard?period=7d" | grep -q '"statuses"' || fail "dashboard"

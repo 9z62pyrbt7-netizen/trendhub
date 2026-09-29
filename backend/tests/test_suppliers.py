@@ -469,7 +469,7 @@ def test_unknown_marketplace_rejected_and_new_marketplace_supported(client, engi
         with engine.begin() as c:
             c.execute(text("UPDATE listing_drafts SET status = 'cancelled'"))
             # test DB'si: sonraki testler 3 pazaryeri bekliyor
-            c.execute(text("TRUNCATE listing_drafts"))
+            c.execute(text("TRUNCATE listing_drafts CASCADE"))
             c.execute(text("DELETE FROM marketplaces WHERE code = 'n11'"))
 
 
@@ -506,7 +506,7 @@ def test_marketplace_rules_show_connection_and_publish_is_disabled(client, engin
     for code in ("trendyol", "hepsiburada", "amazon_tr"):
         c = items[code]["connector"]
         assert c["exists"] and c["connected"] is False and c["can_publish"] is False
-        assert "CONNECTOR_WRITE_ENABLED=false" in c["reason"]
+        assert "yazma sunucu genelinde kapalı" in c["reason"] and "CONNECTOR_WRITE" not in c["reason"]
     from app.connectors.base import WriteDisabled
     from app.connectors.registry import all_connectors
     for c in all_connectors():
@@ -521,7 +521,7 @@ def test_marketplace_rules_show_connection_and_publish_is_disabled(client, engin
         assert cs["connector"]["exists"] is False and "connector yok" in cs["connector"]["reason"]
     finally:
         with engine.begin() as c:
-            c.execute(text("TRUNCATE listing_drafts, marketplace_rules, marketplace_category_mappings"))
+            c.execute(text("TRUNCATE listing_drafts, marketplace_rules, marketplace_category_mappings CASCADE"))
             c.execute(text("DELETE FROM marketplaces WHERE code = 'ciceksepeti'"))
             c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
 
@@ -603,7 +603,7 @@ def test_publish_preview_is_read_only_and_explains_status(client, engine):
         before = c.execute(text("SELECT updated_at, status FROM listing_drafts WHERE id = :i"), {"i": d["id"]}).one()
     p = client.get(f"/api/listing-drafts/{d['id']}/preview").json()
     assert p["publish"]["will_send"] is False and p["publish"]["can_publish"] is False
-    assert "CONNECTOR_WRITE_ENABLED=false" in p["publish"]["message"]
+    assert "yazma sunucu genelinde kapalı" in p["publish"]["message"] and "CONNECTOR_WRITE" not in p["publish"]["message"]
     assert p["valid"] and p["payload"]["barcode"] == "8690000000017" and p["payload"]["category_id"] == "HB-1"
     pr = p["pricing"]
     D = lambda k: Decimal(str(pr[k]))  # noqa: E731 - JSON sayıları

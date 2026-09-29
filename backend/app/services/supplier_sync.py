@@ -29,6 +29,7 @@ from ..connectors.base import ConnectorError
 from ..db import row, rows
 from ..suppliers.connectors import FetchResult, SupplierConnectorError, get_supplier_connector
 from ..suppliers.mapping import apply_mapping
+from . import alerts
 from .events import record_event, resolve_fingerprint
 from .supplier_catalog import link_by_barcode, refresh_catalog
 
@@ -88,7 +89,10 @@ def fetch_records(cfg: dict, content: bytes | None = None, transport=None) -> Fe
 def _hash(v: dict) -> str:
     keys = ("barcode", "model_code", "name", "category", "brand", "sale_price", "currency", "vat_rate", "desi",
             "description", "images")
-    return hashlib.sha256(json.dumps({k: v.get(k) for k in keys}, default=str, sort_keys=True,
+    data = {k: v.get(k) for k in keys}
+    # Renk/varyant yalnızca doluysa hash'e girer: eski ürünler bu alanlar yüzünden 'değişti' sayılmaz.
+    data.update({k: v[k] for k in ("color", "variant") if v.get(k)})
+    return hashlib.sha256(json.dumps(data, default=str, sort_keys=True,
                                      ensure_ascii=False).encode()).hexdigest()
 
 
@@ -115,7 +119,7 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
         items[sku] = m.values
 
     existing = {r["supplier_sku"]: r for r in rows(conn, """
-        SELECT id, supplier_sku, cost, stock, status, content_hash, product_id
+        SELECT id, supplier_sku, cost, stock, status, content_hash, product_id, barcode, name
           FROM supplier_products WHERE supplier_id = :s AND supplier_sku IS NOT NULL FOR UPDATE
     """, s=sid)}
     touched_products: set[int] = set()
@@ -125,15 +129,15 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
                   "category": v["category"], "brand": v["brand"], "cost": v["purchase_price"],
                   "sale": v["sale_price"], "cur": v["currency"] or "TRY", "stock": v["stock"], "vat": v["vat_rate"],
                   "desi": v["desi"], "desc": v["description"], "images": json.dumps(v["images"], ensure_ascii=False),
-                  "hash": h}
+                  "hash": h, "color": v.get("color"), "variant": v.get("variant")}
         old = existing.get(sku)
         if old is None:
             sp_id = conn.execute(text("""
                 INSERT INTO supplier_products(supplier_id, supplier_sku, barcode, model_code, name, category, brand,
                     cost, sale_price, currency, stock, vat_rate, desi, description, images, content_hash, status,
-                    is_primary, first_seen_at, last_seen_at, created_at, updated_at)
+                    is_primary, first_seen_at, last_seen_at, created_at, updated_at, color, variant)
                 VALUES (:s, :sku, :barcode, :model, :name, :category, :brand, :cost, :sale, :cur, :stock, :vat, :desi,
-                        :desc, CAST(:images AS JSONB), :hash, 'active', FALSE, NOW(), NOW(), NOW(), NOW())
+                        :desc, CAST(:images AS JSONB), :hash, 'active', FALSE, NOW(), NOW(), NOW(), NOW(), :color, :variant)
                 RETURNING id
             """), params).scalar()
             _change(conn, sid, sp_id, run_id, "new", None, v["purchase_price"])
@@ -152,6 +156,7 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
             UPDATE supplier_products SET barcode = :barcode, model_code = :model, name = :name, category = :category,
                    brand = :brand, cost = :cost, sale_price = :sale, currency = :cur, stock = :stock, vat_rate = :vat,
                    desi = :desi, description = :desc, images = CAST(:images AS JSONB), content_hash = :hash,
+                   color = :color, variant = :variant,
                    status = 'active', missing_since = NULL, last_seen_at = NOW(), updated_at = NOW(),
                    price_changed_at = CASE WHEN :pc THEN NOW() ELSE price_changed_at END,
                    stock_changed_at = CASE WHEN :sc THEN NOW() ELSE stock_changed_at END
@@ -161,6 +166,11 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
         if price_changed:
             stats.price_changed += 1
             _change(conn, sid, sp_id, run_id, "price", old["cost"], v["purchase_price"])
+            if old["cost"] is not None and v["purchase_price"] is not None:
+                alerts.price_change_event(conn, {**old, "name": v["name"] or old["name"]}, Decimal(old["cost"]),
+                                          v["purchase_price"], sup)
+        if old["barcode"] and (old["barcode"] or None) != (v["barcode"] or None):
+            alerts.barcode_change_event(conn, {**old, "name": v["name"] or old["name"]}, old["barcode"], v["barcode"], sup)
         if stock_changed:
             stats.stock_changed += 1
             _change(conn, sid, sp_id, run_id, "stock", old["stock"], v["stock"])

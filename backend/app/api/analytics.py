@@ -12,9 +12,9 @@ from sqlalchemy.engine import Connection
 
 from ..connectors.registry import all_connectors
 from ..db import get_conn, row, rows
-from ..deps import CurrentUser, client_ip, operator, viewer
+from ..deps import CurrentUser, client_ip, finance_editor, operator, viewer
 from ..domain import order_status as S
-from ..services import jobs
+from ..services import app_settings, jobs
 from ..services.audit import log_audit
 from .suppliers import supplier_overview
 from .common import DateRange, Page, not_found, paged
@@ -153,10 +153,36 @@ def dashboard(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn
                              AND o.internal_status <> 'cancelled'
          GROUP BY m.id, m.code, m.name ORDER BY m.id
     """, **rng.params())
+    from .ads import spend_total
+    from ..services.alerts import summary as alert_summary
+    today_rng = DateRange(period="today", date_from=None, date_to=None)
+    most_profitable = rows(conn, """
+        SELECT COALESCE(i.sku, i.barcode, '(SKU yok)') AS sku, MAX(i.product_name) AS product_name,
+               SUM(i.quantity) AS quantity,
+               SUM(i.unit_price * i.quantity - COALESCE(i.unit_cost, 0) * i.quantity - COALESCE(i.commission, 0)
+                   - COALESCE(i.shipping_cost, 0) - COALESCE(i.service_fee, 0) - COALESCE(i.refund_amount, 0)
+                   - COALESCE(i.other_cost, 0)) AS profit
+          FROM order_items i JOIN orders o ON o.id = i.order_id
+         WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status NOT IN ('cancelled', 'returned')
+         GROUP BY 1 HAVING SUM(COALESCE(i.unit_cost, 0)) > 0 ORDER BY profit DESC NULLS LAST LIMIT 5
+    """, **rng.params())
+    threshold = int(app_settings.get(conn, "alerts.critical_stock_threshold", 2))
+    critical_stock = rows(conn, """
+        SELECT p.id, p.sku, p.name, p.stock FROM products p
+         WHERE p.is_active AND COALESCE(p.stock, 0) <= :th
+           AND EXISTS (SELECT 1 FROM marketplace_listings l WHERE l.product_id = p.id
+                        OR (p.barcode IS NOT NULL AND p.barcode <> '' AND l.barcode = p.barcode))
+         ORDER BY p.stock NULLS FIRST, p.name LIMIT 10""", th=threshold)
     return {
         "range": rng.as_dict(),
         "summary": summary(conn, rng),
-        "today": {"orders": today["orders"], "revenue": today["revenue"], "net_profit": today["net_profit"]},
+        "today": {"orders": today["orders"], "revenue": today["revenue"], "net_profit": today["net_profit"],
+                  "ad_spend": spend_total(conn, today_rng)},
+        "ad_spend": spend_total(conn, rng),
+        "alert_summary": alert_summary(conn),
+        "most_profitable": most_profitable,
+        "critical_stock": critical_stock,
+        "critical_stock_threshold": threshold,
         "pending_orders": pending,
         "returns": {"period": period_status.get(S.RETURNED, 0), "open_total": status_counts.get(S.RETURNED, 0)},
         "top_products": top_products,
@@ -210,7 +236,7 @@ class ExpenseIn(BaseModel):
 
 
 @router.post("/api/finance/expenses", status_code=201)
-def create_expense(body: ExpenseIn, request: Request, user: CurrentUser = Depends(operator),
+def create_expense(body: ExpenseIn, request: Request, user: CurrentUser = Depends(finance_editor),
                    conn: Connection = Depends(get_conn)):
     if body.category not in EXPENSE_CATEGORIES:
         raise HTTPException(422, "Geçersiz gider kategorisi")
@@ -230,7 +256,7 @@ def create_expense(body: ExpenseIn, request: Request, user: CurrentUser = Depend
 
 
 @router.delete("/api/finance/expenses/{expense_id}")
-def delete_expense(expense_id: int, request: Request, user: CurrentUser = Depends(operator),
+def delete_expense(expense_id: int, request: Request, user: CurrentUser = Depends(finance_editor),
                    conn: Connection = Depends(get_conn)):
     """Yalnızca panelden manuel girilmiş giderler silinebilir; kayıt audit log'da kalır."""
     e = row(conn, "SELECT * FROM expenses WHERE id = :id", id=expense_id)
@@ -345,3 +371,107 @@ def report_loss_orders(rng: DateRange = Depends(), limit: int = Query(20, le=100
           FROM orders o WHERE o.order_date >= :start AND o.order_date < :end AND o.net_profit < 0
          ORDER BY o.net_profit ASC LIMIT :limit
     """, **rng.params(), limit=limit)
+
+
+# ------------------------------------------------ finans tablosu (gerçek / tahmini)
+BASIS_TR = {"actual": "Gerçek", "estimate": "Tahmini", "entered": "Girilen", "mixed": "Kısmen tahmini"}
+
+
+def statement(conn: Connection, rng: DateRange) -> dict:
+    """Dönem finans tablosu. Her satır kaynağına göre etiketlenir:
+    Gerçek = pazaryerinden gelen tutar / hakediş, Tahmini = TrendHub hesabı, Girilen = kullanıcı kaydı."""
+    from .ads import spend_total
+    t = order_totals(conn, rng)
+    exp = period_expenses(conn, rng)
+    ads = spend_total(conn, rng)
+    n, est = t["orders"], t["estimated_orders"]
+    fee_basis = "actual" if n and not est else "estimate" if est == n else "mixed"
+    gross, refunds = t["revenue"], t["refund"]
+    net_sales = gross - refunds - t["discount"]
+    contribution = net_sales - t["product_cost"] - t["commission"] - t["service_fee"] - t["shipping"]
+    other_exp = sum((e["amount"] for e in exp["by_category"] if e["category"] != "advertising"), Decimal("0"))
+    adv_exp = exp["total"] - other_exp
+    net = contribution - t["advertising"] - ads - adv_exp - t["other"] - other_exp
+    lines = [
+        ("gross_sales", "Brüt satış", gross, "actual"),
+        ("refunds", "İadeler", -refunds, "actual"),
+        ("discounts", "İndirimler", -t["discount"], "actual"),
+        ("net_sales", "Net satış", net_sales, "actual"),
+        ("product_cost", "Ürün maliyeti", -t["product_cost"], "entered"),
+        ("commission", "Komisyon", -t["commission"], fee_basis),
+        ("service_fee", "Hizmet bedeli", -t["service_fee"], fee_basis),
+        ("shipping", "Kargo", -t["shipping"], fee_basis),
+        ("contribution", "Katkı payı", contribution, "estimate" if fee_basis != "actual" else "actual"),
+        ("marketplace_ads", "Pazaryeri reklam kesintisi (sipariş bazlı)", -t["advertising"], fee_basis),
+        ("ad_spend", "Reklam harcaması (Reklamlar)", -ads, "entered"),
+        ("ad_expenses", "Reklam gideri (Giderler)", -adv_exp, "entered"),
+        ("other_order_costs", "Diğer sipariş giderleri", -t["other"], fee_basis),
+        ("other_expenses", "Diğer giderler", -other_exp, "entered"),
+        ("net_profit", "Net kâr (vergi öncesi)", net, "estimate"),
+        ("vat_estimate", "Tahmini KDV", -t["tax_estimate"], "estimate"),
+        ("net_after_vat", "KDV sonrası net", net - t["tax_estimate"], "estimate"),
+    ]
+    warnings = []
+    if ads and (t["advertising"] or adv_exp):
+        warnings.append("Reklam harcaması birden fazla kaynakta var (Reklamlar, Giderler, pazaryeri kesintisi). "
+                        "Aynı harcamayı iki yere girmediğinizden emin olun.")
+    if est:
+        warnings.append(f"{est} siparişte komisyon/kargo/hizmet bedeli tahmini (pazaryeri hakedişi henüz gelmedi).")
+    if not n:
+        warnings.append("Bu dönemde sipariş yok.")
+    return {"range": rng.as_dict(), "orders": n, "estimated_orders": est,
+            "lines": [{"key": k, "label": l, "amount": v.quantize(Decimal("0.01")), "basis": b,
+                       "basis_label": BASIS_TR[b]} for k, l, v, b in lines],
+            "margin": _ratio(net, net_sales), "contribution_margin": _ratio(contribution, net_sales),
+            "warnings": warnings}
+
+
+@router.get("/api/finance/statement")
+def finance_statement(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    return statement(conn, rng)
+
+
+def _csv_response(name: str, header: list[str], data: list[list]) -> StreamingResponse:
+    buf = io.StringIO()
+    buf.write("﻿")  # Excel'de Türkçe karakterler için BOM
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(header)
+    for r in data:
+        w.writerow([_csv_safe(v) for v in r])
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/api/finance/statement.csv")
+def finance_statement_csv(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    s = statement(conn, rng)
+    return _csv_response(f"trendhub-finans-{rng.start_date}-{rng.end_date}.csv", ["Kalem", "Tutar", "Kaynak"],
+                         [[x["label"], x["amount"], x["basis_label"]] for x in s["lines"]])
+
+
+@router.get("/api/finance/expenses.csv")
+def expenses_csv(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    items = rows(conn, """SELECT e.expense_date, e.category, e.description, e.amount, e.sku, m.name AS marketplace_name, e.source
+                            FROM expenses e LEFT JOIN marketplaces m ON m.id = e.marketplace_id
+                           WHERE e.expense_date >= :start_date AND e.expense_date <= :end_date ORDER BY e.expense_date, e.id""",
+                 **rng.params())
+    return _csv_response(f"trendhub-giderler-{rng.start_date}-{rng.end_date}.csv",
+                         ["Tarih", "Kategori", "Açıklama", "Tutar", "SKU", "Pazaryeri", "Kaynak"],
+                         [[i["expense_date"], EXPENSE_CATEGORIES.get(i["category"], i["category"]), i["description"],
+                           i["amount"], i["sku"], i["marketplace_name"], i["source"]] for i in items])
+
+
+@router.get("/api/finance/orders.csv")
+def orders_csv(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    items = rows(conn, """
+        SELECT o.external_order_id, (o.order_date AT TIME ZONE 'Europe/Istanbul') AS order_date_tr, m.name AS marketplace,
+               o.internal_status, o.gross_revenue, o.refund_cost, o.product_cost, o.commission, o.service_fee,
+               o.shipping_cost, o.advertising_cost, o.other_cost, o.net_profit, o.finance_is_estimate
+          FROM orders o LEFT JOIN stores s ON s.id = o.store_id LEFT JOIN marketplaces m ON m.id = s.marketplace_id
+         WHERE o.order_date >= :start AND o.order_date < :end ORDER BY o.order_date, o.id""", **rng.params())
+    return _csv_response(f"trendhub-siparisler-{rng.start_date}-{rng.end_date}.csv",
+                         ["Sipariş no", "Tarih (TR)", "Pazaryeri", "Durum", "Ciro", "İade", "Ürün maliyeti", "Komisyon",
+                          "Hizmet bedeli", "Kargo", "Reklam", "Diğer", "Net kâr", "Tahmini mi"],
+                         [[i["external_order_id"], i["order_date_tr"], i["marketplace"], S.LABELS_TR.get(i["internal_status"], i["internal_status"]), i["gross_revenue"], i["refund_cost"],
+                           i["product_cost"], i["commission"], i["service_fee"], i["shipping_cost"], i["advertising_cost"],
+                           i["other_cost"], i["net_profit"], "Evet" if i["finance_is_estimate"] else "Hayır"] for i in items])

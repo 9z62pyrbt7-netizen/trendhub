@@ -273,3 +273,71 @@ def import_listings_as_products(request: Request, user: CurrentUser = Depends(op
     log_audit(conn, actor=user.username, user_id=user.id, action="listings.imported_as_products",
               entity_type="product", ip=client_ip(request), details={"created": created})
     return {"ok": True, "created": created}
+
+
+@router.get("/api/products/{product_id}/lifecycle")
+def product_lifecycle(product_id: int, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Ürünün tüm yaşam döngüsü: tedarikçi -> eşleştirme -> ilan -> sipariş -> kargo -> iade -> finans -> reklam -> uyarı.
+    Yalnızca okuma; secret içermez."""
+    p = row(conn, """SELECT p.*, s.name AS preferred_supplier_name FROM products p
+                      LEFT JOIN suppliers s ON s.id = p.preferred_supplier_id WHERE p.id = :id""", id=product_id)
+    if p is None:
+        raise not_found("Ürün")
+    suppliers = rows(conn, """
+        SELECT sp.id, sp.supplier_id, s.name AS supplier_name, sp.supplier_sku, sp.barcode, sp.cost, sp.sale_price,
+               sp.stock, sp.vat_rate, sp.desi, sp.color, sp.variant, COALESCE(sp.status, 'active') AS status,
+               sp.last_seen_at, sp.price_changed_at, sp.stock_changed_at, (s.id = :pref) AS is_preferred
+          FROM supplier_products sp JOIN suppliers s ON s.id = sp.supplier_id
+         WHERE sp.product_id = :id ORDER BY (s.id = :pref) DESC, sp.cost NULLS LAST""", id=product_id,
+                     pref=p["preferred_supplier_id"] or 0)
+    drafts = rows(conn, """
+        SELECT d.id, m.code AS marketplace, m.name AS marketplace_name, d.status, d.price, d.stock, d.category_id,
+               d.category_name, d.errors, d.warnings, d.estimated_profit, d.estimated_margin, d.updated_at
+          FROM listing_drafts d JOIN marketplaces m ON m.id = d.marketplace_id WHERE d.product_id = :id ORDER BY m.id""",
+                  id=product_id)
+    listings = rows(conn, """
+        SELECT l.id, m.name AS marketplace_name, l.external_product_id, l.barcode, l.title, l.listed_price, l.listed_stock,
+               l.status, l.last_synced_at
+          FROM marketplace_listings l JOIN stores s ON s.id = l.store_id JOIN marketplaces m ON m.id = s.marketplace_id
+         WHERE l.product_id = :id OR (:bc <> '' AND l.barcode = :bc) ORDER BY m.id""", id=product_id, bc=p["barcode"] or "")
+    orders = rows(conn, """
+        SELECT o.id, o.external_order_id, o.order_date, o.internal_status, m.name AS marketplace_name, i.quantity,
+               i.unit_price, i.unit_cost, i.refund_amount, i.line_status
+          FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN stores s ON s.id = o.store_id
+          LEFT JOIN marketplaces m ON m.id = s.marketplace_id
+         WHERE i.product_id = :id ORDER BY o.order_date DESC LIMIT 50""", id=product_id)
+    shipments = rows(conn, """
+        SELECT sh.id, o.external_order_id, sh.carrier, sh.tracking_number, sh.status, sh.shipped_at, sh.delivered_at
+          FROM shipments sh JOIN orders o ON o.id = sh.order_id
+         WHERE o.id IN (SELECT order_id FROM order_items WHERE product_id = :id) ORDER BY sh.id DESC LIMIT 50""",
+                     id=product_id)
+    returns = [o for o in orders if o["internal_status"] == "returned" or (o["refund_amount"] or 0) > 0]
+    fin = row(conn, """
+        SELECT COALESCE(SUM(i.quantity), 0) AS quantity, COALESCE(SUM(i.unit_price * i.quantity), 0) AS revenue,
+               COALESCE(SUM(COALESCE(i.unit_cost, 0) * i.quantity), 0) AS product_cost,
+               COALESCE(SUM(i.commission), 0) AS commission, COALESCE(SUM(i.shipping_cost), 0) AS shipping,
+               COALESCE(SUM(i.refund_amount), 0) AS refunds,
+               COUNT(*) FILTER (WHERE i.finance_is_estimate) AS estimated_lines
+          FROM order_items i JOIN orders o ON o.id = i.order_id
+         WHERE i.product_id = :id AND o.internal_status <> 'cancelled'""", id=product_id)
+    ads = rows(conn, """
+        SELECT c.id, c.name, a.channel, c.status, COALESCE((SELECT SUM(amount) FROM ad_spend s WHERE s.campaign_id = c.id), 0) AS spend,
+               (SELECT COUNT(*) FROM ad_campaign_products x WHERE x.campaign_id = c.id) AS product_count
+          FROM ad_campaign_products cp JOIN ad_campaigns c ON c.id = cp.campaign_id JOIN ad_accounts a ON a.id = c.account_id
+         WHERE cp.product_id = :id""", id=product_id)
+    alerts = rows(conn, """SELECT id, severity, code, title, description, status, last_detected_at, link FROM alerts
+                            WHERE product_id = :id OR supplier_product_id IN (SELECT id FROM supplier_products WHERE product_id = :id)
+                            ORDER BY status = 'open' DESC, last_detected_at DESC LIMIT 50""", id=product_id)
+    publications = rows(conn, """SELECT lp.id, m.name AS marketplace_name, lp.status, lp.message, lp.created_at
+                                  FROM listing_publications lp JOIN marketplaces m ON m.id = lp.marketplace_id
+                                 WHERE lp.product_id = :id ORDER BY lp.id DESC LIMIT 20""", id=product_id)
+    rev = Decimal(fin["revenue"])
+    profit = rev - Decimal(fin["product_cost"]) - Decimal(fin["commission"]) - Decimal(fin["shipping"]) - Decimal(fin["refunds"])
+    ad_share = sum((Decimal(a["spend"]) / a["product_count"] for a in ads if a["product_count"]), Decimal("0"))
+    return {
+        "product": p, "suppliers": suppliers, "drafts": drafts, "listings": listings, "orders": orders,
+        "shipments": shipments, "returns": returns, "publications": publications, "ads": ads, "alerts": alerts,
+        "stores": sorted({l["marketplace_name"] for l in listings}),
+        "finance": {**fin, "profit": profit.quantize(Decimal("0.01")), "ad_spend_share": ad_share.quantize(Decimal("0.01")),
+                    "profit_after_ads": (profit - ad_share).quantize(Decimal("0.01")), "is_estimate": True},
+    }

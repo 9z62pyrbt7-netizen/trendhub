@@ -149,7 +149,7 @@ class MarketplaceConnector(abc.ABC):
         """Ürün aktarımı ekranı için yayın durumu (salt bilgi)."""
         write = bool(self.settings.connector_write_enabled)
         can = self.listing_publish_supported and write
-        reason = ("Yazma kapalı (CONNECTOR_WRITE_ENABLED=false). " if not write else "") + (
+        reason = ("Pazaryerine yazma sunucu genelinde kapalı. " if not write else "") + (
             "" if self.listing_publish_supported else self.listing_publish_note)
         return {"can_publish": can, "reason": reason.strip()}
 

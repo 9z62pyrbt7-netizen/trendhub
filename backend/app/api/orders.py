@@ -12,7 +12,7 @@ from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, operator, viewer
 from ..domain import order_status as S
 from ..domain.finance import COMPONENT_LABELS_TR, ZERO, estimated_vat_payable, money
-from ..services import app_settings
+from ..services import app_settings, shipping_plan
 from ..services.audit import log_audit
 from ..services.finance_service import recalculate_order
 from .common import TZ, Page, not_found, paged
@@ -74,6 +74,7 @@ def list_orders(page: Page = Depends(), status: str | None = None, marketplace: 
         it["status_label"] = S.LABELS_TR.get(it["internal_status"], it["internal_status"])
         rev = it["gross_revenue"] or 0
         it["margin"] = float(it["net_profit"] / rev) if rev else None
+    shipping_plan.attach(conn, items)
     return paged(items, total, page)
 
 
@@ -125,6 +126,7 @@ def get_order(order_id: int, _: CurrentUser = Depends(viewer), conn: Connection 
     for h in o["history"]:
         h["to_label"] = S.LABELS_TR.get(h["to_status"], h["to_status"])
         h["from_label"] = S.LABELS_TR.get(h["from_status"], h["from_status"]) if h["from_status"] else None
+    shipping_plan.attach(conn, [o])
     o["supplier_orders"] = rows(conn, """
         SELECT so.*, sp.name AS supplier_name FROM supplier_orders so
           LEFT JOIN suppliers sp ON sp.id = so.supplier_id WHERE so.order_id = :id ORDER BY so.id

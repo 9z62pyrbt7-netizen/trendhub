@@ -474,8 +474,32 @@ def supplier_changes(supplier_id: int, kind: str | None = Query(None, pattern=r"
 def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str | None = Query(None, max_length=100),
                   status: str | None = Query(None, pattern=r"^(active|missing)$"),
                   in_catalog: str | None = Query(None, pattern=r"^(yes|no)$"), in_stock: bool = False,
-                  multi_supplier: bool = False, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+                  multi_supplier: bool = False, category: str | None = Query(None, max_length=300),
+                  stock: str | None = Query(None, pattern=r"^(in|out)$"),
+                  price_min: Decimal | None = Query(None, ge=0), price_max: Decimal | None = Query(None, ge=0),
+                  in_store: str | None = Query(None, pattern=r"^(yes|no)$"), problematic: bool = False,
+                  _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
     where, params = ["TRUE"], {}
+    listed = """EXISTS (SELECT 1 FROM marketplace_listings l WHERE sp.product_id IS NOT NULL
+                          AND (l.product_id = sp.product_id OR (sp.barcode IS NOT NULL AND sp.barcode <> '' AND l.barcode = sp.barcode)))"""
+    if category:
+        where.append("sp.category ILIKE :cat"); params["cat"] = f"%{category.strip()}%"
+    if stock == "in":
+        where.append("COALESCE(sp.stock, 0) > 0")
+    elif stock == "out":
+        where.append("COALESCE(sp.stock, 0) <= 0")
+    if price_min is not None:
+        where.append("sp.cost >= :pmin"); params["pmin"] = price_min
+    if price_max is not None:
+        where.append("sp.cost <= :pmax"); params["pmax"] = price_max
+    if in_store == "yes":
+        where.append(listed)
+    elif in_store == "no":
+        where.append("NOT " + listed)
+    if problematic:
+        where.append("""(COALESCE(sp.status, 'active') = 'missing' OR sp.barcode IS NULL OR sp.barcode = ''
+                         OR sp.cost IS NULL OR jsonb_array_length(COALESCE(sp.images, '[]'::jsonb)) = 0
+                         OR EXISTS (SELECT 1 FROM alerts a WHERE a.status = 'open' AND a.supplier_product_id = sp.id))""")
     if supplier_id:
         where.append("sp.supplier_id = :sid"); params["sid"] = supplier_id
     if q:
@@ -495,8 +519,14 @@ def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str
     total = conn.execute(text(f"SELECT COUNT(*) FROM supplier_products sp WHERE {w}"), params).scalar()
     items = rows(conn, f"""
         SELECT sp.id, sp.supplier_id, s.name AS supplier_name, sp.supplier_sku, sp.barcode, sp.model_code, sp.name,
-               sp.brand, sp.category, sp.cost, sp.sale_price, sp.stock, sp.vat_rate, sp.desi,
+               sp.brand, sp.category, sp.cost, sp.sale_price, sp.stock, sp.vat_rate, sp.desi, sp.color, sp.variant,
                COALESCE(sp.status, 'active') AS status, sp.images, sp.last_seen_at, sp.missing_since, sp.product_id,
+               sp.updated_at,
+               (SELECT COALESCE(json_agg(DISTINCT m.name), '[]'::json) FROM marketplace_listings l
+                  JOIN stores st ON st.id = l.store_id JOIN marketplaces m ON m.id = st.marketplace_id
+                 WHERE sp.product_id IS NOT NULL AND (l.product_id = sp.product_id
+                       OR (sp.barcode IS NOT NULL AND sp.barcode <> '' AND l.barcode = sp.barcode))) AS stores,
+               (SELECT COUNT(*) FROM alerts a WHERE a.status = 'open' AND a.supplier_product_id = sp.id) AS open_alerts,
                p.sku AS product_sku, p.preferred_supplier_id,
                (SELECT COUNT(*) FROM supplier_products o WHERE o.product_id = sp.product_id) AS offer_count,
                (SELECT COALESCE(json_agg(m.code ORDER BY m.id), '[]'::json) FROM listing_drafts d
@@ -511,6 +541,10 @@ def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str
         imgs = it.pop("images") or []
         it["image"] = imgs[0] if imgs else None
         it["image_count"] = len(imgs)
+        it["problems"] = [t for c, t in (
+            (it["status"] == "missing", "Kaynakta bulunamadı"), (not it["barcode"], "Barkod yok"),
+            (it["cost"] is None, "Alış fiyatı yok"), (not imgs, "Görsel yok"),
+            ((it["stock"] or 0) <= 0, "Stok yok"), (it["open_alerts"], "Açık uyarı var")) if c]
     summary = row(conn, """
         SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE COALESCE(status,'active') = 'active') AS active,
                COUNT(*) FILTER (WHERE status = 'missing') AS missing,

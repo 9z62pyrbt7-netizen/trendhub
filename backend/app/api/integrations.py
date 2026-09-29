@@ -49,6 +49,7 @@ def integration_state(c: MarketplaceConnector, mp: dict | None) -> dict:
         "last_check_message": mp.get("last_check_message"), "last_sync_at": mp.get("last_sync_at"),
         "write_enabled": bool(get_settings().connector_write_enabled),
         "optional_settings": c.optional_settings(),
+        "source": None,
         "publish": c.publish_status(),
     }
 
@@ -65,6 +66,8 @@ def list_integrations(_: CurrentUser = Depends(viewer), conn: Connection = Depen
     out = []
     for c in all_connectors():
         item = integration_state(c, mps.get(c.code))
+        from ..services.marketplace_credentials import source as _source
+        item["source"] = _source(conn, c.code)
         item["recent_jobs"] = rows(conn, """
             SELECT id, job_type, status, attempts, message, created_at, started_at, finished_at, result
               FROM sync_jobs WHERE marketplace = :m ORDER BY id DESC LIMIT 5
@@ -122,3 +125,108 @@ def trigger_sync(code: str, request: Request, body: SyncIn | None = None, user: 
     log_audit(conn, actor=user.username, user_id=user.id, action="integration.sync_requested",
               entity_type="integration", entity_id=code, ip=client_ip(request), details=body.model_dump())
     return {"queued": True, "job_id": job_id, "message": "İş kuyruğa alındı; worker birkaç saniye içinde işler"}
+
+
+# ------------------------------------------------------------- web'den bağlantı yönetimi
+from ..deps import admin as _admin  # noqa: E402
+from ..services import marketplace_credentials as creds  # noqa: E402
+
+
+class ConnectionIn(BaseModel):
+    # alan adı -> değer. Secret alanlar boş/eksik gönderilirse kayıtlı değer korunur.
+    values: dict[str, str | None] = Field(default_factory=dict)
+
+
+def _friendly(name: str, ok: bool, message: str) -> str:
+    if ok:
+        return f"{name} bağlantısı doğrulandı (salt okunur test)."
+    return f"{name} bağlantısı doğrulanamadı. {message}"
+
+
+def _run_test(code: str, values: dict[str, str]) -> tuple[bool, str]:
+    cls = CONNECTOR_CLASSES[code]
+    connector = cls(creds.settings_with(values, creds.effective_settings()))
+    try:
+        check = connector.test_connection()   # yalnızca GET: pazaryerinde hiçbir şey değişmez
+    except Exception as exc:  # noqa: BLE001 - beklenmeyen hata kullanıcıya teknik ayrıntısız döner
+        return False, _friendly(connector.name, False, f"Beklenmeyen hata ({exc.__class__.__name__}).")
+    return check.ok, _friendly(connector.name, check.ok, check.message)
+
+
+@router.get("/{code}/connection")
+def get_connection(code: str, _: CurrentUser = Depends(_admin), conn: Connection = Depends(get_conn)):
+    _connector_or_404(code)
+    return creds.public_view(conn, code)
+
+
+@router.post("/{code}/connection/test")
+def test_connection_values(code: str, body: ConnectionIn, request: Request, user: CurrentUser = Depends(_admin)):
+    """Formdaki (henüz kaydedilmemiş) bilgilerle salt okunur bağlantı testi. Hiçbir şey kaydedilmez."""
+    _connector_or_404(code)
+    with get_engine().begin() as conn:
+        try:
+            values = creds.merge(conn, code, body.values)
+        except creds.CredentialError as exc:
+            raise HTTPException(422, str(exc)) from None
+    ok, message = _run_test(code, values)
+    with get_engine().begin() as conn:
+        log_audit(conn, actor=user.username, user_id=user.id, action="integration.connection_tested",
+                  entity_type="integration", entity_id=code, ip=client_ip(request), details={"ok": ok})
+    return {"ok": ok, "message": message}
+
+
+@router.put("/{code}/connection")
+def save_connection(code: str, body: ConnectionIn, request: Request, user: CurrentUser = Depends(_admin)):
+    """Bağlantı bilgilerini şifreli kaydeder ve hemen salt okunur test yapar."""
+    c = _connector_or_404(code)
+    with get_engine().begin() as conn:
+        try:
+            values = creds.merge(conn, code, body.values)
+            creds.save(conn, code, values, user.id)
+        except creds.CredentialError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except Exception as exc:  # noqa: BLE001 - ör. APP_SECRET yok
+            from ..suppliers.secrets import SecretStoreError
+            if isinstance(exc, SecretStoreError):
+                raise HTTPException(400, str(exc)) from None
+            raise
+        changed = sorted(k for k, v in (body.values or {}).items() if (v or "").strip())
+        log_audit(conn, actor=user.username, user_id=user.id, action="integration.connection_saved",
+                  entity_type="integration", entity_id=code, ip=client_ip(request),
+                  details={"message": f"{c.name} bağlantı bilgileri güncellendi", "fields_changed": changed})
+    ok, message = _run_test(code, values)
+    with get_engine().begin() as conn:
+        creds.record_test(conn, code, ok, message)
+    return {"ok": ok, "message": message, "saved": True}
+
+
+@router.delete("/{code}/connection")
+def remove_connection(code: str, request: Request, user: CurrentUser = Depends(_admin),
+                      conn: Connection = Depends(get_conn)):
+    """Bağlantıyı kaldırır (secret'lar silinir). Sipariş, ilan ve finans verisi korunur."""
+    c = _connector_or_404(code)
+    creds.remove(conn, code, user.id)
+    log_audit(conn, actor=user.username, user_id=user.id, action="integration.connection_removed",
+              entity_type="integration", entity_id=code, ip=client_ip(request),
+              details={"message": f"{c.name} bağlantısı kaldırıldı"})
+    return {"ok": True}
+
+
+class WritePermissionIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/{code}/write-permission")
+def set_write_permission(code: str, body: WritePermissionIn, request: Request, user: CurrentUser = Depends(_admin),
+                         conn: Connection = Depends(get_conn)):
+    """Mağaza yayın izni. Yayın API'si doğrulanmamış pazaryerinde AÇILAMAZ (409)."""
+    from ..services import publishing
+    c = _connector_or_404(code)
+    try:
+        publishing.set_store_write(conn, code, body.enabled)
+    except publishing.PublishError as exc:
+        raise HTTPException(409, str(exc)) from None
+    log_audit(conn, actor=user.username, user_id=user.id, action="integration.write_permission",
+              entity_type="integration", entity_id=code, ip=client_ip(request),
+              details={"message": f"{c.name} yayın izni {'açıldı' if body.enabled else 'kapatıldı'}"})
+    return {"ok": True, "enabled": body.enabled}
