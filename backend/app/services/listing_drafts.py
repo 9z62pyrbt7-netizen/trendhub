@@ -27,6 +27,13 @@ from .supplier_catalog import load_offers
 DEFAULT_REQUIRED = ["barcode", "brand", "category", "images"]
 
 
+def _vat_rule(conn: Connection) -> dict:
+    from .finance_view import load
+    cfg = load(conn)
+    return {"commission_vat_mode": cfg.commission_vat_mode, "commission_vat_rate": cfg.commission_vat_rate,
+            "expense_vat_mode": cfg.expense_vat_mode, "expense_vat_rate": cfg.expense_vat_rate}
+
+
 def marketplace_rule(conn: Connection, marketplace: dict) -> tuple[PricingRule, dict]:
     r = row(conn, "SELECT * FROM marketplace_rules WHERE marketplace_id = :m", m=marketplace["id"]) or {}
     commission = r.get("commission_rate")
@@ -38,7 +45,8 @@ def marketplace_rule(conn: Connection, marketplace: dict) -> tuple[PricingRule, 
                        fixed_cost=Decimal(str(r.get("fixed_cost", "0"))),
                        shipping_cost=Decimal(str(r.get("shipping_cost", "0"))),
                        min_margin_rate=Decimal(str(r.get("min_margin_rate", "0.05"))),
-                       rounding=r.get("rounding") or "x.90", include_vat=include_vat)
+                       rounding=r.get("rounding") or "x.90", include_vat=include_vat,
+                       **_vat_rule(conn))
     extra = {"stock_buffer": r.get("stock_buffer") or 0, "min_stock": r.get("min_stock") if r.get("min_stock") is not None else 1,
              "max_stock": r.get("max_stock"), "title_max_length": r.get("title_max_length"),
              "required_fields": r.get("required_fields") if r.get("required_fields") is not None else DEFAULT_REQUIRED}

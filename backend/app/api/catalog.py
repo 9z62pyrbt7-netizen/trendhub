@@ -312,14 +312,6 @@ def product_lifecycle(product_id: int, _: CurrentUser = Depends(viewer), conn: C
          WHERE o.id IN (SELECT order_id FROM order_items WHERE product_id = :id) ORDER BY sh.id DESC LIMIT 50""",
                      id=product_id)
     returns = [o for o in orders if o["internal_status"] == "returned" or (o["refund_amount"] or 0) > 0]
-    fin = row(conn, """
-        SELECT COALESCE(SUM(i.quantity), 0) AS quantity, COALESCE(SUM(i.unit_price * i.quantity), 0) AS revenue,
-               COALESCE(SUM(COALESCE(i.unit_cost, 0) * i.quantity), 0) AS product_cost,
-               COALESCE(SUM(i.commission), 0) AS commission, COALESCE(SUM(i.shipping_cost), 0) AS shipping,
-               COALESCE(SUM(i.refund_amount), 0) AS refunds,
-               COUNT(*) FILTER (WHERE i.finance_is_estimate) AS estimated_lines
-          FROM order_items i JOIN orders o ON o.id = i.order_id
-         WHERE i.product_id = :id AND o.internal_status <> 'cancelled'""", id=product_id)
     ads = rows(conn, """
         SELECT c.id, c.name, a.channel, c.status, COALESCE((SELECT SUM(amount) FROM ad_spend s WHERE s.campaign_id = c.id), 0) AS spend,
                (SELECT COUNT(*) FROM ad_campaign_products x WHERE x.campaign_id = c.id) AS product_count
@@ -331,13 +323,28 @@ def product_lifecycle(product_id: int, _: CurrentUser = Depends(viewer), conn: C
     publications = rows(conn, """SELECT lp.id, m.name AS marketplace_name, lp.status, lp.message, lp.created_at
                                   FROM listing_publications lp JOIN marketplaces m ON m.id = lp.marketplace_id
                                  WHERE lp.product_id = :id ORDER BY lp.id DESC LIMIT 20""", id=product_id)
-    rev = Decimal(fin["revenue"])
-    profit = rev - Decimal(fin["product_cost"]) - Decimal(fin["commission"]) - Decimal(fin["shipping"]) - Decimal(fin["refunds"])
+    # Ürün finansı: sipariş ekranıyla aynı tek kaynak (finance_view)
+    from ..services import finance_view
+    cfg = finance_view.load(conn)
+    fin = row(conn, f"""
+        SELECT COALESCE(SUM(i.quantity), 0) AS quantity, COALESCE(SUM(fi.revenue), 0) AS revenue,
+               COALESCE(SUM(fi.refund), 0) AS refunds, COALESCE(SUM(fi.net_sales), 0) AS net_sales,
+               COALESCE(SUM(fi.product_cost), 0) AS product_cost, COALESCE(SUM(fi.commission), 0) AS commission,
+               COALESCE(SUM(fi.shipping), 0) AS shipping, COALESCE(SUM(fi.profit_before_vat), 0) AS profit_before_vat,
+               COALESCE(SUM(fi.vat_estimate), 0) AS vat_estimate, COALESCE(SUM(fi.profit_after_vat), 0) AS profit_after_vat,
+               COUNT(*) FILTER (WHERE i.finance_is_estimate) AS estimated_lines
+          FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
+          CROSS JOIN LATERAL (SELECT {finance_view.item_columns(cfg)}) fi
+         WHERE i.product_id = :id AND o.internal_status <> 'cancelled'""", id=product_id, **cfg.params())
     ad_share = sum((Decimal(a["spend"]) / a["product_count"] for a in ads if a["product_count"]), Decimal("0"))
+    fin = finance_view.decorate(dict(fin))
+    fin["profit"] = fin["profit_after_vat"]
+    fin["ad_spend_share"] = ad_share.quantize(Decimal("0.01"))
+    fin["profit_after_ads"] = (fin["profit_after_vat"] - ad_share).quantize(Decimal("0.01"))
+    fin["is_estimate"] = True
     return {
         "product": p, "suppliers": suppliers, "drafts": drafts, "listings": listings, "orders": orders,
         "shipments": shipments, "returns": returns, "publications": publications, "ads": ads, "alerts": alerts,
         "stores": sorted({l["marketplace_name"] for l in listings}),
-        "finance": {**fin, "profit": profit.quantize(Decimal("0.01")), "ad_spend_share": ad_share.quantize(Decimal("0.01")),
-                    "profit_after_ads": (profit - ad_share).quantize(Decimal("0.01")), "is_estimate": True},
+        "finance": fin,
     }

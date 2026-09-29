@@ -29,6 +29,16 @@ class PricingRule:
     min_margin_rate: Decimal = Decimal("0.05")
     rounding: str = "x.90"
     include_vat: bool = True
+    # Finans ayarlarıyla aynı KDV modeli (varsayılan "unset": önceki davranış, komisyon/gider KDV'si hesaba girmez)
+    commission_vat_mode: str = "unset"
+    commission_vat_rate: Decimal = Decimal("20")
+    expense_vat_mode: str = "unset"
+    expense_vat_rate: Decimal = Decimal("20")
+
+    @property
+    def commission_extra_rate(self) -> Decimal:
+        """Oran KDV hariçse komisyona eklenen KDV katsayısı."""
+        return self.commission_vat_rate / 100 if self.commission_vat_mode == "excluded" else ZERO
 
 
 def round_price(p: Decimal, mode: str) -> Decimal:
@@ -47,7 +57,7 @@ def round_price(p: Decimal, mode: str) -> Decimal:
 
 def suggest_price(cost: Decimal, rule: PricingRule) -> Decimal:
     base = cost * (1 + rule.markup_rate) + rule.shipping_cost + rule.fixed_cost
-    divisor = 1 - rule.commission_rate
+    divisor = 1 - rule.commission_rate * (1 + rule.commission_extra_rate)
     if divisor <= 0:
         raise ValueError("Komisyon oranı %100'den küçük olmalı")
     return round_price(base / divisor, rule.rounding)
@@ -63,14 +73,32 @@ class ProfitEstimate:
     vat: Decimal
     profit: Decimal
     margin: Decimal | None
+    commission_vat: Decimal = ZERO     # komisyon KDV'si (yalnızca KDV durumu ayarlıysa)
+    markup: Decimal | None = None      # kâr ÷ maliyet (marjdan ayrı kavram)
 
 
 def estimate_profit(price: Decimal, cost: Decimal, rule: PricingRule, vat_rate: Decimal) -> ProfitEstimate:
+    """Tahmini (KDV sonrası) kâr. Formül finance_view ile aynıdır:
+    kâr = fiyat − komisyon (+KDV'si, oran KDV hariçse) − kargo − sabit − maliyet − tahmini KDV
+    tahmini KDV = satış KDV'si − maliyet KDV'si − komisyon KDV'si* − gider KDV'si*   (*ayarlıysa)
+    marj = kâr ÷ fiyat (net satış), markup = kâr ÷ maliyet."""
     commission = (price * rule.commission_rate).quantize(CENT, rounding=ROUND_HALF_UP)
-    vat = estimated_vat_payable(price, cost, ZERO, vat_rate) if rule.include_vat else ZERO
-    profit = (price - commission - rule.shipping_cost - rule.fixed_cost - cost - vat).quantize(CENT)
+    extra = (commission * rule.commission_extra_rate).quantize(CENT, rounding=ROUND_HALF_UP)
+    if rule.commission_vat_mode == "excluded":
+        commission_vat = extra
+    elif rule.commission_vat_mode == "included":
+        commission_vat = (commission * rule.commission_vat_rate / (100 + rule.commission_vat_rate)).quantize(CENT)
+    else:
+        commission_vat = ZERO
+    expenses = rule.shipping_cost + rule.fixed_cost
+    expense_vat = ((expenses * rule.expense_vat_rate / (100 + rule.expense_vat_rate)).quantize(CENT)
+                   if rule.expense_vat_mode == "included" else ZERO)
+    vat = (estimated_vat_payable(price, cost, ZERO, vat_rate) - commission_vat - expense_vat) if rule.include_vat else ZERO
+    profit = (price - commission - extra - rule.shipping_cost - rule.fixed_cost - cost - vat).quantize(CENT)
     margin = (profit / price).quantize(Decimal("0.0001")) if price > 0 else None
-    return ProfitEstimate(price, commission, rule.shipping_cost, rule.fixed_cost, cost, vat, profit, margin)
+    markup = (profit / cost).quantize(Decimal("0.0001")) if cost and cost > 0 else None
+    return ProfitEstimate(price, commission + extra, rule.shipping_cost, rule.fixed_cost, cost, vat, profit, margin,
+                          commission_vat, markup)
 
 
 FIELD_LABELS = {"barcode": "Barkod", "brand": "Marka", "category": "Pazaryeri kategorisi", "images": "Görsel",

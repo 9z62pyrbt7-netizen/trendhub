@@ -132,6 +132,18 @@ document.addEventListener('keydown', (e) => {
 const statusBadge = (code, label) => html`<span class="badge st-${code}">${label || statusLabel(code)}</span>`;
 const statusLabel = (code) => state.meta?.statuses.find((s) => s.code === code)?.label || code;
 const empty = (title, text) => html`<div class="empty"><b>${title}</b>${text}</div>`;
+// KDV hesabında eksik bilgi varsa (komisyon/gider KDV durumu belirtilmemiş, kalemsiz sipariş) açıkça göster
+const vatNote = (v) => {
+  if (!v) return '';
+  const complete = v.complete ?? v.vat_complete;
+  if (complete) return '';
+  const notes = (v.notes || []).join(' ');
+  return html` <span class="badge plain tone-warn est" title="${notes}">KDV bilgisi eksik</span>`;
+};
+// Kâr hücresi: KDV biliniyorsa tahmini KDV sonrası kâr; değilse KDV öncesi kâr açıkça etiketli
+const profitCell = (o) => (o.vat_known === false || o.profit_after_vat === null || o.profit_after_vat === undefined
+  ? html`${money(o.net_profit)} <span class="badge plain tone-warn est" title="KDV hesaplanamadı (kalem bilgisi yok)">KDV öncesi</span>`
+  : html`${money(o.profit_after_vat)}${estimateBadge(true)}`);
 const estimateBadge = (flag) => (flag ? html` <span class="badge plain tone-warn est" title="Komisyon/kargo/hizmet bedeli veya ürün maliyeti tahmini ya da eksik">TAHMİNİ</span>` : '');
 
 function pager(p, onGo) {
@@ -358,14 +370,14 @@ PAGES.dashboard = {
         <div class="grid grid-4">
           ${kpi('Bugünkü satış', money0(d.today.revenue), `${num(d.today.orders)} sipariş`)}
           ${kpi('Toplam ciro', money0(t.revenue), `${date(d.range.from)} – ${date(d.range.to)} · iptaller hariç`)}
-          ${kpi('Tahmini net kâr', money0(s.net_profit_after_expenses), `Marj ${pct(s.margin_after_expenses)} · KDV sonrası ${money0(s.net_profit_after_tax)}`, signClass(s.net_profit_after_expenses), TAHMINI)}
+          ${kpi('Tahmini KDV sonrası kâr', money0(s.net_profit_after_tax), html`Net marj ${pct(s.margin_after_tax)} · KDV öncesi ${money0(s.net_profit_after_expenses)}${vatNote(s.vat)}`, signClass(s.net_profit_after_tax), TAHMINI)}
           ${kpi('Sipariş sayısı', num(t.orders), 'Seçili dönem, iptaller hariç')}
         </div>
         <div class="grid grid-4 mt">
           ${kpi('Bekleyen sipariş', num(d.pending_orders), 'Yeni · hazırlanıyor · tedarikçide · kargo bekliyor', d.pending_orders ? 'warn-text' : '')}
           ${kpi('İade', num(d.returns.period), `Dönem içi · toplam ${num(d.returns.open_total)}`, d.returns.period ? 'neg' : '')}
           ${kpi('Ortalama sipariş tutarı', t.average_order_value === null ? '—' : money(t.average_order_value), 'Ciro / sipariş')}
-          ${kpi('Tahmini KDV', money0(s.tax_estimate), 'Satış KDV − maliyet KDV', '', TAHMINI)}
+          ${kpi('Tahmini KDV', money0(s.tax_estimate), 'Satış KDV − maliyet, komisyon ve gider KDV\'si', '', TAHMINI)}
         </div>
         <div class="grid grid-4 mt">
           ${kpi('Bugünkü reklam harcaması', money0(d.today.ad_spend), html`<a href="#/ads">Reklamlar →</a>`)}
@@ -401,8 +413,8 @@ PAGES.dashboard = {
               ${statusBadge(st.code, st.label)}<b>${num(st.count)}</b><span class="muted small">(${num(st.period_count)})</span></button>`)}</div></div>
         <div class="grid grid-main mt">
           <div class="card"><div class="card-head"><h2>Son siparişler</h2><a href="#/orders" class="small">Tümü →</a></div>
-            ${d.recent_orders.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Durum</th><th class="r">Ciro</th><th class="r">Net kâr</th></tr></thead><tbody>
-            ${d.recent_orders.map((o) => html`<tr class="click" data-order="${o.id}"><td>${o.external_order_id}</td><td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td>${statusBadge(o.internal_status, o.status_label)}</td><td class="r num">${money(o.gross_revenue)}</td><td class="r num ${signClass(o.net_profit)}">${money(o.net_profit)}</td></tr>`)}
+            ${d.recent_orders.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Durum</th><th class="r">Ciro</th><th class="r" title="Tahmini KDV sonrası kâr">KDV sonrası kâr</th></tr></thead><tbody>
+            ${d.recent_orders.map((o) => html`<tr class="click" data-order="${o.id}"><td>${o.external_order_id}</td><td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td>${statusBadge(o.internal_status, o.status_label)}</td><td class="r num">${money(o.gross_revenue)}</td><td class="r num ${signClass(o.net_profit_after_tax ?? o.net_profit)}">${profitCell({ ...o, profit_after_vat: o.net_profit_after_tax, vat_known: o.net_profit_after_tax !== null })}</td></tr>`)}
             </tbody></table></div>` : empty('Henüz sipariş yok', 'Pazaryeri senkronizasyonu çalıştığında siparişler burada listelenir.')}</div>
           <div class="card"><div class="card-head"><h2>Uyarılar</h2></div><div class="stack">
             ${alertRow(d.alerts.needs_review, 'inceleme bekleyen sipariş', '#/orders?status=needs_review', 'bad')}
@@ -517,11 +529,11 @@ PAGES.orders = {
     const load = async (page) => {
       const d = await api('/api/orders', { query: { ...f, loss_only: f.loss_only ? 'true' : '', page, page_size: 25 } });
       $('#order-list').innerHTML = renderVal(d.items.length ? html`<div class="table-wrap"><table><thead><tr>
-        <th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Müşteri</th><th>Durum</th><th>Kargo Planı</th><th class="r">Adet</th><th class="r">Ciro</th><th class="r">Net kâr</th><th class="r">Marj</th></tr></thead><tbody>
+        <th>Sipariş</th><th>Pazaryeri</th><th>Tarih</th><th>Müşteri</th><th>Durum</th><th>Kargo Planı</th><th class="r">Adet</th><th class="r">Ciro</th><th class="r" title="Tahmini KDV sonrası kâr">KDV sonrası kâr</th><th class="r" title="Net marj = kâr ÷ net satış">Net marj</th></tr></thead><tbody>
         ${d.items.map((o) => html`<tr class="click" data-order="${o.id}"><td><b>${o.external_order_id}</b>${o.review_reason ? html`<span class="ellipsis small neg" title="${o.review_reason}">${o.review_reason}</span>` : ''}</td>
           <td>${o.marketplace_name || '—'}</td><td>${dateTime(o.order_date)}</td><td><span class="ellipsis">${o.customer_name || '—'}</span><span class="muted small">${o.customer_city || ''}</span></td>
           <td>${statusBadge(o.internal_status, o.status_label)}</td><td>${shipPlanBadge(o.shipping_plan)}</td><td class="r num">${num(o.item_count)}</td><td class="r num">${money(o.gross_revenue)}</td>
-          <td class="r num ${signClass(o.net_profit)}">${money(o.net_profit)}${estimateBadge(o.finance_is_estimate)}</td><td class="r num">${pct(o.margin)}</td></tr>`)}
+          <td class="r num ${signClass(o.profit_after_vat ?? o.net_profit)}">${profitCell(o)}</td><td class="r num">${pct(o.margin_after_vat ?? o.margin_before_vat)}</td></tr>`)}
         </tbody></table></div>${pager(d, load)}` : empty('Sipariş bulunamadı', 'Filtreleri değiştirin veya pazaryeri senkronizasyonunu bekleyin.'));
       $$('#order-list [data-order]').forEach((r) => r.addEventListener('click', () => showOrder(r.dataset.order)));
     };
@@ -562,12 +574,16 @@ async function showOrder(id) {
         <dt>Sipariş tarihi</dt><dd>${dateTime(o.order_date)}</dd><dt>Müşteri</dt><dd>${o.customer_name || '—'} ${o.customer_city ? `(${o.customer_city})` : ''}</dd>
         <dt>Mağaza</dt><dd>${o.store_name || '—'}</dd><dt>Son senkron</dt><dd>${dateTime(o.last_synced_at)}</dd><dt>Kaynak</dt><dd>${o.source || '—'}</dd></dl></div>
       <div class="card"><h3>Kârlılık ${TAHMINI}</h3><div class="mt">${profitBars({ ...t, discount: o.discount }, { net: o.net_profit, tax: o.tax_estimate, netAfterTax: o.net_profit_after_tax })}</div>
-        <p class="small muted">Marj: <b>${pct(o.margin)}</b></p></div>
+        <dl class="kv small mt"><dt>Net satış</dt><dd>${money(o.net_sales)}</dd><dt>KDV öncesi kâr</dt><dd>${money(o.profit_before_vat)}</dd>
+          <dt>Tahmini KDV</dt><dd>${o.vat_known ? money(o.vat_estimate) : 'hesaplanamadı'}</dd><dt><b>Tahmini KDV sonrası kâr</b></dt><dd><b>${o.vat_known ? money(o.profit_after_vat) : '—'}</b></dd>
+          <dt title="kâr ÷ net satış">Net marj</dt><dd>${pct(o.margin_after_vat ?? o.margin_before_vat)}</dd>
+          <dt title="kâr ÷ ürün maliyeti">Maliyet üzeri kâr (Markup)</dt><dd>${pct(o.markup_after_vat ?? o.markup_before_vat)}</dd></dl>
+        ${vatNote(o.finance_config)}${o.discount && Number(o.discount) ? html`<p class="small muted">Satıcı indirimi ${money(o.discount)} ciroya yansımıştır; ayrıca düşülmez.</p>` : ''}</div>
     </div>
-    <div class="card mt"><h3>Ürünler</h3><div class="table-wrap mt"><table><thead><tr><th>SKU / Ürün</th><th class="r">Adet</th><th class="r">Birim fiyat</th><th class="r">Birim maliyet</th><th class="r">Komisyon</th><th class="r">Kargo</th><th class="r">Net</th><th class="r">Marj</th></tr></thead><tbody>
+    <div class="card mt"><h3>Ürünler</h3><div class="table-wrap mt"><table><thead><tr><th>SKU / Ürün</th><th class="r">Adet</th><th class="r">Birim fiyat</th><th class="r">Birim maliyet</th><th class="r">Komisyon</th><th class="r">Kargo</th><th class="r" title="Tahmini KDV sonrası">KDV sonrası kâr</th><th class="r">Net marj</th></tr></thead><tbody>
       ${o.items.map((i) => html`<tr><td><b>${i.sku || i.barcode || '—'}</b><span class="ellipsis small muted">${i.product_name}</span></td><td class="r num">${num(i.quantity)}</td>
         <td class="r num">${money(i.unit_price)}</td><td class="r num">${Number(i.unit_cost) ? money(i.unit_cost) : html`<span class="badge plain tone-warn">Eksik</span>`}</td>
-        <td class="r num">${money(i.commission)}</td><td class="r num">${money(i.shipping_cost)}</td><td class="r num ${signClass(i.net_profit)}">${money(i.net_profit)}</td><td class="r num">${pct(i.margin)}</td></tr>`)}
+        <td class="r num">${money(i.commission)}</td><td class="r num">${money(i.shipping_cost)}</td><td class="r num ${signClass(i.profit_after_vat)}">${money(i.profit_after_vat)}</td><td class="r num">${pct(i.margin_after_vat)}</td></tr>`)}
       </tbody></table></div>${o.items.length ? '' : html`<p class="muted small">Bu kayıt eski sistemden geldi; kalem bilgisi yok. Tutarlar olduğu gibi korunuyor.</p>`}</div>
     <div class="grid grid-2 mt">
       <div class="card"><h3>Kargo</h3>${o.shipments.length ? html`<ul class="timeline mt">${o.shipments.map((s) => html`<li><b>${s.carrier || 'Kargo firması yok'}</b> · ${s.tracking_url ? html`<a href="${s.tracking_url}" target="_blank" rel="noopener noreferrer">${s.tracking_number || 'Takip'}</a>` : (s.tracking_number || '—')}<br><span class="muted small">${[`Paket ${s.external_package_id || s.id}`, s.marketplace_status || s.status, `Ücret: ${s.cost === null ? 'bilinmiyor' : money(s.cost)}`].filter(Boolean).join(' · ')}</span></li>`)}</ul>` : html`<p class="muted small mt">Sevkiyat kaydı yok.</p>`}</div>
@@ -1304,7 +1320,7 @@ PAGES.transfer = {
       const rmap = Object.fromEntries(rules.items.map((r) => [r.code, r]));
       box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Hedef pazaryerleri</h2><p>${num(T.selected.size)} ürün seçildi. Her pazaryeri kendi fiyat, komisyon, kategori ve stok kuralıyla ayrı değerlendirilir.</p></div></div>
         <div class="grid grid-3">${mps.map((m) => { const r = rmap[m.code] || {}; return html`<label class="card mp-pick"><span class="row nowrap"><input type="checkbox" name="mp" value="${m.code}" ${raw(T.marketplaces.has(m.code) ? 'checked' : '')}><b>${m.name}</b></span>
-          <span class="small muted">Komisyon ${pct(r.effective_commission_rate)} · kâr oranı ${pct(r.markup_rate)} · min. marj ${pct(r.min_margin_rate)}</span>
+          <span class="small muted">Komisyon ${pct(r.effective_commission_rate)} · maliyet üzeri kâr (markup) ${pct(r.markup_rate)} · min. net marj ${pct(r.min_margin_rate)}</span>
           <span class="small muted">Zorunlu: ${(r.required_fields || []).join(', ') || '—'}</span>
           <span class="small"><span class="dot ${r.connector?.connected ? 'good' : ''}"></span> ${r.connector?.exists ? (r.connector.connected ? 'API bağlı (salt okunur)' : 'Bağlı değil') : 'Connector yok'} · otomatik yayın kapalı</span></label>`; })}</div>
         <p class="small muted mt">Seçilen havuz ürünleri önce kataloğa alınır: barkodu katalogda olan ürün MEVCUT ürüne bağlanır (aynı ürün iki tedarikçide olsa bile tek katalog ürünü ve pazaryeri başına tek ilan).</p>
@@ -1461,7 +1477,7 @@ async function showDraftPreview(id, onChange) {
       <tr><td>− Sabit gider</td><td class="r num">${money(pr.fixed)}</td></tr>
       <tr><td>− Ürün maliyeti (${pl.supplier || '—'})</td><td class="r num">${money(pr.cost)}</td></tr>
       <tr><td>− Tahmini KDV farkı</td><td class="r num">${money(pr.vat)}</td></tr>
-      <tr><td><b>Tahmini kâr</b></td><td class="r num ${signClass(pr.profit)}"><b>${money(pr.profit)}</b> <span class="muted small">marj ${pct(pr.margin)} · min. ${pct(pr.min_margin_rate)}</span></td></tr>
+      <tr><td><b>Tahmini kâr</b></td><td class="r num ${signClass(pr.profit)}"><b>${money(pr.profit)}</b> <span class="muted small">net marj ${pct(pr.margin)} · markup ${pct(pr.markup)} · min. marj ${pct(pr.min_margin_rate)}</span></td></tr>
     </tbody></table></div>` : html`<p class="muted small">Maliyet veya fiyat olmadığı için hesaplanamadı.</p>`}
     <h3 class="mt">Kategori ve özellikler</h3>
     ${can('operator') ? html`<form class="stack" id="pv-form">
@@ -1529,10 +1545,10 @@ async function renderRules(box) {
       <p class="small muted" style="margin-top:0">${r.connector.reason}</p>
       <div class="form-grid">
         <label>Komisyon oranı<input name="commission_rate" type="number" step="0.001" min="0" max="0.99" value="${r.commission_rate ?? ''}" placeholder="${r.effective_commission_rate} (Ayarlar)"></label>
-        <label>Kâr oranı<input name="markup_rate" type="number" step="0.01" min="0" value="${r.markup_rate}"></label>
+        <label title="Fiyat hesaplanırken maliyetin üzerine eklenen oran (markup); marjla aynı şey değildir">Maliyet üzeri kâr (Markup)<input name="markup_rate" type="number" step="0.01" min="0" value="${r.markup_rate}"></label>
         <label>Kargo (₺)<input name="shipping_cost" type="number" step="0.01" min="0" value="${r.shipping_cost}"></label>
         <label>Sabit gider (₺)<input name="fixed_cost" type="number" step="0.01" min="0" value="${r.fixed_cost}"></label>
-        <label>Minimum marj<input name="min_margin_rate" type="number" step="0.01" min="-1" max="1" value="${r.min_margin_rate}"></label>
+        <label title="Tahmini KDV sonrası kâr ÷ satış fiyatı">Minimum net marj<input name="min_margin_rate" type="number" step="0.01" min="-1" max="1" value="${r.min_margin_rate}"></label>
         <label>Yuvarlama<select name="rounding">${[['x.90', 'x,90'], ['x.99', 'x,99'], ['integer', 'Tam sayı'], ['none', 'Yok']].map(([v, l]) => html`<option value="${v}" ${raw(v === r.rounding ? 'selected' : '')}>${l}</option>`)}</select></label>
         <label>Stok güvenlik payı<input name="stock_buffer" type="number" min="0" value="${r.stock_buffer}"></label>
         <label>Minimum stok<input name="min_stock" type="number" min="0" value="${r.min_stock}"></label>
@@ -1541,7 +1557,7 @@ async function renderRules(box) {
         <fieldset class="full fieldset"><legend>Zorunlu alanlar</legend><div class="row">${rules.requirable_fields.map((fld) => html`<label class="check"><input type="checkbox" name="rf" value="${fld}" ${raw((r.required_fields || []).includes(fld) ? 'checked' : '')}>${{ barcode: 'Barkod', brand: 'Marka', category: 'Kategori', images: 'Görsel', description: 'Açıklama', model_code: 'Model kodu', desi: 'Desi', vat_rate: 'KDV' }[fld] || fld}</label>`)}</div></fieldset>
       </div>
       ${can('admin') ? html`<p class="form-error"></p><div class="row mt"><span class="spacer"></span><button class="btn btn-primary btn-sm" type="submit">Kaydet</button></div>` : ''}</form>`)}</div>
-    <p class="small muted">Fiyat = (maliyet × (1 + kâr oranı) + kargo + sabit gider) ÷ (1 − komisyon), sonra yuvarlanır. Değerler varsayılandır; pazaryerinin güncel komisyon ve zorunlu alan kurallarına göre düzenleyin. Tahmini kâr TAHMİNİDİR.</p>
+    <p class="small muted">Fiyat = (maliyet × (1 + markup) + kargo + sabit gider) ÷ (1 − komisyon), sonra yuvarlanır. Markup maliyete göre, net marj satış fiyatına göre hesaplanır. Değerler varsayılandır; pazaryerinin güncel komisyon ve zorunlu alan kurallarına göre düzenleyin. Tahmini kâr TAHMİNİDİR.</p>
     <div class="card mt"><div class="card-head"><div><h2>Kategori eşleştirme</h2><p>Kaynak (tedarikçi/katalog) kategorisini pazaryeri kategori ID'sine bağlayın.</p></div>
       <select id="cat-mp" aria-label="Pazaryeri">${mps.map((m) => html`<option value="${m.code}">${m.name}</option>`)}</select></div><div id="cat-box"></div></div>`);
   $$('[data-rule]', box).forEach((form) => form.addEventListener('submit', (e) => {
@@ -1584,23 +1600,24 @@ PAGES.finance = {
       const t = f.orders;
       const qs = periodQs();
       const BASIS_TONE = { actual: 'tone-good', estimate: 'tone-warn', entered: 'tone-info', mixed: 'tone-warn' };
-      const TOTALS = new Set(['net_sales', 'contribution', 'net_profit', 'net_after_vat']);
+      const TOTALS = new Set(['net_sales', 'contribution', 'net_after_vat']);
       view().innerHTML = renderVal(html`
         <div class="card" style="margin-bottom:16px"><div class="card-head"><div><h2>Finans tablosu</h2><p>${date(st.range.from)} – ${date(st.range.to)} · ${num(st.orders)} sipariş · <b>Gerçek</b> = pazaryeri verisi, <b>Tahmini</b> = TrendHub hesabı, <b>Girilen</b> = kullanıcı kaydı</p></div>
           <div class="row"><a class="btn btn-sm" href="/api/finance/statement.csv?${qs}" download>Tablo (CSV)</a><a class="btn btn-sm" href="/api/finance/orders.csv?${qs}" download>Siparişler (CSV)</a><a class="btn btn-sm" href="/api/finance/expenses.csv?${qs}" download>Giderler (CSV)</a><a class="btn btn-sm" href="/api/ads/spend.csv?${qs}" download>Reklam (CSV)</a></div></div>
-          <div class="table-wrap"><table class="statement"><tbody>${st.lines.map((l) => html`<tr class="${TOTALS.has(l.key) ? 'total' : ''}"><td>${l.label}</td><td><span class="badge plain ${BASIS_TONE[l.basis]}">${l.basis_label}</span></td><td class="r num ${signClass(l.amount)}">${money(l.amount)}</td></tr>`)}
-            <tr class="total"><td>Net marj</td><td></td><td class="r num">${pct(st.margin)}</td></tr></tbody></table></div>
+          <div class="table-wrap"><table class="statement"><tbody>${st.lines.map((l) => html`<tr class="${TOTALS.has(l.key) ? 'total' : ''} ${l.in_total === false ? 'info-line' : ''}"><td>${l.label}</td><td><span class="badge plain ${BASIS_TONE[l.basis]}">${l.basis_label}</span></td><td class="r num ${signClass(l.amount)}">${money(l.amount)}</td></tr>`)}
+            <tr class="total"><td title="Tahmini KDV sonrası kâr ÷ net satış">Net marj (KDV sonrası)</td><td></td><td class="r num">${pct(st.margin_after_tax)}</td></tr>
+            <tr><td title="Tahmini KDV sonrası kâr ÷ ürün maliyeti">Maliyet üzeri kâr (Markup)</td><td></td><td class="r num">${pct(st.markup_after_tax)}</td></tr></tbody></table></div>
           ${st.warnings.map((w) => html`<p class="small warn-text">• ${w}</p>`)}</div>
-        <div class="notice warn" style="margin-bottom:16px"><b>TAHMİNİ:</b> Pazaryeri hakediş (settlement) verisi henüz bağlı değil. Komisyon ve hizmet bedeli Ayarlar'daki oranlarla, KDV satış − maliyet KDV'si olarak tahmin edilir. Gerçek tutarları sipariş detayından “Gerçek gider gir” ile ekleyebilirsiniz.${t.estimated_orders ? html` Bu dönemde <b>${num(t.estimated_orders)}</b> siparişte tahmini veya eksik değer var.` : ''}</div>
+        <div class="notice warn" style="margin-bottom:16px"><b>TAHMİNİ:</b> Pazaryeri hakediş (settlement) verisi henüz bağlı değil. Komisyon ve hizmet bedeli Ayarlar'daki oranlarla tahmin edilir. KDV = satış KDV'si − maliyet KDV'si − (Ayarlar'da belirtildiyse) komisyon ve gider KDV'si. Satıcı indirimi ciroya zaten yansımıştır, tekrar düşülmez; marjların paydası net satıştır (ciro − iade). Gerçek tutarları sipariş detayından “Gerçek gider gir” ile ekleyebilirsiniz.${t.estimated_orders ? html` Bu dönemde <b>${num(t.estimated_orders)}</b> siparişte tahmini veya eksik değer var.` : ''}</div>
         <div class="grid grid-4">
           ${kpi('Ciro', money0(t.revenue), `${num(t.orders)} sipariş · ort. ${t.average_order_value === null ? '—' : money(t.average_order_value)}`)}
           ${kpi('Sipariş giderleri', money0(t.total_cost), 'Maliyet + komisyon + kargo + hizmet + reklam + iade + diğer', '', TAHMINI)}
           ${kpi('Dönem giderleri', money0(f.expenses.total), 'Siparişe bağlı olmayan')}
-          ${kpi('Net kâr', money0(f.net_profit_after_expenses), `Marj ${pct(f.margin_after_expenses)}`, signClass(f.net_profit_after_expenses), TAHMINI)}
+          ${kpi('Tahmini KDV sonrası kâr', money0(f.net_profit_after_tax), html`Net marj ${pct(f.margin_after_tax)} · Markup ${pct(f.markup_after_tax)}${vatNote(f.vat)}`, signClass(f.net_profit_after_tax), TAHMINI)}
         </div>
         <div class="grid grid-4 mt">
-          ${kpi('Tahmini KDV', money0(f.tax_estimate), 'Satış KDV − maliyet KDV (KDV dahil tutarlardan)', '', TAHMINI)}
-          ${kpi('Net kâr (KDV sonrası)', money0(f.net_profit_after_tax), `Marj ${pct(f.margin_after_tax)}`, signClass(f.net_profit_after_tax), TAHMINI)}
+          ${kpi('Tahmini KDV', money0(f.tax_estimate), 'Satış KDV − maliyet, komisyon ve gider KDV\'si', '', TAHMINI)}
+          ${kpi('KDV öncesi kâr', money0(f.net_profit_after_expenses), `Net satış ${money0(f.net_sales)} · marj ${pct(f.margin_after_expenses)}`, signClass(f.net_profit_after_expenses), TAHMINI)}
           ${kpi('Satıcı indirimi', money0(t.discount), 'Ciroya yansımış; ayrıca düşülmez')}
           ${kpi('İade tutarı', money0(t.refund), 'İade edilen siparişlerin cirosu')}
         </div>
@@ -1609,7 +1626,7 @@ PAGES.finance = {
           <div class="card"><div class="card-head"><h2>Günlük</h2></div>${lineChart(f.daily, [{ key: 'revenue', label: 'Ciro', color: 'var(--series-1)' }, { key: 'net_profit', label: 'Net kâr', color: 'var(--series-2)' }])}</div>
         </div>
         <div class="card mt"><div class="card-head"><h2>Pazaryerine göre</h2></div><div class="table-wrap"><table><thead><tr><th>Pazaryeri</th><th class="r">Sipariş</th><th class="r">Ciro</th><th class="r">Ürün maliyeti</th><th class="r">Komisyon</th><th class="r">Hizmet</th><th class="r">Kargo</th><th class="r">Reklam</th><th class="r">İade</th><th class="r">Net kâr</th><th class="r">Tahmini KDV</th><th class="r">Marj</th></tr></thead><tbody>
-          ${f.by_marketplace.map((m) => html`<tr><td><b>${m.name}</b></td><td class="r num">${num(m.orders)}</td><td class="r num">${money(m.revenue)}</td><td class="r num">${money(m.product_cost)}</td><td class="r num">${money(m.commission)}</td><td class="r num">${money(m.service_fee)}</td><td class="r num">${money(m.shipping)}</td><td class="r num">${money(m.advertising)}</td><td class="r num">${money(m.refund)}</td><td class="r num ${signClass(m.net_profit)}">${money(m.net_profit)}</td><td class="r num">${money(m.tax_estimate)}</td><td class="r num">${pct(m.margin)}</td></tr>`)}
+          ${f.by_marketplace.map((m) => html`<tr><td><b>${m.name}</b></td><td class="r num">${num(m.orders)}</td><td class="r num">${money(m.revenue)}</td><td class="r num">${money(m.product_cost)}</td><td class="r num">${money(m.commission)}</td><td class="r num">${money(m.service_fee)}</td><td class="r num">${money(m.shipping)}</td><td class="r num">${money(m.advertising)}</td><td class="r num">${money(m.refund)}</td><td class="r num ${signClass(m.net_profit)}">${money(m.net_profit)}</td><td class="r num">${money(m.tax_estimate)}</td><td class="r num">${pct(m.margin_after_vat ?? m.margin_before_vat)}</td></tr>`)}
         </tbody></table></div></div>
         <div class="card mt"><div class="card-head"><div><h2>Dönem giderleri</h2><p>Reklam, ambalaj, personel gibi siparişe bağlı olmayan giderler. SKU girilen reklam giderleri SKU raporuna yansır.</p></div></div>
           ${ex.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Kategori</th><th>Açıklama</th><th>Pazaryeri</th><th>SKU</th><th class="r">Tutar</th><th></th></tr></thead><tbody>
@@ -1743,10 +1760,10 @@ PAGES.reports = {
       const table = () => {
         const sorted = [...items].sort((a, b) => ((a[sortKey] ?? -Infinity) > (b[sortKey] ?? -Infinity) ? 1 : -1) * dir);
         const th = (k, l, r = true) => html`<th class="${r ? 'r' : ''}"><a href="#" data-sort="${k}">${l}${sortKey === k ? (dir < 0 ? ' ↓' : ' ↑') : ''}</a></th>`;
-        $('#sku-table').innerHTML = renderVal(items.length ? html`<div class="table-wrap"><table><thead><tr>${th('sku', 'SKU', false)}${th('quantity', 'Adet')}${th('revenue', 'Ciro')}${th('product_cost', 'Maliyet')}${th('commission', 'Komisyon')}${th('shipping', 'Kargo')}${th('advertising', 'Reklam')}${th('refund', 'İade')}${th('return_rate', 'İade oranı')}${th('net_profit', 'Net kâr')}${th('tax_estimate', 'Tahmini KDV')}${th('margin', 'Marj')}</tr></thead><tbody>
+        $('#sku-table').innerHTML = renderVal(items.length ? html`<div class="table-wrap"><table><thead><tr>${th('sku', 'SKU', false)}${th('quantity', 'Adet')}${th('revenue', 'Ciro')}${th('product_cost', 'Maliyet')}${th('commission', 'Komisyon')}${th('shipping', 'Kargo')}${th('advertising', 'Reklam')}${th('refund', 'İade')}${th('return_rate', 'İade oranı')}${th('net_profit', 'KDV öncesi kâr')}${th('tax_estimate', 'Tahmini KDV')}${th('net_profit_after_tax', 'KDV sonrası kâr')}${th('margin_after_vat', 'Net marj')}${th('markup_after_vat', 'Markup')}</tr></thead><tbody>
           ${sorted.map((r) => html`<tr><td><b>${r.sku}</b><span class="ellipsis small muted">${r.product_name || ''}</span>${r.missing_cost ? html`<span class="badge plain tone-warn">Maliyet eksik</span>` : ''}</td>
             <td class="r num">${num(r.quantity)}</td><td class="r num">${money(r.revenue)}</td><td class="r num">${money(r.product_cost)}</td><td class="r num">${money(r.commission)}</td><td class="r num">${money(r.shipping)}</td><td class="r num">${money(r.advertising)}</td><td class="r num">${money(r.refund)}</td><td class="r num">${pct(r.return_rate)}</td>
-            <td class="r num ${signClass(r.net_profit)}">${money(r.net_profit)}${estimateBadge(r.is_estimate)}</td><td class="r num">${money(r.tax_estimate)}</td><td class="r num">${pct(r.margin)}</td></tr>`)}</tbody></table></div>` : empty('Veri yok', 'Seçilen dönemde satılan ürün yok.'));
+            <td class="r num ${signClass(r.net_profit)}">${money(r.net_profit)}${estimateBadge(r.is_estimate)}</td><td class="r num">${money(r.tax_estimate)}</td><td class="r num ${signClass(r.net_profit_after_tax)}">${money(r.net_profit_after_tax)}</td><td class="r num">${pct(r.margin_after_vat)}</td><td class="r num">${pct(r.markup_after_vat)}</td></tr>`)}</tbody></table></div>` : empty('Veri yok', 'Seçilen dönemde satılan ürün yok.'));
         $$('[data-sort]').forEach((a) => a.addEventListener('click', (e) => {
           e.preventDefault(); if (sortKey === a.dataset.sort) dir = -dir; else { sortKey = a.dataset.sort; dir = -1; } table();
         }));
@@ -1913,12 +1930,14 @@ PAGES.settings = {
       if (it.type === 'time') return html`<label>${it.label}<input name="${it.key}" type="time" step="60" value="${it.value || ''}" ${raw(dis)}></label>`;
       if (it.type === 'code') return html`<label>${it.label}<input name="${it.key}" maxlength="50" pattern="[a-z0-9_\\-]*" value="${it.value || ''}" ${raw(dis)}></label>`;
       if (it.type === 'percent') return html`<label>${it.label}<input name="${it.key}" type="number" step="1" min="0" max="1000" value="${it.value ?? ''}" ${raw(dis)}></label>`;
+      if (it.type === 'choice') return html`<label>${it.label}<select name="${it.key}" ${raw(dis)}>${Object.entries(it.choices || {}).map(([v, l]) => html`<option value="${v}" ${raw((it.value || 'unset') === v ? 'selected' : '')}>${l}</option>`)}</select></label>`;
+      if (it.type === 'fx') return html`<label>${it.label}<input name="${it.key}" value="${Object.entries(it.value || {}).map(([k, v]) => `${k}=${v}`).join(', ')}" placeholder="ör. USD=34.10, EUR=37.20 (boş = döviz kullanılmaz)" ${raw(dis)}></label>`;
       return html`<label>${it.label}<input name="${it.key}" type="number" step="${it.type === 'int' ? 1 : 0.01}" min="0" value="${it.value ?? ''}" ${raw(dis)}></label>`;
     };
     view().innerHTML = renderVal(html`
       <div class="grid grid-2">
         <form class="card" id="set-form"><div class="card-head"><div><h2>İşletme ayarları</h2><p>Tüm ayarlar buradan yönetilir; sunucu dosyası düzenlemek gerekmez. Finans varsayılanlarıyla hesaplanan tutarlar raporlarda “TAHMİNİ” olarak işaretlenir.</p></div></div>
-          ${[...new Set(s.items.map((it) => it.group))].map((g) => html`<fieldset class="fieldset mt"><legend>${g}</legend><div class="form-grid">${s.items.filter((it) => it.group === g).map((it) => html`<div class="${it.type === 'bool' || it.type === 'time' ? 'full' : ''}">${input(it)}</div>`)}</div>
+          ${[...new Set(s.items.map((it) => it.group))].map((g) => html`<fieldset class="fieldset mt"><legend>${g}</legend><div class="form-grid">${s.items.filter((it) => it.group === g).map((it) => html`<div class="${it.type === 'bool' || it.type === 'time' || it.type === 'choice' || it.type === 'fx' ? 'full' : ''}">${input(it)}</div>`)}</div>
             ${g === 'Kargo planı' ? html`<p class="small muted">Varsayılan: 11:00 öncesi bugün, 12:00 ve sonrası yarın; aradaki saatler “Kargo günü belirsiz” gösterilir. İki saati aynı yaparsanız belirsiz aralık kalmaz. Hafta sonu/tatil takvimi tanımlı değildir; tarih tahminidir.</p>` : ''}</fieldset>`)}
           ${can('admin') ? html`<p class="form-error"></p><button class="btn btn-primary mt" type="submit">Kaydet</button>` : html`<p class="muted small mt">Ayarları yalnızca yöneticiler değiştirebilir.</p>`}</form>
         <div class="stack">
@@ -1939,7 +1958,8 @@ PAGES.settings = {
         s.items.forEach((it) => {
           const el = e.target.elements[it.key];
           if (it.type === 'bool') values[it.key] = el.checked;
-          else if (it.type === 'time' || it.type === 'code') values[it.key] = el.value.trim();
+          else if (it.type === 'time' || it.type === 'code' || it.type === 'choice') values[it.key] = el.value.trim();
+          else if (it.type === 'fx') values[it.key] = Object.fromEntries(el.value.split(',').map((x) => x.trim()).filter(Boolean).map((x) => x.split('=').map((y) => y.trim())));
           else if (el.value !== '') values[it.key] = it.type === 'rate' ? Number(el.value) / 100 : it.type === 'int' ? parseInt(el.value, 10) : Number(el.value);
         });
         const r = await api('/api/settings', { method: 'PUT', body: { values } });

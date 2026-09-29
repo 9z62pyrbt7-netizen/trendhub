@@ -423,3 +423,4 @@ details.adv code { display: block; white-space: pre-wrap; overflow-wrap: anywher
 .topbar-actions { order: 3; flex-basis: 100%; justify-content: flex-start; }
 .topbar-actions:empty { display: none; }
 @media (max-width: 640px) { .topbar-title { flex: 1 1 0; min-width: 0; } }
+table.statement tr.info-line td { color: var(--text-3); font-style: italic; }
