@@ -160,6 +160,59 @@ def cost_history(product_id: int, _: CurrentUser = Depends(viewer), conn: Connec
 
 
 # -------------------------------------------------------------------- kargo
+# Görsel kaynağı etiketleri (arayüzde "Görsel: …" olarak gösterilir)
+IMAGE_SOURCES = {"product": "Katalog ürünü", "listing": "Pazaryeri ilanı", "listing_barcode": "Pazaryeri ilanı (barkod)"}
+
+
+def shipment_lines(conn: Connection, order_ids: list[int]) -> dict[int, list[dict]]:
+    """Sipariş kalemleri + ürün görseli (yalnızca KESİN eşleşmeden; tahmin/sahte görsel yok).
+
+    Öncelik:
+      1. Kalemin bağlı olduğu katalog ürünü (order_items.product_id): products.image_url veya images[0]
+      2. Aynı mağazada bu ürüne bağlı ilan (marketplace_listings.product_id): image_url
+      3. Aynı mağazada barkodu BİREBİR aynı ilan; farklı görsel URL'li birden çok ilan varsa (belirsiz) kullanılmaz
+    Renk/varyant: bağlı tedarikçi ürünlerinin hepsi aynı değeri veriyorsa gösterilir.
+    Yalnızca okuma yapar."""
+    if not order_ids:
+        return {}
+    out: dict[int, list[dict]] = {}
+    for r in rows(conn, """
+        SELECT i.order_id, i.id, i.product_name, i.sku, i.barcode, i.quantity, i.product_id,
+               NULLIF(COALESCE(NULLIF(p.image_url, ''), p.images->>0), '') AS product_image,
+               (SELECT MIN(l.image_url) FROM marketplace_listings l
+                 WHERE l.store_id = o.store_id AND i.product_id IS NOT NULL AND l.product_id = i.product_id
+                   AND COALESCE(l.image_url, '') <> '') AS listing_image,
+               (SELECT CASE WHEN COUNT(DISTINCT l.image_url) = 1 THEN MIN(l.image_url) END
+                  FROM marketplace_listings l
+                 WHERE l.store_id = o.store_id AND COALESCE(i.barcode, '') <> '' AND l.barcode = i.barcode
+                   AND COALESCE(l.image_url, '') <> '') AS barcode_image,
+               (SELECT CASE WHEN COUNT(DISTINCT sp.color) = 1 THEN MIN(sp.color) END
+                  FROM supplier_products sp WHERE i.product_id IS NOT NULL AND sp.product_id = i.product_id
+                   AND COALESCE(sp.color, '') <> '') AS color,
+               (SELECT CASE WHEN COUNT(DISTINCT sp.variant) = 1 THEN MIN(sp.variant) END
+                  FROM supplier_products sp WHERE i.product_id IS NOT NULL AND sp.product_id = i.product_id
+                   AND COALESCE(sp.variant, '') <> '') AS variant
+          FROM order_items i JOIN orders o ON o.id = i.order_id
+          LEFT JOIN products p ON p.id = i.product_id
+         WHERE i.order_id = ANY(:ids) ORDER BY i.order_id, i.id
+    """, ids=list(order_ids)):
+        image, source = None, None
+        for key, src in (("product_image", "product"), ("listing_image", "listing"), ("barcode_image", "listing_barcode")):
+            if _safe_image_url(r[key]):
+                image, source = r[key], src
+                break
+        out.setdefault(r["order_id"], []).append({
+            "id": r["id"], "product_name": r["product_name"], "sku": r["sku"], "barcode": r["barcode"],
+            "quantity": r["quantity"], "product_id": r["product_id"], "color": r["color"], "variant": r["variant"],
+            "image_url": image, "image_source": source, "image_source_label": IMAGE_SOURCES.get(source)})
+    return out
+
+
+def _safe_image_url(url: str | None) -> bool:
+    """Yalnızca https görseller (CSP img-src ile uyumlu); javascript:/data:/http: kabul edilmez."""
+    return bool(url) and url.strip().lower().startswith("https://") and len(url) <= 2000
+
+
 @router.get("/api/shipments")
 def list_shipments(page: Page = Depends(), status: str | None = None, carrier: str | None = None,
                    q: str | None = Query(None, max_length=100), _: CurrentUser = Depends(viewer),
@@ -180,8 +233,10 @@ def list_shipments(page: Page = Depends(), status: str | None = None, carrier: s
                sh.shipped_at, sh.delivered_at, sh.updated_at, o.order_date
         {base} ORDER BY o.order_date DESC NULLS LAST, sh.id DESC LIMIT :limit OFFSET :offset
     """, **params, limit=page.page_size, offset=page.offset)
+    lines = shipment_lines(conn, [it["order_id"] for it in items])
     for it in items:
         it["status_label"] = S.LABELS_TR.get(it["internal_status"], it["internal_status"])
+        it["items"] = lines.get(it["order_id"], [])
     summary = rows(conn, """
         SELECT o.internal_status AS status, COUNT(DISTINCT o.id) AS count
           FROM orders o WHERE o.internal_status IN ('awaiting_shipment','shipped','delivered','returned')

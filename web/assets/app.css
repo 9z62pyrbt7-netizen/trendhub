@@ -423,3 +423,16 @@ details.adv code { display: block; white-space: pre-wrap; overflow-wrap: anywher
 .topbar-actions { order: 3; flex-basis: 100%; justify-content: flex-start; }
 .topbar-actions:empty { display: none; }
 @media (max-width: 640px) { .topbar-title { flex: 1 1 0; min-width: 0; } }
+/* ---- Kargo: sipariş kalemleri ve küçük görseller */
+.ship-items-cell { min-width: 220px; max-width: 320px; }
+.ship-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ship-items li { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.ship-item-text { display: flex; flex-direction: column; min-width: 0; }
+.ship-item-name { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; font-size: 13px; line-height: 1.3; }
+.thumb { flex: none; width: 44px; height: 44px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); overflow: hidden; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+button.thumb { cursor: zoom-in; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-empty { font-size: 9px; line-height: 1.1; color: var(--text-3); text-align: center; padding: 2px; }
+.img-preview { display: flex; justify-content: center; background: var(--surface-2); border-radius: 8px; padding: 8px; }
+.img-preview img { max-width: 100%; max-height: 70vh; object-fit: contain; }
+.preview-title { font-size: 16px; overflow-wrap: anywhere; padding-right: 36px; }

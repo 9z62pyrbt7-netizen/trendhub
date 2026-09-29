@@ -738,6 +738,29 @@ async function costForm(p) {
 }
 
 // ---- Kargo
+// ---- Sipariş kalemi görselleri (yalnızca kesin eşleşen gerçek görsel; yoksa "Görsel yok")
+function itemThumb(it) {
+  const alt = it.product_name || 'Ürün görseli';
+  return it.image_url
+    ? html`<button type="button" class="thumb" data-preview="${it.image_url}" data-title="${alt}" aria-label="Büyük görseli aç: ${alt}"><img src="${it.image_url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer"></button>`
+    : html`<span class="thumb thumb-empty" aria-label="Görsel yok">Görsel yok</span>`;
+}
+function shipItems(items) {
+  if (!items || !items.length) return html`<span class="muted small">Kalem bilgisi yok</span>`;
+  return html`<ul class="ship-items">${items.map((it) => html`<li>${itemThumb(it)}<div class="ship-item-text">
+    <span class="ship-item-name" title="${it.product_name || ''}">${it.product_name || it.sku || it.barcode || '—'}</span>
+    <span class="muted small">${[it.color, it.variant].filter(Boolean).join(' · ')}${it.color || it.variant ? ' · ' : ''}${num(it.quantity)} adet</span></div></li>`)}</ul>`;
+}
+function bindThumbs(root) {
+  $$('img', root).forEach((img) => img.addEventListener('error', () => {
+    const btn = img.closest('.thumb');
+    if (btn) btn.replaceWith(Object.assign(document.createElement('span'), { className: 'thumb thumb-empty', textContent: 'Görsel yok' }));
+  }, { once: true }));
+  $$('[data-preview]', root).forEach((b) => b.addEventListener('click', () => {
+    openModal(html`<h2 class="preview-title">${b.dataset.title}</h2><div class="img-preview"><img src="${b.dataset.preview}" alt="${b.dataset.title}" referrerpolicy="no-referrer"></div>`);
+  }));
+}
+
 PAGES.shipping = {
   title: 'Kargo', icon: 'shipping',
   async render(params) {
@@ -753,8 +776,8 @@ PAGES.shipping = {
         <select name="status" aria-label="Durum"><option value="">Tüm durumlar</option>${state.meta.statuses.map((s) => html`<option value="${s.code}" ${raw(s.code === f.status ? 'selected' : '')}>${s.label}</option>`)}</select>
         <select name="carrier" aria-label="Kargo firması"><option value="">Tüm firmalar</option>${d.carriers.map((c) => html`<option ${raw(c === f.carrier ? 'selected' : '')}>${c}</option>`)}</select>
         <button class="btn btn-primary" type="submit">Filtrele</button></form>
-        ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Pazaryeri</th><th>Kargo</th><th>Takip no</th><th>Durum</th><th class="r">Desi</th><th class="r">Ücret</th><th>Güncelleme</th></tr></thead><tbody>
-        ${d.items.map((s) => html`<tr><td><a href="#" data-order="${s.order_id}">${s.external_order_id}</a></td><td>${s.marketplace_name || '—'}</td><td>${s.carrier || '—'}</td>
+        ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Ürünler</th><th>Pazaryeri</th><th>Kargo</th><th>Takip no</th><th>Durum</th><th class="r">Desi</th><th class="r">Ücret</th><th>Güncelleme</th></tr></thead><tbody>
+        ${d.items.map((s) => html`<tr><td><a href="#" data-order="${s.order_id}">${s.external_order_id}</a></td><td class="ship-items-cell">${shipItems(s.items)}</td><td>${s.marketplace_name || '—'}</td><td>${s.carrier || '—'}</td>
           <td>${s.tracking_url ? html`<a href="${s.tracking_url}" target="_blank" rel="noopener noreferrer">${s.tracking_number || 'Takip'}</a>` : (s.tracking_number || '—')}</td>
           <td>${statusBadge(s.internal_status, s.status_label)}</td><td class="r num">${s.desi ?? '—'}</td>
           <td class="r num">${s.cost === null ? html`<span class="muted">—</span>` : money(s.cost)} ${can('operator') ? html`<button class="btn btn-sm" data-shipcost="${s.id}" data-current="${s.cost ?? ''}">✎</button>` : ''}</td><td>${dateTime(s.updated_at)}</td></tr>`)}
@@ -766,6 +789,7 @@ PAGES.shipping = {
         location.hash = '#/shipping' + (q.toString() ? '?' + q : '');
       });
       $$('[data-order]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); showOrder(a.dataset.order); }));
+      bindThumbs($('#ship-card'));
       $$('[data-shipcost]').forEach((b) => b.addEventListener('click', () => {
         const body = openModal(html`<h2>Kargo ücreti</h2><form class="stack" id="scf"><label>Ücret (₺)<input name="cost" type="number" step="0.01" min="0" value="${b.dataset.current}" required></label><p class="form-error"></p><button class="btn btn-primary" type="submit">Kaydet ve yeniden hesapla</button></form>`);
         $('#scf', body).addEventListener('submit', (e) => {
