@@ -996,7 +996,7 @@ async function supplierForm(detail) {
   });
 }
 
-const SUP_TABS = [['overview', 'Genel'], ['mapping', 'Alan eşleştirme'], ['products', 'Ürünler'], ['runs', 'Senkron geçmişi'], ['changes', 'Değişiklikler']];
+const SUP_TABS = [['overview', 'Genel'], ['import', 'İçe aktarma sihirbazı'], ['mapping', 'Alan eşleştirme'], ['products', 'Ürünler'], ['runs', 'Senkron geçmişi'], ['changes', 'Değişiklikler']];
 async function renderSupplierDetail(id, tab) {
   const [d, meta] = await Promise.all([api(`/api/suppliers/${id}`), supplierMeta()]);
   const s = d.supplier, c = d.connection;
@@ -1013,11 +1013,12 @@ async function renderSupplierDetail(id, tab) {
       <ol class="steps setup-steps">
         <li class="done">1. Bilgiler</li>
         <li class="${state.supTested?.[id] ? 'done' : 'on'}">2. Bağlantı testi ${c.integration_type === 'manual' ? html`<span class="small muted">(manuel: dosya yükleyeceksiniz)</span>` : can('operator') && remote ? html`<button class="btn btn-sm" id="setup-test">Test et</button>` : html`<span class="small muted">(kaynak adresi yok)</span>`}</li>
-        <li class="${Number(s.mapped_fields) ? 'done' : ''}">3. Alan eşleştirme <a class="btn btn-sm" href="#/suppliers?id=${id}&tab=mapping">Eşleştir</a></li>
-        <li class="${Number(s.product_count) ? 'done' : ''}">4. Ürünleri getir ${can('operator') ? (remote ? html`<button class="btn btn-sm btn-primary" id="setup-fetch" ${raw(Number(s.mapped_fields) ? '' : 'disabled')}>Ürünleri Getir</button>` : html`<label class="btn btn-sm btn-primary" for="sup-file">Dosya seç ve getir</label>`) : ''}</li>
+        <li class="${remote ? (s.mapping_approved_at ? 'done' : '') : Number(s.mapped_fields) ? 'done' : ''}">3. ${remote ? html`Node seçimi, alan eşleştirme, önizleme ve onay <a class="btn btn-sm" href="#/suppliers?id=${id}&tab=import">İçe aktarma sihirbazı</a>` : html`Alan eşleştirme <a class="btn btn-sm" href="#/suppliers?id=${id}&tab=mapping">Eşleştir</a>`}</li>
+        <li class="${Number(s.product_count) ? 'done' : ''}">4. Ürünleri getir ${can('operator') ? (remote ? html`<button class="btn btn-sm btn-primary" id="setup-fetch" ${raw(s.mapping_approved_at ? '' : 'disabled')} title="${s.mapping_approved_at ? '' : 'Önce sihirbazda eşleştirmeyi onaylayın'}">Ürünleri Getir</button>` : html`<label class="btn btn-sm btn-primary" for="sup-file">Dosya seç ve getir</label>`) : ''}</li>
         <li class="${Number(s.product_count) ? 'done' : ''}">5. Ürün havuzu <a class="btn btn-sm" href="#/transfer">Havuzda gör →</a></li>
       </ol></div>` : ''}
-    ${!Number(s.mapped_fields) ? html`<div class="notice warn" style="margin-bottom:12px">Alan eşleştirmesi yapılmadı. <b>Alan eşleştirme</b> sekmesinde kaynağı önizleyip en az “Tedarikçi ürün kodu” ve “Ürün adı” alanlarını eşleştirin.</div>` : ''}
+    ${remote && !s.mapping_approved_at ? html`<div class="notice warn" style="margin-bottom:12px">Eşleştirme onaylanmadı: kaynaktan aktarım ve zamanlanmış senkron çalışmaz. <a href="#/suppliers?id=${id}&tab=import">İçe aktarma sihirbazını</a> tamamlayın.</div>` : ''}
+    ${!remote && !Number(s.mapped_fields) ? html`<div class="notice warn" style="margin-bottom:12px">Alan eşleştirmesi yapılmadı. <b>Alan eşleştirme</b> sekmesinde kaynağı önizleyip en az “Tedarikçi ürün kodu” ve “Ürün adı” alanlarını eşleştirin.</div>` : ''}
     <div class="grid grid-4">
       ${kpi('Ürün (aktif)', num(s.active_count), `${num(s.linked_count)} ürün kataloğa bağlı`)}
       ${kpi('Stokta', num(s.in_stock_count), `Stoksuz: ${num(s.out_of_stock_count)}`)}
@@ -1055,6 +1056,7 @@ async function renderSupplierDetail(id, tab) {
     } catch (ex) { fail(ex); } finally { e.target.value = ''; }
   });
   const box = $('#sup-tab');
+  if (tab === 'import') return renderImportWizard(box, id, d);
   if (tab === 'mapping') return renderMapping(box, id, d, meta);
   if (tab === 'products') return renderPool(box, { supplierId: id, embedded: true });
   if (tab === 'runs') return renderRuns(box, id);
@@ -1080,7 +1082,7 @@ async function renderSupplierDetail(id, tab) {
 function runsTable(runs) {
   if (!runs.length) return empty('Henüz senkron yok', 'Kaynak adresi varsa “Şimdi senkronize et”, yoksa “Dosya yükle” ile başlayın.');
   return html`<div class="table-wrap"><table><thead><tr><th>Başlangıç</th><th>Tetik</th><th>Durum</th><th class="r">Kayıt</th><th class="r">Yeni</th><th class="r">Fiyat</th><th class="r">Stok</th><th class="r">Kayıp</th><th class="r">Hata</th><th>Mesaj</th></tr></thead><tbody>
-    ${runs.map((r) => html`<tr><td>${dateTime(r.started_at)}</td><td>${{ schedule: 'Zamanlanmış', manual: 'Elle', upload: 'Dosya' }[r.trigger] || r.trigger}</td><td>${runBadge(r.status)}</td>
+    ${runs.map((r) => html`<tr><td>${dateTime(r.started_at)}</td><td>${{ schedule: 'Zamanlanmış', manual: 'Elle', upload: 'Dosya', approval: 'Onay' }[r.trigger] || r.trigger}</td><td>${runBadge(r.status)}</td>
       <td class="r num">${num(r.records_total)}</td><td class="r num">${num(r.created_count)}</td><td class="r num">${num(r.price_changed)}</td><td class="r num">${num(r.stock_changed)}</td>
       <td class="r num ${r.missing_count ? 'neg' : ''}">${num(r.missing_count)}</td><td class="r num ${r.error_count ? 'neg' : ''}">${num(r.error_count)}</td>
       <td><span class="ellipsis small" title="${[r.message, ...(r.errors || [])].filter(Boolean).join('\n')}">${r.message || (r.errors || [])[0] || ''}</span></td></tr>`)}</tbody></table></div>`;
@@ -1162,6 +1164,116 @@ async function renderMapping(box, id, d, meta) {
         await api(`/api/suppliers/${id}/mappings`, { method: 'PUT', body: { mappings: Object.entries(current).map(([k, v]) => ({ target_field: k, source_path: v.source_path || null, default_value: v.default_value || null })) } });
         toast('Eşleştirme kaydedildi');
       });
+    });
+  };
+  draw();
+}
+
+// ---- İçe aktarma sihirbazı: test → node → eşleştirme → canlı önizleme → uyarılar → ONAY → Ürün Havuzu
+const CONF_BADGE = { high: ['tone-good', 'Güçlü öneri'], low: ['tone-warn', 'Düşük güven'], confirm: ['tone-warn', 'Doğrulayın'], manual: ['', 'Elle'] };
+const NODE_KIND = { product: ['tone-good', 'Önerilen ürün'], variant: ['tone-info', 'Varyant listesi'], nested: ['', 'Ürün içi liste'], other: ['', 'Diğer'] };
+async function renderImportWizard(box, id, d) {
+  const c = d.connection, s = d.supplier;
+  const remote = c.integration_type !== 'manual' && c.has_source_url;
+  if (!remote) {
+    box.innerHTML = renderVal(html`<div class="card">${empty('Kaynak adresi yok', 'Sihirbaz kaynak adresinden (URL) okur. Manuel tedarikçide “Alan eşleştirme” sekmesinden dosyayla önizleyip “Dosya yükle” ile aktarın.')}</div>`);
+    return;
+  }
+  const st = { a: null, tested: null, record_path: null, variant_path: null, mappings: null, confirm: false, vat: s.price_vat_mode || '', busy: false };
+  const analyze = async () => {
+    st.busy = true; draw();
+    try {
+      st.a = await api(`/api/suppliers/${id}/import/analyze`, { method: 'POST', body: { record_path: st.record_path, variant_path: st.variant_path, mappings: st.mappings, limit: 10 } });
+      st.record_path = st.a.record_path; st.variant_path = st.a.variant_path || '';
+      st.mappings = st.a.mapping.map((m) => ({ target_field: m.target_field, source_path: m.source_path || null, default_value: m.default_value || null }));
+    } catch (ex) { fail(ex); } finally { st.busy = false; draw(); }
+  };
+  const readForm = () => {
+    const f = $('#wz-map', box);
+    if (!f || !st.mappings) return;
+    st.mappings = st.mappings.map((m) => ({ ...m, source_path: f[`src_${m.target_field}`]?.value || null }));
+    st.confirm = !!$('#wz-confirm', box)?.checked;
+    st.vat = $('#wz-vat', box)?.value || st.vat;
+  };
+  const draw = () => {
+    const a = st.a;
+    const step = (n, title, body, done) => html`<div class="card mt"><div class="card-head"><h2>${done ? '✓ ' : ''}${n}. ${title}</h2></div>${body}</div>`;
+    const fields = a ? a.fields : [];
+    const opts = (cur) => html`<option value="">— eşleştirilmedi —</option>${cur && !fields.some((p) => p.path === cur) ? html`<option value="${cur}" selected>${cur}</option>` : ''}
+      ${fields.map((p) => html`<option value="${p.path}" ${raw(p.path === cur ? 'selected' : '')}>${p.path} (${pct(p.fill_rate)} dolu${p.all_same ? ' · hepsi aynı' : ''} · ör. ${String(p.sample || '').slice(0, 30)})</option>`)}`;
+    const priceRow = a?.mapping.find((m) => m.target_field === 'purchase_price');
+    box.innerHTML = renderVal(html`
+      <div class="notice" style="margin-bottom:4px">Sihirbaz kaynağı yalnızca <b>okur</b>. Onay verene kadar Ürün Havuzu'na ürün yazılmaz ve zamanlanmış senkron çalışmaz. Onaydan sonra da pazaryerine hiçbir şey gönderilmez.
+        ${s.mapping_approved_at ? html`<br><span class="pos">Mevcut eşleştirme ${dateTime(s.mapping_approved_at)} tarihinde onaylandı.</span>` : html`<br><span class="neg">Bu tedarikçinin eşleştirmesi henüz onaylanmadı.</span>`}</div>
+      ${step(1, 'Bağlantıyı test et', html`<div class="row"><code>${c.source_url_display}</code><span class="spacer"></span>
+        <button class="btn" id="wz-test">Bağlantıyı test et</button> <button class="btn btn-primary" id="wz-analyze" ${raw(st.busy ? 'disabled' : '')}>${st.busy ? 'Okunuyor…' : a ? 'Yeniden analiz et' : 'Kaynağı analiz et'}</button></div>
+        ${st.tested ? html`<p class="small ${st.tested.ok ? 'pos' : 'neg'}">${st.tested.message}</p>` : ''}`, !!a)}
+      ${a ? html`
+      ${step(2, 'Ürün node seçimi', html`<p class="small muted">Tekrar eden elemanlar. Öneri en çok tekrar eden değil, ürüne en çok benzeyen elemandır (ad, SKU, fiyat, stok, barkod, görsel).</p>
+        ${a.nodes ? html`<div class="table-wrap"><table><thead><tr><th></th><th>Eleman yolu</th><th>Tür</th><th class="r">Adet</th><th>Alanlar</th></tr></thead><tbody>
+          ${a.nodes.candidates.map((n) => html`<tr><td><input type="radio" name="wz-node" value="${n.path}" ${raw(n.path === st.record_path ? 'checked' : '')} ${raw(n.kind === 'variant' || n.kind === 'nested' ? 'disabled' : '')} aria-label="${n.path}"></td>
+            <td><code>${n.path}</code></td><td><span class="badge ${NODE_KIND[n.kind][0]}">${NODE_KIND[n.kind][1]}</span></td><td class="r num">${num(n.count)}</td>
+            <td><span class="ellipsis small" title="${n.fields.join(', ')}">${n.fields.slice(0, 8).join(', ')}</span></td></tr>`)}</tbody></table></div>
+          <label class="mt" style="display:block">Varyant listesi (her varyant ayrı ürün olur, ana ürün alanlarını miras alır)
+            <select id="wz-variant" style="max-width:100%"><option value="">Varyant yok (her ürün tek kayıt)</option>
+              ${a.nodes.variant_candidates.map((v) => html`<option value="${v.path}" ${raw(v.path === st.variant_path ? 'selected' : '')}>${v.path} (${num(v.count)} adet · ${v.fields.slice(0, 5).join(', ')})</option>`)}
+              ${st.variant_path && !a.nodes.variant_candidates.some((v) => v.path === st.variant_path) ? html`<option value="${st.variant_path}" selected>${st.variant_path}</option>` : ''}</select></label>`
+          : html`<p class="muted small">Bu kaynak XML değil; kayıt yolu: <code>${a.record_path || '—'}</code></p>`}
+        <p class="small">Seçili: <code>${a.record_path || '—'}</code>${a.variant_path ? html` · varyant <code>${a.variant_path}</code>` : ''} → <b>${num(a.total)}</b> kayıt</p>`, true)}
+      ${step(3, 'Alan eşleştirme', html`<form id="wz-map"><div class="table-wrap"><table><thead><tr><th>TrendHub alanı</th><th>Tedarikçi alanı</th><th>Güven</th><th>Örnek (1. ürün)</th></tr></thead><tbody>
+        ${a.mapping.map((m) => {
+          const cur = (st.mappings.find((x) => x.target_field === m.target_field) || {}).source_path;
+          const conf = cur ? (cur === m.source_path ? (m.confidence || 'manual') : 'manual') : null;
+          const v = a.samples[0]?.values?.[m.target_field];
+          return html`<tr><td><b>${m.label}</b>${m.required ? html` <span class="badge plain tone-warn">zorunlu</span>` : ''}</td>
+            <td><select name="src_${m.target_field}" aria-label="${m.label} kaynak alanı">${opts(cur)}</select></td>
+            <td>${conf ? html`<span class="badge ${CONF_BADGE[conf]?.[0] || ''}">${CONF_BADGE[conf]?.[1] || conf}</span>` : ''}</td>
+            <td><span class="ellipsis small">${Array.isArray(v) ? `${v.length} görsel` : v ?? ''}</span></td></tr>`;
+        })}</tbody></table></div>
+        ${priceRow?.source_path ? html`<div class="notice ${a.price_needs_confirmation ? 'warn' : ''} mt"><label class="wz-check"><input type="checkbox" id="wz-confirm" ${raw(st.confirm || priceRow.confirmed ? 'checked' : '')}>
+          <b>'${priceRow.source_path}'</b> alanı tedarikçi <b>ALIŞ fiyatı</b> mı? (Satış fiyatı olarak kullanılmaz; pazaryeri fiyatı fiyat kurallarıyla hesaplanır.)</label></div>` : ''}
+        <div class="row mt"><span class="spacer"></span><button class="btn" type="submit">Önizlemeyi güncelle</button></div></form>`, true)}
+      ${step(4, `Canlı önizleme (${a.samples.length} ürün)`, html`<div class="table-wrap"><table><thead><tr><th>SKU</th><th>Barkod</th><th>Ürün adı</th><th>Renk/Beden</th><th>Kategori</th><th class="r">XML fiyatı</th><th>Para</th><th class="r">KDV</th><th class="r">Maliyet (TL, KDV dahil)</th><th class="r">Stok</th><th class="r">Görsel</th><th>Durum</th></tr></thead><tbody>
+        ${a.samples.map((x) => html`<tr><td>${x.values.supplier_sku || '—'}</td><td>${x.values.barcode || '—'}</td><td><span class="ellipsis">${x.values.name || '—'}</span></td>
+          <td class="small">${[x.values.color, x.values.size].filter(Boolean).join(' / ') || '—'}</td><td><span class="ellipsis small">${x.values.category || '—'}</span></td>
+          <td class="r num">${x.values.purchase_price ?? '—'}</td><td>${x.values.currency || 'TRY?'}</td><td class="r num">${x.values.vat_rate ?? '—'}</td>
+          <td class="r num" title="${x.cost_note || ''}">${x.effective_cost === null ? html`<span class="neg">—</span>` : money(x.effective_cost)}${x.cost_note ? html`<span class="muted small" style="display:block">${x.cost_note}</span>` : ''}</td>
+          <td class="r num ${Number(x.values.stock) <= 0 ? 'neg' : ''}">${num(x.values.stock)}</td><td class="r num">${num((x.values.images || []).length)}</td>
+          <td class="small ${x.errors.length ? 'neg' : 'pos'}">${x.errors.length ? x.errors.join('; ') : 'Uygun'}</td></tr>`)}</tbody></table></div>
+        <p class="small muted">Özet: ${num(a.summary.importable)} aktarılabilir · ${num(a.summary.invalid)} hatalı · ${num(a.summary.zero_stock)} stoksuz · ${num(a.summary.duplicate_skus)} tekrar eden SKU</p>`, true)}
+      ${step(5, 'Eksik alan uyarıları', a.warnings.length ? html`<ul class="small">${a.warnings.map((w) => html`<li>${w}</li>`)}</ul>` : html`<p class="pos small">Uyarı yok.</p>`, !a.warnings.length)}
+      ${step(6, 'Onay ve Ürün Havuzu\'na aktarım', html`<div class="row"><label>XML fiyatları<select id="wz-vat"><option value="">— seçin —</option>
+          <option value="included" ${raw(st.vat === 'included' ? 'selected' : '')}>KDV dahil</option><option value="excluded" ${raw(st.vat === 'excluded' ? 'selected' : '')}>KDV hariç (ürün KDV oranı eklenir)</option></select></label>
+        <span class="spacer"></span>${can('operator') ? html`<button class="btn btn-primary" id="wz-approve" ${raw(a.can_approve ? '' : 'disabled')}>Onayla ve Ürün Havuzu'na aktar</button>` : ''}</div>
+        <p class="small muted">Onay eşleştirmeyi kaydeder ve ${num(a.summary.importable)} kaydı Ürün Havuzu'na alır. Mevcut ürün/sipariş, pazaryeri stok ve fiyatı değişmez. Sonraki zamanlanmış senkronlar bu onaylı eşleştirmeyi kullanır; eşleştirme değişirse onay yeniden istenir.</p>`, false)}` : ''}`);
+    $('#wz-test', box)?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { st.tested = await api(`/api/suppliers/${id}/test`, { method: 'POST' }); draw(); } catch (ex) { fail(ex); e.target.disabled = false; }
+    });
+    $('#wz-analyze', box)?.addEventListener('click', () => { readForm(); analyze(); });
+    $$('[name="wz-node"]', box).forEach((r) => r.addEventListener('change', () => { st.record_path = r.value; st.variant_path = null; st.mappings = null; analyze(); }));
+    $('#wz-variant', box)?.addEventListener('change', (e) => { st.variant_path = e.target.value; st.mappings = null; analyze(); });
+    $('#wz-map', box)?.addEventListener('submit', (e) => { e.preventDefault(); readForm(); analyze(); });
+    $('#wz-confirm', box)?.addEventListener('change', (e) => { st.confirm = e.target.checked; });
+    $('#wz-vat', box)?.addEventListener('change', (e) => { st.vat = e.target.value; });
+    $('#wz-approve', box)?.addEventListener('click', async (e) => {
+      readForm();
+      if (!st.vat) { toast('XML fiyatlarının KDV dahil mi hariç mi olduğunu seçin.', true); return; }
+      const price = st.mappings.find((m) => m.target_field === 'purchase_price')?.source_path;
+      if (price && !st.confirm && !a.mapping.find((m) => m.target_field === 'purchase_price')?.confirmed) {
+        if (a.price_needs_confirmation || !confirm(`'${price}' alanı tedarikçi alış fiyatı olarak kullanılacak. Onaylıyor musunuz?`)) {
+          if (a.price_needs_confirmation) toast(`'${price}' alanının tedarikçi alış fiyatı olduğunu işaretleyin.`, true);
+          return;
+        }
+        st.confirm = true;
+      }
+      e.target.disabled = true;
+      try {
+        const r = await api(`/api/suppliers/${id}/import/approve`, { method: 'POST', body: { record_path: st.record_path, variant_path: st.variant_path || null, mappings: st.mappings, confirm_price: st.confirm, price_vat_mode: st.vat } });
+        const imp = r.import;
+        toast(imp ? `${r.message} ${imp.created_count} yeni, ${imp.updated_count} güncellendi${imp.error_count ? `, ${imp.error_count} hata` : ''}.` : r.message);
+        location.hash = `#/suppliers?id=${id}&tab=products`;
+      } catch (ex) { fail(ex); e.target.disabled = false; }
     });
   };
   draw();

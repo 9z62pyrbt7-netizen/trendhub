@@ -156,8 +156,8 @@ nav a .count { margin-left: auto; background: var(--bad); color: #fff; font-size
 .btn-block { width: 100%; }
 .icon-btn { border: 1px solid var(--border); background: var(--surface); color: var(--text); width: 36px; height: 36px; border-radius: 8px; cursor: pointer; font-size: 16px; flex: none; }
 
-.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
-.seg button { border: 0; background: transparent; padding: 7px 12px; font: inherit; font-weight: 600; color: var(--text-2); cursor: pointer; min-height: 34px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; max-width: 100%; background: var(--surface); }
+.seg button { border: 0; background: transparent; padding: 7px 12px; font: inherit; font-weight: 600; color: var(--text-2); cursor: pointer; min-height: 34px; flex-shrink: 0; }
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button.on { background: var(--primary-soft); color: var(--primary); }
 
@@ -424,3 +424,8 @@ details.adv code { display: block; white-space: pre-wrap; overflow-wrap: anywher
 .topbar-actions:empty { display: none; }
 @media (max-width: 640px) { .topbar-title { flex: 1 1 0; min-width: 0; } }
 table.statement tr.info-line td { color: var(--text-3); font-style: italic; }
+.kv dd { min-width: 0; overflow-wrap: anywhere; }
+#sup-tab select, #sup-tab label { max-width: 100%; }
+label.wz-check { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; font-weight: 400; }
+label.wz-check input { width: auto; min-height: 0; margin-top: 3px; flex-shrink: 0; }
+.kpi .label .badge { white-space: normal; max-width: 100%; }
