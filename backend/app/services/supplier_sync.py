@@ -91,7 +91,7 @@ def _hash(v: dict) -> str:
             "description", "images")
     data = {k: v.get(k) for k in keys}
     # Renk/varyant yalnızca doluysa hash'e girer: eski ürünler bu alanlar yüzünden 'değişti' sayılmaz.
-    data.update({k: v[k] for k in ("color", "variant") if v.get(k)})
+    data.update({k: v[k] for k in ("color", "variant", "size", "parent_code") if v.get(k)})
     return hashlib.sha256(json.dumps(data, default=str, sort_keys=True,
                                      ensure_ascii=False).encode()).hexdigest()
 
@@ -103,15 +103,35 @@ def _change(conn, supplier_id, sp_id, run_id, kind, old=None, new=None):
                   "o": None if old is None else str(old), "n": None if new is None else str(new)})
 
 
+def variant_sku(values: dict, rec: dict, mapping: dict, vpath: str | None) -> None:
+    """Varyantlı feed: her varyant ayrı tedarikçi ürünü olur.
+
+    SKU alanı ana üründeyse varyant SKU'su = ana kod + '-' + (varyant barkodu | varyant sırası);
+    ana kod `parent_code` olarak saklanır. SKU alanı varyanttaysa olduğu gibi kullanılır."""
+    values["parent_code"] = None
+    if not vpath or "__variant_index" not in rec:
+        return
+    inside = lambda f: (mapping.get(f, {}).get("source_path") or "").startswith(vpath + "/")  # noqa: E731
+    if inside("supplier_sku"):
+        values["parent_code"] = values.get("model_code")
+        return
+    parent = values["supplier_sku"]
+    key = values.get("barcode") if inside("barcode") and values.get("barcode") else rec["__variant_index"]
+    values["parent_code"] = parent
+    values["supplier_sku"] = f"{parent}-{key}"[:200]
+
+
 def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, stats: SyncStats) -> None:
     sup = cfg["supplier"]
     sid = sup["id"]
     items: dict[str, dict] = {}
+    vpath = ((cfg["connection"] or {}).get("options") or {}).get("variant_path")
     for i, rec in enumerate(records, 1):
         m = apply_mapping(rec, cfg["mapping"])
         if not m.ok:
             stats.error(f"Kayıt {i}: " + "; ".join(m.errors))
             continue
+        variant_sku(m.values, rec, cfg["mapping"], vpath)
         sku = m.values["supplier_sku"]
         if sku in items:
             stats.error(f"Kayıt {i}: tekrar eden tedarikçi SKU'su {sku} (ilki kullanıldı)")
@@ -129,15 +149,16 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
                   "category": v["category"], "brand": v["brand"], "cost": v["purchase_price"],
                   "sale": v["sale_price"], "cur": v["currency"] or "TRY", "stock": v["stock"], "vat": v["vat_rate"],
                   "desi": v["desi"], "desc": v["description"], "images": json.dumps(v["images"], ensure_ascii=False),
-                  "hash": h, "color": v.get("color"), "variant": v.get("variant")}
+                  "hash": h, "color": v.get("color"), "variant": v.get("variant"), "size": v.get("size"),
+                  "parent": v.get("parent_code")}
         old = existing.get(sku)
         if old is None:
             sp_id = conn.execute(text("""
                 INSERT INTO supplier_products(supplier_id, supplier_sku, barcode, model_code, name, category, brand,
                     cost, sale_price, currency, stock, vat_rate, desi, description, images, content_hash, status,
-                    is_primary, first_seen_at, last_seen_at, created_at, updated_at, color, variant)
+                    is_primary, first_seen_at, last_seen_at, created_at, updated_at, color, variant, size, parent_code)
                 VALUES (:s, :sku, :barcode, :model, :name, :category, :brand, :cost, :sale, :cur, :stock, :vat, :desi,
-                        :desc, CAST(:images AS JSONB), :hash, 'active', FALSE, NOW(), NOW(), NOW(), NOW(), :color, :variant)
+                        :desc, CAST(:images AS JSONB), :hash, 'active', FALSE, NOW(), NOW(), NOW(), NOW(), :color, :variant, :size, :parent)
                 RETURNING id
             """), params).scalar()
             _change(conn, sid, sp_id, run_id, "new", None, v["purchase_price"])
@@ -156,7 +177,7 @@ def apply_items(conn: Connection, cfg: dict, records: list[dict], run_id: int, s
             UPDATE supplier_products SET barcode = :barcode, model_code = :model, name = :name, category = :category,
                    brand = :brand, cost = :cost, sale_price = :sale, currency = :cur, stock = :stock, vat_rate = :vat,
                    desi = :desi, description = :desc, images = CAST(:images AS JSONB), content_hash = :hash,
-                   color = :color, variant = :variant,
+                   color = :color, variant = :variant, size = :size, parent_code = :parent,
                    status = 'active', missing_since = NULL, last_seen_at = NOW(), updated_at = NOW(),
                    price_changed_at = CASE WHEN :pc THEN NOW() ELSE price_changed_at END,
                    stock_changed_at = CASE WHEN :sc THEN NOW() ELSE stock_changed_at END
@@ -240,6 +261,10 @@ def run_supplier_sync(engine: Engine, supplier_id: int, *, trigger: str = "manua
         cfg = load_config(conn, supplier_id)
     if not cfg["supplier"]["is_active"] and trigger == "schedule":
         return {"skipped": "Tedarikçi pasif"}
+    # Onay kapısı: kaynaktan (URL) ürün aktarımı, kullanıcı eşleştirmeyi onaylamadan başlamaz.
+    # Kullanıcının seçip yüklediği dosya (content) kendi başına açık bir kullanıcı eylemidir.
+    if content is None and not cfg["supplier"].get("mapping_approved_at") and trigger != "approval":
+        return {"skipped": "Alan eşleştirmesi onaylanmadı; içe aktarma sihirbazından onaylayın."}
     run_id = start_run(engine, supplier_id, trigger, job_id)
     stats = SyncStats()
     try:

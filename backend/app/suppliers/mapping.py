@@ -14,7 +14,7 @@ from .fields import FIELD_NAMES, FIELD_TYPES, REQUIRED_FIELDS
 _NUM_CLEAN = re.compile(r"[^\d,.\-]")
 MAX_TEXT = {"name": 500, "description": 20000, "category": 500, "brand": 200, "supplier_sku": 200,
             "barcode": 100, "model_code": 200, "currency": 10,
-            "color": 100, "variant": 200}
+            "color": 100, "variant": 200, "size": 100}
 
 
 def parse_decimal(value) -> Decimal | None:
@@ -83,6 +83,15 @@ class MappedItem:
 
 
 def _resolve(rec: dict, path: str):
+    """Kaynak yol; virgülle ayrılmış birden çok yol (ör. Image1,Image2,Image3) değerleri sırayla birleştirir."""
+    if "," in path:
+        vals: list = []
+        for part in [x.strip() for x in path.split(",") if x.strip()]:
+            v = _resolve(rec, part)
+            if v in (None, "", []):
+                continue
+            vals.extend(v if isinstance(v, list) else [v])
+        return vals or None
     if path in rec:
         return rec[path]
     # Kayıt yolu farklı yazılmışsa (baş/son '/' ya da büyük/küçük harf) esnek eşleşme

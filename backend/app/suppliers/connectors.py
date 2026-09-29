@@ -93,6 +93,12 @@ class SupplierConnector:
         records, path = self.parse(data)
         return FetchResult(records, path, 1, len(data))
 
+    def fetch_raw(self) -> bytes | None:
+        """Ham kaynak (XML/CSV). Sayfalı JSON API'de tek bir ham içerik yoktur: None."""
+        if not self.remote:
+            raise SupplierConnectorError("Bu tedarikçi manuel; önizleme için dosya yükleyin.")
+        return self._download(self._url())
+
     def from_content(self, content: bytes) -> FetchResult:
         records, path = self.parse(content)
         return FetchResult(records, path, 1, len(content))
@@ -127,6 +133,9 @@ class JsonApiConnector(SupplierConnector):
     type = "api"
     label = "JSON API"
     description = "JSON dönen API; sayfa/limit parametreleriyle sayfalama desteklenir."
+
+    def fetch_raw(self) -> bytes | None:
+        return None   # sayfalı: kayıtlar fetch() ile okunur
 
     @staticmethod
     def _with_params(url: str, params: dict) -> str:

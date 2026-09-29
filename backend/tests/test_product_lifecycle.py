@@ -35,7 +35,8 @@ def test_mapping_suggestion_finds_color_and_variant():
     s = suggest_mapping(["Urun/Renk", "Urun/Beden", "Urun/UrunKodu"])
     got = {k: (v["source_path"] if isinstance(v, dict) else v) for k, v in s.items()} if isinstance(s, dict) else {
         m["target_field"]: m["source_path"] for m in s}
-    assert got.get("color") == "Urun/Renk" and got.get("variant") == "Urun/Beden"
+    # Beden artık ayrı 'size' alanı (renk / beden / varyant ayrı eşleştirilir)
+    assert got.get("color") == "Urun/Renk" and got.get("size") == "Urun/Beden"
 
 
 def test_pool_filters(client, engine):
