@@ -15,7 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from ..db import rows
-from ..domain.suppliers import Offer, effective_stock, select_offer
+from ..domain.suppliers import Offer, effective_cost, effective_stock, select_offer
+from . import app_settings
 
 
 def link_by_barcode(conn: Connection, supplier_id: int | None = None) -> int:
@@ -40,17 +41,19 @@ def load_offers(conn: Connection, product_ids: list[int]) -> dict[int, list[Offe
     if not product_ids:
         return {}
     out: dict[int, list[Offer]] = defaultdict(list)
+    fx = app_settings.fx_rates(conn)
     for r in rows(conn, """
         SELECT sp.id, sp.product_id, sp.supplier_id, s.name AS supplier_name, sp.cost, sp.stock, s.priority,
-               s.stock_rules, s.is_active, COALESCE(sp.status, 'active') AS status
+               s.stock_rules, s.is_active, COALESCE(sp.status, 'active') AS status, sp.currency, sp.vat_rate,
+               s.price_vat_mode
           FROM supplier_products sp JOIN suppliers s ON s.id = sp.supplier_id
          WHERE sp.product_id = ANY(:ids)
     """, ids=list(product_ids)):
+        cost, note = effective_cost(r["cost"], r["currency"], r["vat_rate"], r["price_vat_mode"], fx)
         out[r["product_id"]].append(Offer(
             supplier_product_id=r["id"], supplier_id=r["supplier_id"], supplier_name=r["supplier_name"],
-            cost=Decimal(r["cost"]) if r["cost"] is not None else None,
-            stock=effective_stock(r["stock"], r["stock_rules"]), priority=int(r["priority"] or 100),
-            available=bool(r["is_active"]) and r["status"] == "active"))
+            cost=cost, stock=effective_stock(r["stock"], r["stock_rules"]), priority=int(r["priority"] or 100),
+            available=bool(r["is_active"]) and r["status"] == "active", cost_note=note))
     return out
 
 

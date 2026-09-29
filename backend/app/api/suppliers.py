@@ -20,8 +20,8 @@ from ..config import get_settings, is_set
 from ..connectors.base import ConnectorError
 from ..db import get_conn, get_engine, row, rows
 from ..deps import CurrentUser, admin, client_ip, operator, viewer
-from ..domain.suppliers import STRATEGIES, STRATEGY_LABELS, select_offer
-from ..services import jobs
+from ..domain.suppliers import STRATEGIES, STRATEGY_LABELS, effective_cost, select_offer
+from ..services import app_settings, jobs
 from ..services.audit import log_audit
 from ..services.supplier_catalog import load_offers, refresh_catalog
 from ..services.supplier_sync import SupplierSyncError, fetch_records, load_config, run_supplier_sync
@@ -93,6 +93,8 @@ class SupplierIn(BaseModel):
     integration_type: str | None = Field(None, pattern=r"^(xml|api|csv|manual|external)$")
     connection: ConnectionIn | None = None
     preset: str | None = Field(None, max_length=50)
+    # Tedarikçi fiyatları KDV dahil mi hariç mi? None = belirtilmedi (KDV dahil varsayılır, uyarı gösterilir)
+    price_vat_mode: str | None = Field(None, pattern=r"^(included|excluded)$")
 
 
 class MappingItem(BaseModel):
@@ -180,7 +182,7 @@ def _audit_connection(c: ConnectionIn) -> dict:
 SUPPLIER_STATS_SQL = """
     SELECT sp.id, sp.code, sp.name, sp.contact_name, sp.phone, sp.email, sp.lead_time_days, sp.notes, sp.is_active,
            sp.priority, sp.sync_interval_minutes, sp.stock_rules, sp.last_sync_at, sp.last_sync_status,
-           sp.last_sync_error, sp.created_at, sp.updated_at,
+           sp.last_sync_error, sp.created_at, sp.updated_at, sp.price_vat_mode, sp.mapping_approved_at,
            COALESCE(sc.integration_type, CASE WHEN sp.integration_type IN ('xml','api','csv') THEN sp.integration_type
                                                ELSE 'manual' END) AS integration_type,
            sc.source_url_display, (sc.source_url_enc IS NOT NULL) AS has_source_url,
@@ -249,9 +251,9 @@ def create_supplier(body: SupplierIn, request: Request, user: CurrentUser = Depe
         with conn.begin_nested():
             sid = conn.execute(text("""
                 INSERT INTO suppliers(code, name, contact_name, phone, email, lead_time_days, integration_type, notes,
-                                      is_active, priority, sync_interval_minutes, stock_rules)
+                                      is_active, priority, sync_interval_minutes, stock_rules, price_vat_mode)
                 VALUES (:code, :name, :contact_name, :phone, :email, :lead_time_days, :it, :notes, :is_active,
-                        :priority, :interval, CAST(:rules AS JSONB))
+                        :priority, :interval, CAST(:rules AS JSONB), :price_vat_mode)
                 RETURNING id
             """), {**body.model_dump(exclude={"connection", "stock_rules", "code", "preset", "integration_type"}),
                    "code": code, "it": connection.integration_type, "interval": body.sync_interval_minutes,
@@ -290,7 +292,8 @@ def update_supplier(supplier_id: int, body: SupplierIn, request: Request, user: 
     n = conn.execute(text("""
         UPDATE suppliers SET name = :name, contact_name = :contact_name, phone = :phone, email = :email,
                lead_time_days = :lead_time_days, notes = :notes, is_active = :is_active, priority = :priority,
-               sync_interval_minutes = :interval, stock_rules = CAST(:rules AS JSONB), updated_at = NOW()
+               sync_interval_minutes = :interval, stock_rules = CAST(:rules AS JSONB),
+               price_vat_mode = COALESCE(:price_vat_mode, price_vat_mode), updated_at = NOW()
          WHERE id = :id
     """), {**body.model_dump(exclude={"connection", "stock_rules", "code", "preset", "integration_type"}),
            "interval": body.sync_interval_minutes, "rules": body.stock_rules.model_dump_json(), "id": supplier_id}).rowcount
@@ -520,6 +523,7 @@ def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str
     items = rows(conn, f"""
         SELECT sp.id, sp.supplier_id, s.name AS supplier_name, sp.supplier_sku, sp.barcode, sp.model_code, sp.name,
                sp.brand, sp.category, sp.cost, sp.sale_price, sp.stock, sp.vat_rate, sp.desi, sp.color, sp.variant,
+               sp.size, sp.parent_code, sp.currency, s.price_vat_mode,
                COALESCE(sp.status, 'active') AS status, sp.images, sp.last_seen_at, sp.missing_since, sp.product_id,
                sp.updated_at,
                (SELECT COALESCE(json_agg(DISTINCT m.name), '[]'::json) FROM marketplace_listings l
@@ -536,15 +540,20 @@ def supplier_pool(page: Page = Depends(), supplier_id: int | None = None, q: str
           LEFT JOIN products p ON p.id = sp.product_id
          WHERE {w} ORDER BY sp.name NULLS LAST, sp.id LIMIT :limit OFFSET :offset
     """, **params, limit=page.page_size, offset=page.offset)
+    fx = app_settings.fx_rates(conn)
     for it in items:
         it["status_label"] = STATUS_TR.get(it["status"], it["status"])
+        # Finansta kullanılacak maliyet (TL, KDV dahil) ve nedeni; kur yoksa maliyet YOK
+        it["effective_cost"], it["cost_note"] = effective_cost(it["cost"], it["currency"], it["vat_rate"],
+                                                               it.pop("price_vat_mode"), fx)
         imgs = it.pop("images") or []
         it["image"] = imgs[0] if imgs else None
         it["image_count"] = len(imgs)
         it["problems"] = [t for c, t in (
             (it["status"] == "missing", "Kaynakta bulunamadı"), (not it["barcode"], "Barkod yok"),
             (it["cost"] is None, "Alış fiyatı yok"), (not imgs, "Görsel yok"),
-            ((it["stock"] or 0) <= 0, "Stok yok"), (it["open_alerts"], "Açık uyarı var")) if c]
+            ((it["stock"] or 0) <= 0, "Stok yok"), (it["open_alerts"], "Açık uyarı var"),
+            (it["cost"] is not None and it["effective_cost"] is None, it["cost_note"] or "Maliyet kullanılamıyor")) if c]
     summary = row(conn, """
         SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE COALESCE(status,'active') = 'active') AS active,
                COUNT(*) FILTER (WHERE status = 'missing') AS missing,

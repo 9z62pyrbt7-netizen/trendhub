@@ -47,6 +47,7 @@ class Offer:
     stock: int                 # kurallar uygulanmış kullanılabilir stok
     priority: int = 100
     available: bool = True     # tedarikçi aktif ve ürün kaynağında mevcut
+    cost_note: str | None = None   # maliyet neden kullanılamıyor / neden uyarılı (kur, KDV)
 
     @property
     def usable(self) -> bool:
@@ -83,3 +84,29 @@ STRATEGIES: dict[str, Callable[[list[Offer], int | None], Offer | None]] = {
 def select_offer(offers: list[Offer], strategy: str | None, preferred_supplier_id: int | None) -> Offer | None:
     fn = STRATEGIES.get(strategy or "manual", _manual)
     return fn(offers, preferred_supplier_id)
+
+
+def effective_cost(cost, currency: str | None, vat_rate, price_vat_mode: str | None,
+                   fx_rates: dict) -> tuple[Decimal | None, str | None]:
+    """Tedarikçi fiyatından finansta kullanılacak maliyet: TL, KDV DAHİL.
+
+    * Para birimi TRY değilse ve kur tanımlı değilse maliyet YOKTUR (sessizce TL sayılmaz).
+    * Tedarikçi fiyatları KDV hariçse ürünün KDV oranı eklenir; oran bilinmiyorsa değer uydurulmaz (maliyet yok).
+    * KDV durumu belirtilmemişse fiyat olduğu gibi kullanılır (önceki davranış) ve uyarı döner.
+    Dönen: (maliyet | None, not | None)"""
+    if cost is None:
+        return None, None
+    cur = (currency or "TRY").strip().upper()
+    cur = {"TL": "TRY", "YTL": "TRY"}.get(cur, cur)
+    rate = fx_rates.get(cur)
+    if rate is None:
+        return None, f"Döviz kuru tanımlı değil ({cur}); maliyet finansa girmedi"
+    base = Decimal(cost) * Decimal(rate)
+    note = None if cur == "TRY" else f"{cur} × {rate} kuruyla TL'ye çevrildi"
+    if price_vat_mode == "excluded":
+        if vat_rate is None:
+            return None, "Fiyat KDV hariç ama ürünün KDV oranı yok; maliyet hesaplanamadı"
+        base = base * (1 + Decimal(vat_rate) / 100)
+    elif price_vat_mode != "included":
+        note = ((note + "; ") if note else "") + "Tedarikçi fiyatının KDV durumu belirtilmedi (KDV dahil varsayıldı)"
+    return base.quantize(Decimal("0.01")), note

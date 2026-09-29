@@ -906,6 +906,8 @@ async function supplierForm(detail) {
       <label>Entegrasyon türü<select name="integration_type">${opt(Object.entries(meta.integration_types), c.integration_type || 'xml')}</select>
         <span class="small muted" id="conn-desc"></span></label>
       <label>Senkronizasyon sıklığı<select name="sync_interval_minutes">${opt(INTERVALS, s?.sync_interval_minutes ?? 60)}</select></label>
+      <label class="full">Tedarikçi fiyatları (alış fiyatı)<select name="price_vat_mode">${opt([['', 'Belirtilmedi — KDV dahil varsayılır (uyarı gösterilir)'], ['included', 'KDV DAHİL'], ['excluded', 'KDV HARİÇ — ürünün KDV oranı eklenerek maliyet hesaplanır']], s?.price_vat_mode || '')}</select>
+        <span class="small muted">Finanstaki ürün maliyeti KDV dahil tutardır. Döviz fiyatlar yalnızca Ayarlar'da kur tanımlıysa kullanılır.</span></label>
       <fieldset class="full fieldset" data-remote>
         <legend>Kaynak</legend>
         <label>Kaynak adresi (XML / API / CSV URL)<input name="source_url" type="url" inputmode="url" maxlength="2000" placeholder="${c.has_source_url ? 'Kayıtlı: ' + (c.source_url_display || '') + ' — değiştirmek için yeni adres girin' : 'https://…'}"></label>
@@ -979,7 +981,7 @@ async function supplierForm(detail) {
         lead_time_days: d.lead_time_days ? Number(d.lead_time_days) : null, notes: d.notes || null, is_active: d.is_active === '1',
         priority: Number(d.priority || 100), sync_interval_minutes: Number(d.sync_interval_minutes || 0),
         stock_rules: { buffer: Number(d.buffer || 0), min_stock: Number(d.min_stock || 0), max_stock: d.max_stock === '' ? null : Number(d.max_stock) },
-        connection, preset: d.preset || null,
+        connection, preset: d.preset || null, price_vat_mode: d.price_vat_mode || null,
       };
       if (s) {
         await api(`/api/suppliers/${s.id}`, { method: 'PUT', body: payload });
@@ -1197,7 +1199,7 @@ async function renderPool(box, { supplierId = null, embedded = false, selectable
             <b class="pool-title" title="${x.name || ''}">${x.name || x.supplier_sku}</b>
             <div class="row" style="gap:4px">${embedded ? '' : html`<span class="badge plain">${x.supplier_name}</span>`}<span class="badge ${x.status === 'missing' ? 'tone-bad' : 'tone-good'}">${x.status_label}</span>
               ${(x.stores || []).map((m) => html`<span class="badge tone-info">${m}</span>`)}${(x.draft_marketplaces || []).length ? html`<span class="badge plain">taslak: ${x.draft_marketplaces.join(', ')}</span>` : ''}</div>
-            <div class="pool-prices"><span><small>Alış</small><b>${x.cost ? money(x.cost) : '—'}</b></span><span><small>Satış</small><b>${x.sale_price ? money(x.sale_price) : '—'}</b></span><span><small>Stok</small><b class="${Number(x.stock) > 0 ? '' : 'neg'}">${num(x.stock)}</b></span></div>
+            <div class="pool-prices"><span title="${x.cost_note || 'Finansta kullanılan maliyet (TL, KDV dahil)'}"><small>Alış${x.currency && x.currency !== 'TRY' ? ` (${x.currency})` : ''}</small><b>${x.cost ? (x.currency && x.currency !== 'TRY' ? `${Number(x.cost).toLocaleString('tr-TR')} ${x.currency}` : money(x.cost)) : '—'}</b>${x.effective_cost && Number(x.effective_cost) !== Number(x.cost) ? html`<small>maliyet ${money(x.effective_cost)}</small>` : ''}</span><span><small>Satış</small><b>${x.sale_price ? money(x.sale_price) : '—'}</b></span><span><small>Stok</small><b class="${Number(x.stock) > 0 ? '' : 'neg'}">${num(x.stock)}</b></span></div>
             <dl class="kv small">${kv('Tedarikçi ürün ID', x.supplier_sku)}${kv('SKU', x.product_sku)}${kv('Barkod', x.barcode || '—')}${kv('Model', x.model_code)}${kv('Marka', x.brand)}${kv('Kategori', x.category)}${kv('Renk', x.color)}${kv('Varyant', x.variant)}${kv('KDV', x.vat_rate === null ? null : `%${x.vat_rate}`)}${kv('Desi', x.desi)}${kv('Güncelleme', dateTime(x.updated_at || x.last_seen_at))}</dl>
             ${x.problems.length ? html`<p class="small neg">⚠ ${x.problems.join(' · ')}</p>` : ''}
             <div class="row">${x.product_id ? html`<button class="btn btn-sm" data-life="${x.product_id}">Ürün detayı</button>${Number(x.offer_count) > 1 ? html`<button class="btn btn-sm" data-offers="${x.product_id}">${x.offer_count} teklif</button>` : ''}` : html`<span class="muted small">Havuzda (kataloğa alınmadı)</span>`}</div>

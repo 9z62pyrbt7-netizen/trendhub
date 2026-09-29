@@ -98,7 +98,13 @@ def compute(conn: Connection, product: dict, marketplace: dict, offers, rule: Pr
                            min_stock=int(extra["min_stock"] or 0), existing_listing=bool(existing),
                            attributes=attributes, required_attributes=required_attrs)
     if offer is None:
-        check.errors.insert(0, "Kullanılabilir tedarikçi teklifi yok (stokta ve fiyatı olan)")
+        blocked = sorted({o.cost_note for o in offers if o.cost is None and o.cost_note})
+        check.errors.insert(0, "Kullanılabilir tedarikçi teklifi yok (stokta ve fiyatı olan)"
+                            + (": " + "; ".join(blocked) if blocked else ""))
+    elif offer.cost is None and offer.cost_note:
+        check.errors.insert(0, offer.cost_note)        # ör. kur tanımsız: maliyet yok, kâr hesaplanamaz
+    elif offer.cost_note:
+        check.warnings.append(offer.cost_note)
     return {"supplier_product_id": offer.supplier_product_id if offer else None,
             "supplier_name": offer.supplier_name if offer else None,
             "price": price, "stock": stock, "cost_basis": cost, "commission_rate": rule.commission_rate,
