@@ -24,6 +24,8 @@ INTEGRATION_CHECK = "integration.check"
 SUPPLIER_SYNC = "supplier.sync"
 ALERTS_SCAN = "alerts.scan"
 ALERTS_SCAN_EVERY_MINUTES = 15
+STOREFRONT_MAINTENANCE = "storefront.maintenance"
+STOREFRONT_MAINTENANCE_EVERY_MINUTES = 10
 DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
@@ -36,6 +38,7 @@ JOB_LABELS_TR = {
     SUPPLIER_SYNC: "Tedarikçi senkronizasyonu",
     ALERTS_SCAN: "Uyarı taraması",
     "listing.publish": "Ürün yayınlama (onaylı)",
+    STOREFRONT_MAINTENANCE: "Web mağazası bakımı (süresi dolan ödeme beklemeleri, eski sepetler)",
 }
 
 
@@ -132,6 +135,10 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
     t = job["job_type"]
     if t == ALERTS_SCAN:
         return run_alerts_scan(engine)
+    if t == STOREFRONT_MAINTENANCE:
+        from ..storefront.checkout import expire_stale
+        with engine.begin() as conn:
+            return expire_stale(conn)
     if t in (ORDERS_SYNC, ORDERS_DEEP_SYNC, LISTINGS_SYNC, SUPPLIER_SYNC):
         return _scan_after(engine, _execute_sync(engine, job, payload, settings))
     if t == INTEGRATION_CHECK:
@@ -226,3 +233,13 @@ def schedule_alerts_scan(conn) -> int | None:
     if recent:
         return None
     return jobs.enqueue(conn, ALERTS_SCAN, payload={}, idempotency_key=ALERTS_SCAN, max_attempts=2)
+
+
+def schedule_storefront_maintenance(conn) -> int | None:
+    """Web mağazası: süresi dolan Havale/EFT ve kart ödeme beklemelerini kapatır (stok ayırması bırakılır)."""
+    recent = conn.execute(text("""SELECT 1 FROM sync_jobs WHERE job_type = :t
+                                   AND (status IN ('queued','running') OR created_at > NOW() - make_interval(mins => :i))
+                                 LIMIT 1"""), {"t": STOREFRONT_MAINTENANCE, "i": STOREFRONT_MAINTENANCE_EVERY_MINUTES}).first()
+    if recent:
+        return None
+    return jobs.enqueue(conn, STOREFRONT_MAINTENANCE, payload={}, idempotency_key=STOREFRONT_MAINTENANCE, max_attempts=2)

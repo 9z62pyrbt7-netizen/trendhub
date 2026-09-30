@@ -568,6 +568,14 @@ async function showOrder(id) {
     <div class="row" style="margin-bottom:16px">${statusBadge(o.internal_status, o.status_label)}<span class="badge plain">${o.marketplace_name || '—'}</span>
       ${o.status ? html`<span class="muted small">Pazaryeri durumu: ${o.status}</span>` : ''}</div>
     ${o.review_reason ? html`<div class="notice bad" style="margin-bottom:16px">${o.review_reason}</div>` : ''}
+    ${o.storefront ? html`<div class="card" style="margin-bottom:16px"><h3>Web siparişi ${o.storefront.public_code}</h3><dl class="kv mt">
+      <dt>Ödeme</dt><dd>${SF_PAY[o.storefront.payment_method] || o.storefront.payment_method} · ${o.storefront.status_label}${o.storefront.paid_at ? ` (${dateTime(o.storefront.paid_at)})` : ''}</dd>
+      <dt>Müşteriden alınan</dt><dd>${money(o.storefront.total)} (kargo/hizmet ${money(o.storefront.shipping_fee)})</dd>
+      ${o.storefront.address ? html`<dt>Teslimat</dt><dd>${o.storefront.full_name}<br>${o.storefront.address}<br>${o.storefront.district} / ${o.storefront.city} ${o.storefront.postal_code || ''}</dd>
+        <dt>İletişim</dt><dd>${o.storefront.phone} · ${o.storefront.email}</dd>
+        <dt>Fatura</dt><dd>${o.storefront.billing?.type === 'corporate' ? `${o.storefront.billing.company} · ${o.storefront.billing.tax_office} / ${o.storefront.billing.tax_number}` : 'Bireysel'}</dd>` : ''}
+      ${o.storefront.customer_note ? html`<dt>Müşteri notu</dt><dd>${o.storefront.customer_note}</dd>` : ''}</dl>
+      <p class="small muted mt">Bu sipariş Trendçantanız web sitesinden geldi. Tedarik ve kargo süreci TrendHub'dan yönetilir; pazaryerine gönderilmez.</p></div>` : ''}
     ${shipPlanCard(o.shipping_plan)}
     <div class="grid grid-2">
       <div class="card"><h3>Bilgiler</h3><dl class="kv mt">
@@ -2087,6 +2095,169 @@ PAGES.settings = {
   },
 };
 
+// ---- Trendçantanız web mağazası (satış kanalı: "Trendçantanız Web")
+const SF_STATUS_TONE = { awaiting_payment: 'tone-warn', pending_payment: 'tone-warn', paid: 'tone-good', cash_on_delivery: 'tone-info', cancelled: '', expired: '', payment_failed: 'tone-bad' };
+const SF_PAY = { bank_transfer: 'Havale / EFT', cash_on_delivery: 'Kapıda ödeme', card: 'Kart' };
+PAGES.storefront = {
+  title: 'Web Sitesi', icon: 'storefront',
+  async render(params) {
+    const tab = params.get('tab') || 'orders';
+    const ov = await api('/api/storefront/overview');
+    setHeader('Web Sitesi', 'Trendçantanız web mağazası: yayındaki ürünler, ödeme bekleyen siparişler ve mağaza ayarları',
+      ov.base_url ? html`<a class="btn" href="${ov.base_url}" target="_blank" rel="noopener">Mağazayı aç ↗</a>` : '');
+    const tabs = [['orders', `Ödeme bekleyenler${ov.pending_payment ? ` (${ov.pending_payment})` : ''}`], ['products', 'Ürün yayını'], ...(can('admin') ? [['settings', 'Mağaza ayarları']] : [])];
+    view().innerHTML = renderVal(html`
+      ${ov.checkout_ready ? '' : html`<div class="notice bad" style="margin-bottom:16px"><b>Web mağazası şu anda sipariş kabul etmiyor.</b><ul class="small mt">${ov.blockers.map((b) => html`<li>${b}</li>`)}</ul></div>`}
+      <div class="grid grid-4">
+        ${kpi('Yayındaki model', num(ov.published_models), `${num(ov.published_products)} ürün/varyant · ${num(ov.categories)} kategori`)}
+        ${kpi('Stokta model', num(ov.in_stock_models), 'Kanallar arası kullanılabilir stoğa göre')}
+        ${kpi('Web siparişi (30 gün)', num(ov.orders_30d), money(ov.revenue_30d))}
+        ${kpi('Ödeme bekleyen', num(ov.pending_payment), 'Havale/EFT veya kart', ov.pending_payment ? 'neg' : '')}
+      </div>
+      <div class="card mt"><div class="card-head"><div><h2>Ana sayfa hero ürünü</h2>
+        <p>${ov.hero ? html`<b>${ov.hero.title}</b> — ${ov.hero.reason}` : 'Yayında ürün yok.'}</p></div>
+        ${ov.hero && ov.base_url ? html`<a class="btn btn-sm" href="${ov.base_url}${ov.hero.url}" target="_blank" rel="noopener">Ürünü gör ↗</a>` : ''}</div>
+        <p class="small muted">Ödeme yöntemleri: ${ov.payment_methods.length ? ov.payment_methods.map((m) => m.label).join(', ') : 'yok'}.
+          Kartla ödeme için sanal POS sağlayıcısı ${ov.card_provider_configured ? 'yapılandırılmış' : 'henüz entegre edilmedi (sunucu ayarı + sağlayıcı sözleşmesi gerekir)'}.</p></div>
+      <div class="seg mt" role="tablist" style="margin-bottom:16px">${tabs.map(([k, l]) => html`<button role="tab" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}" data-sftab="${k}">${l}</button>`)}</div>
+      <div id="sf-body"></div>`);
+    $$('[data-sftab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/storefront?tab=${b.dataset.sftab}`; }));
+    const box = $('#sf-body');
+    if (tab === 'products') return sfProducts(box);
+    if (tab === 'settings' && can('admin')) return sfSettings(box);
+    return sfOrders(box);
+  },
+};
+
+async function sfOrders(box, page = 1, status = 'pending') {
+  if (!can('operator')) { box.innerHTML = renderVal(empty('Yetki gerekli', 'Web siparişlerinin müşteri bilgileri yalnızca operatör ve yöneticilere gösterilir.')); return; }
+  const d = await api('/api/storefront/orders', { query: { status: status === 'all' ? '' : status, page, page_size: 25 } });
+  box.innerHTML = renderVal(html`<div class="card">
+    <div class="card-head"><div><h2>Web siparişleri</h2><p>Havale/EFT siparişi, ödeme hesaba geçtiğinde “Ödeme alındı” ile TrendHub siparişine dönüşür ve Siparişler ekranında “Trendçantanız Web” kanalıyla görünür. O zamana kadar stok ayrılır; süre dolarsa sipariş otomatik kapanır.</p></div>
+      <select id="sf-status" aria-label="Durum">${[['pending', 'Ödeme bekleyenler'], ['all', 'Tümü'], ['paid', 'Ödeme alındı'], ['cash_on_delivery', 'Kapıda ödeme'], ['expired', 'Süresi dolan'], ['cancelled', 'İptal']].map(([v, l]) => html`<option value="${v}" ${raw(v === status ? 'selected' : '')}>${l}</option>`)}</select></div>
+    ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Tarih</th><th>Müşteri</th><th>Ödeme</th><th class="r">Adet</th><th class="r">Tutar</th><th>Durum</th><th></th></tr></thead><tbody>
+      ${d.items.map((o) => html`<tr><td><b>${o.public_code}</b>${o.order_id ? html`<br><a href="#" class="small" data-order="${o.order_id}">TrendHub siparişi →</a>` : ''}</td><td>${dateTime(o.created_at)}</td>
+        <td>${o.full_name}<span class="muted small">${o.city}</span></td><td>${SF_PAY[o.payment_method] || o.payment_method}</td><td class="r num">${num(o.item_count)}</td><td class="r num">${money(o.total)}</td>
+        <td><span class="badge ${SF_STATUS_TONE[o.status] || ''}">${o.status_label}</span>${o.reserved_until ? html`<span class="muted small">Stok ayrıldı: ${dateTime(o.reserved_until)}'e kadar</span>` : ''}</td>
+        <td class="r">${['awaiting_payment', 'pending_payment'].includes(o.status) ? html`<span class="row nowrap"><button class="btn btn-sm btn-primary" data-sfpay="${o.id}" data-code="${o.public_code}" data-total="${o.total}">Ödeme alındı</button><button class="btn btn-sm" data-sfcancel="${o.id}" data-code="${o.public_code}">İptal</button></span>` : ''}</td></tr>`)}
+      </tbody></table></div>${pager(d, (p) => sfOrders(box, p, status))}` : empty('Kayıt yok', status === 'pending' ? 'Ödemesi beklenen web siparişi yok.' : 'Bu durumda web siparişi yok.')}</div>`);
+  $('#sf-status').addEventListener('change', (e) => sfOrders(box, 1, e.target.value));
+  $$('[data-order]', box).forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); showOrder(Number(a.dataset.order)); }));
+  $$('[data-sfpay]', box).forEach((b) => b.addEventListener('click', () => {
+    const body = openModal(html`<h2>Ödeme alındı · ${b.dataset.code}</h2><form class="stack" id="sfpay-form">
+      <p>${money(b.dataset.total)} tutarındaki ödemenin hesaba geçtiğini doğruladınız mı? Onaylayınca sipariş TrendHub'da “Yeni” statüsüyle oluşur.</p>
+      <label>Banka açıklaması / referans (isteğe bağlı)<input name="reference" maxlength="200"></label>
+      <p class="form-error"></p><div class="row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Ödemeyi onayla</button></div></form>`);
+    $('#sfpay-form', body).addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitting(e.target, async () => {
+        await api(`/api/storefront/orders/${b.dataset.sfpay}/confirm-payment`, { method: 'POST', body: { reference: formData(e.target).reference || null } });
+        closeLayer('modal'); toast('Ödeme onaylandı, sipariş oluşturuldu'); refresh();
+      });
+    });
+  }));
+  $$('[data-sfcancel]', box).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm(`${b.dataset.code} iptal edilsin mi? Ayrılan stok serbest bırakılır.`)) return;
+    try { await api(`/api/storefront/orders/${b.dataset.sfcancel}/cancel`, { method: 'POST' }); toast('Web siparişi iptal edildi'); refresh(); } catch (e) { fail(e); }
+  }));
+}
+
+async function sfProducts(box, page = 1, f = { q: '', status: '' }) {
+  const d = await api('/api/storefront/products', { query: { ...f, page, page_size: 25 } });
+  box.innerHTML = renderVal(html`<div class="card">
+    <div class="card-head"><div><h2>Ürün yayını</h2><p>Ürünler TrendHub kataloğundan gelir (tedarikçi beslemesi / pazaryeri ilanı). Fiyat, stok ve görseller katalogla eşleşir; burada yalnızca web'e özel başlık, üstü çizili fiyat ve öne çıkarma ayarlanır.
+      ${d.auto_publish ? 'Aktif, fiyatı ve görseli olan ürünler otomatik yayınlanır.' : 'Otomatik yayın kapalı: yalnızca yayınlanan ürünler görünür.'}</p></div></div>
+    <form class="filters" id="sfp-filter"><input name="q" value="${f.q}" placeholder="SKU, barkod veya ad" aria-label="Ara">
+      <select name="status" aria-label="Durum"><option value="">Tümü</option><option value="visible" ${raw(f.status === 'visible' ? 'selected' : '')}>Yayında</option><option value="hidden" ${raw(f.status === 'hidden' ? 'selected' : '')}>Yayında değil</option></select>
+      <button class="btn btn-sm" type="submit">Filtrele</button></form>
+    ${d.items.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Ürün</th><th class="r">Fiyat</th><th class="r" title="Katalog stoğu">Stok</th><th class="r" title="Son stok güncellemesinden sonraki tüm kanal siparişleri ve ödeme bekleyen web siparişleri düşülmüş">Satılabilir</th><th>Web durumu</th><th></th></tr></thead><tbody>
+      ${d.items.map((x) => html`<tr><td><b>${x.title || x.name}</b><span class="muted small ellipsis">${x.sku || '—'} · ${x.category || 'kategori yok'} · ${num(x.image_count)} görsel</span></td>
+        <td class="r num">${money(x.sale_price)}${x.compare_at_price ? html`<br><s class="muted small">${money(x.compare_at_price)}</s>` : ''}</td>
+        <td class="r num">${num(x.stock)}</td><td class="r num ${Number(x.available) <= 0 ? 'neg' : ''}">${num(x.available)}</td>
+        <td>${x.visible ? html`<span class="badge tone-good">Yayında</span>${x.featured ? html` <span class="badge tone-info">Öne çıkan</span>` : ''}` : html`<span class="badge">Yayında değil</span><span class="muted small">${x.hidden_reasons.join(' · ')}</span>`}</td>
+        <td class="r">${can('operator') ? html`<button class="btn btn-sm" data-sfedit="${x.id}">Düzenle</button>` : ''}</td></tr>`)}
+      </tbody></table></div>${pager(d, (p) => sfProducts(box, p, f))}` : empty('Ürün yok', 'Kataloğa ürün eklendiğinde (Tedarikçiler → Ürün havuzu → Kataloğa al) burada görünür.')}</div>`);
+  $('#sfp-filter').addEventListener('submit', (e) => { e.preventDefault(); sfProducts(box, 1, formData(e.target)); });
+  $$('[data-sfedit]', box).forEach((b) => b.addEventListener('click', () => {
+    const x = d.items.find((i) => String(i.id) === b.dataset.sfedit);
+    const body = openModal(html`<h2>Web ayarı · ${x.name}</h2><form class="stack" id="sfp-form">
+      <label class="check"><input type="checkbox" name="published" value="1" ${raw(x.published === false ? '' : 'checked')}>Web sitesinde yayınla</label>
+      <label class="check"><input type="checkbox" name="featured" value="1" ${raw(x.featured ? 'checked' : '')}>Öne çıkan (listelerde önce gösterilir)</label>
+      <label>Web başlığı (boş = katalog adı)<input name="title" maxlength="300" value="${x.title || ''}" placeholder="${x.name}"></label>
+      <label>Üstü çizili fiyat (₺, boş = yok; satış fiyatından yüksek olmalı)<input name="compare_at_price" type="number" step="0.01" min="0" value="${x.compare_at_price ?? ''}"></label>
+      <label>Sıra (küçük önce)<input name="sort_order" type="number" step="1" value="${x.sort_order}"></label>
+      <p class="small muted">Satış fiyatı ve stok katalogdan gelir (Ürün & Stok ekranı). İndirim rozeti yalnızca gerçek üstü çizili fiyat girilirse gösterilir.</p>
+      <p class="form-error"></p><div class="row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>`);
+    $('#sfp-form', body).addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitting(e.target, async () => {
+        const v = formData(e.target);
+        await api(`/api/storefront/products/${x.id}`, { method: 'PATCH', body: { published: v.published === '1', featured: v.featured === '1', title: v.title || null,
+          compare_at_price: v.compare_at_price === '' ? 0 : Number(v.compare_at_price), sort_order: parseInt(v.sort_order || '0', 10) } });
+        closeLayer('modal'); toast('Kaydedildi. Mağazada en geç 30 sn içinde görünür.'); sfProducts(box, page, f);
+      });
+    });
+  }));
+}
+
+async function sfSettings(box) {
+  const s = await api('/api/storefront/settings');
+  const v = s.values;
+  const txt = (name, label, value, attrs = '') => html`<label>${label}<input name="${name}" value="${value ?? ''}" ${raw(attrs)}></label>`;
+  box.innerHTML = renderVal(html`<form class="card" id="sf-set"><div class="card-head"><div><h2>Mağaza ayarları</h2><p>Satıcı bilgileri ve yasal metinler (Mesafeli Satış Sözleşmesi, Ön Bilgilendirme Formu, KVKK, iade koşulları) 6502 sayılı Kanun ve Mesafeli Sözleşmeler Yönetmeliği gereği zorunludur; eksikse mağaza sipariş almaz. Metinleri hukuk danışmanınızla hazırlayın.</p></div></div>
+    <fieldset class="fieldset"><legend>Genel</legend><div class="form-grid">
+      <label class="check full"><input type="checkbox" name="enabled" ${raw(v.enabled ? 'checked' : '')}>Web mağazası açık (kapalıyken ürünler görünür, sipariş alınmaz)</label>
+      <label class="check full"><input type="checkbox" name="auto_publish" ${raw(v.auto_publish ? 'checked' : '')}>Aktif, fiyatı ve görseli olan katalog ürünlerini otomatik yayınla</label>
+      ${txt('announcement', 'Duyuru çubuğu (boş = gizli; yalnızca geçerli bilgi yazın)', v.announcement, 'maxlength="200"')}
+      ${txt('hero_product_id', 'Hero ürün ID (boş = en çok satan / otomatik)', v.hero_product_id, 'type="number" min="1"')}
+      ${txt('stock_buffer', 'Web stok güvenlik payı (adet)', v.stock_buffer, 'type="number" min="0"')}
+      ${txt('committed_window_hours', 'Tedarikçi stoğuna henüz yansımamış siparişleri düşme süresi (saat)', v.committed_window_hours, 'type="number" min="1"')}
+    </div></fieldset>
+    <fieldset class="fieldset mt"><legend>Kargo</legend><div class="form-grid">
+      ${txt('shipping_fee', 'Kargo ücreti (₺, 0 = ücretsiz)', v.shipping_fee, 'type="number" step="0.01" min="0"')}
+      ${txt('free_shipping_threshold', 'Ücretsiz kargo limiti (₺, boş = yok)', v.free_shipping_threshold, 'type="number" step="0.01" min="0"')}
+    </div></fieldset>
+    <fieldset class="fieldset mt"><legend>Ödeme</legend><div class="form-grid">
+      <label class="check full"><input type="checkbox" name="bank_transfer_enabled" ${raw(v.bank_transfer_enabled ? 'checked' : '')}>Havale / EFT</label>
+      ${txt('bank_transfer_iban', 'IBAN', v.bank_transfer_iban, 'maxlength="34" placeholder="TR00 0000 0000 0000 0000 0000 00"')}
+      ${txt('bank_transfer_account_name', 'Hesap sahibi', v.bank_transfer_account_name, 'maxlength="200"')}
+      ${txt('bank_transfer_bank_name', 'Banka', v.bank_transfer_bank_name, 'maxlength="200"')}
+      ${txt('bank_transfer_days', 'Ödeme süresi (gün; sonra sipariş kapanır, stok serbest kalır)', v.bank_transfer_days, 'type="number" min="1"')}
+      <label class="check full"><input type="checkbox" name="cash_on_delivery_enabled" ${raw(v.cash_on_delivery_enabled ? 'checked' : '')}>Kapıda ödeme (kargo firmanızın hizmeti olmalı)</label>
+      ${txt('cash_on_delivery_fee', 'Kapıda ödeme hizmet bedeli (₺)', v.cash_on_delivery_fee, 'type="number" step="0.01" min="0"')}
+      <p class="small muted full">Kartla ödeme: sanal POS sağlayıcısı (ör. iyzico, PayTR) ile sözleşme ve sunucu tarafı entegrasyon gerekir; anahtarlar yalnızca sunucu ortamında tutulur.</p>
+    </div></fieldset>
+    <fieldset class="fieldset mt"><legend>Satıcı bilgileri</legend><div class="form-grid">
+      ${s.seller_fields.map((f) => txt(`seller.${f.key}`, f.label + (f.required ? ' *' : ''), v.seller[f.key], 'maxlength="500"'))}
+    </div></fieldset>
+    <fieldset class="fieldset mt"><legend>Sosyal medya</legend><div class="form-grid">
+      ${s.social_fields.map((k) => txt(`social.${k}`, k === 'whatsapp' ? 'WhatsApp (ülke koduyla, ör. 905xxxxxxxxx)' : `${k[0].toUpperCase()}${k.slice(1)} (https://…)`, v.social[k]))}
+    </div></fieldset>
+    <fieldset class="fieldset mt"><legend>Yasal metinler ve sayfalar</legend><div class="stack">
+      ${s.legal_pages.map((p) => html`<label>${p.title}${p.required ? ' *' : ''}<textarea name="legal.${p.slug}" rows="5">${v.legal[p.slug] || ''}</textarea></label>`)}
+    </div></fieldset>
+    <p class="form-error"></p><button class="btn btn-primary mt" type="submit">Kaydet</button></form>`);
+  $('#sf-set').addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(e.target, async () => {
+      const el = e.target.elements;
+      const values = { seller: {}, social: {}, legal: {} };
+      ['enabled', 'auto_publish', 'bank_transfer_enabled', 'cash_on_delivery_enabled'].forEach((k) => { values[k] = el[k].checked; });
+      ['announcement', 'bank_transfer_iban', 'bank_transfer_account_name', 'bank_transfer_bank_name'].forEach((k) => { values[k] = el[k].value.trim(); });
+      ['stock_buffer', 'committed_window_hours', 'bank_transfer_days'].forEach((k) => { values[k] = parseInt(el[k].value || '0', 10); });
+      ['shipping_fee', 'cash_on_delivery_fee'].forEach((k) => { values[k] = el[k].value || '0'; });
+      values.free_shipping_threshold = el.free_shipping_threshold.value || null;
+      values.hero_product_id = el.hero_product_id.value ? parseInt(el.hero_product_id.value, 10) : null;
+      s.seller_fields.forEach((f) => { values.seller[f.key] = el[`seller.${f.key}`].value; });
+      s.social_fields.forEach((k) => { values.social[k] = el[`social.${k}`].value; });
+      s.legal_pages.forEach((p) => { values.legal[p.slug] = el[`legal.${p.slug}`].value; });
+      const r = await api('/api/storefront/settings', { method: 'PUT', body: { values } });
+      toast(r.changed.length ? 'Mağaza ayarları kaydedildi' : 'Değişiklik yok');
+      refresh();
+    });
+  });
+}
+
 // ---- Kullanıcılar (yalnızca yönetici)
 PAGES.users = {
   title: 'Kullanıcılar', icon: 'users', admin: true,
@@ -2130,7 +2301,7 @@ PAGES.users = {
 };
 
 // ------------------------------------------------------------------- yönlendirme
-const NAV = ['dashboard', 'alerts', 'orders', 'products', 'suppliers', 'transfer', 'shipping', 'finance', 'ads', 'reports', 'integrations', 'system', 'settings', 'users'];
+const NAV = ['dashboard', 'alerts', 'orders', 'products', 'storefront', 'suppliers', 'transfer', 'shipping', 'finance', 'ads', 'reports', 'integrations', 'system', 'settings', 'users'];
 // Sade çizgi ikonlar (24x24, currentColor)
 const ICONS = {
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -2146,6 +2317,7 @@ const ICONS = {
   ads: '<path d="M3 10v4h3l6 4V6L6 10z"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"/>',
   alerts: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  storefront: '<path d="M4 9h16l-1 11H5z"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/><path d="M3 5h18"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
 };
 const icon = (name) => raw(`<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`);

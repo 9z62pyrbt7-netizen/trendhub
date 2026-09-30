@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% import "partials/macros.html" as m %}
+{% block page_class %}cart{% endblock %}
+{% block content %}
+<section class="section cart-page" data-cart-page>
+  <div class="container">
+    <div class="page-head">
+      <h1 class="page-title">Sepetim</h1>
+      {% if cart.lines %}<a class="link-arrow" href="/urunler">Alışverişe devam et{% include "icons/arrow-right.svg" %}</a>{% endif %}
+    </div>
+    {% if cart.lines %}
+    <div class="cart-page__grid">
+      <ul class="lines" role="list" data-cart-lines>
+        {% for line in cart.lines %}{% set x = line.variant %}
+        <li class="line{% if line.issue %} line--issue{% endif %}" data-line data-product-id="{{ x.id }}">
+          <a class="line__media" href="{{ x.url }}" tabindex="-1" aria-hidden="true">{% if x.images %}<img src="{{ img(x.images[0], 240) }}" alt="" width="120" height="150" loading="lazy" data-cutout>{% endif %}</a>
+          <div class="line__info">
+            <a class="line__title" href="{{ x.url }}">{{ x.title }}</a>
+            {% if x.color or x.size %}<p class="line__variant">{{ [x.color, x.size]|select|join(' · ') }}</p>{% endif %}
+            <div class="line__price"><span>{{ fmt_try(x.price) }}</span></div>
+            {% if line.issue %}<p class="line__issue">{{ line.issue }}</p>{% endif %}
+            <div class="line__controls">
+              <div class="qty qty--sm">
+                <button type="button" class="qty__btn" data-line-set="{{ line.quantity - 1 }}" aria-label="Adedi azalt">{% include "icons/minus.svg" %}</button>
+                <span class="qty__input" aria-live="polite">{{ line.quantity }}</span>
+                <button type="button" class="qty__btn" data-line-set="{{ line.quantity + 1 }}" aria-label="Adedi artır" {% if line.quantity >= x.available %}disabled{% endif %}>{% include "icons/plus.svg" %}</button>
+              </div>
+              <button type="button" class="line__remove" data-line-set="0">Kaldır</button>
+            </div>
+          </div>
+          <div class="line__total">{{ fmt_try(line.total) }}</div>
+        </li>
+        {% endfor %}
+      </ul>
+      <aside class="cart-page__summary" aria-label="Sipariş özeti">
+        <div class="summary">
+          <div class="summary__row"><span>Ara toplam</span><span>{{ fmt_try(cart.items_total) }}</span></div>
+          <div class="summary__row"><span>Kargo</span><span>{% if cart.shipping > 0 %}{{ fmt_try(cart.shipping) }}{% else %}Ücretsiz{% endif %}</span></div>
+          {% if cart.free_shipping_remaining %}<p class="summary__hint">Ücretsiz kargo için {{ fmt_try(cart.free_shipping_remaining) }} daha ekleyin.</p>{% endif %}
+          <div class="summary__row summary__total"><span>Toplam</span><span>{{ fmt_try(cart.total) }}</span></div>
+          <p class="summary__note">Fiyatlara KDV dahildir.</p>
+          {% if cart.has_issues %}<p class="form-message form-message--error">Stok durumu değişen ürünleri güncelleyin.</p>{% endif %}
+          <a class="btn btn--dark btn--block{% if cart.has_issues or not cart.items_total %} is-disabled{% endif %}" href="/odeme" {% if cart.has_issues or not cart.items_total %}aria-disabled="true"{% endif %}>{% include "icons/lock.svg" %}<span>Güvenli Ödemeye Geç</span></a>
+        </div>
+      </aside>
+    </div>
+    {% else %}
+    <div class="cart-empty cart-empty--page">
+      <span class="cart-empty__icon">{% include "icons/bag.svg" %}</span>
+      <p class="cart-empty__title">Sepetin şu an boş</p>
+      <p class="cart-empty__text">Tarzına eşlik edecek çantayı keşfetmeye ne dersin?</p>
+      <a class="btn btn--dark" href="/urunler"><span>Alışverişe başla</span>{% include "icons/arrow-right.svg" %}</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% if rail %}{{ m.rail(rail, "Öne Çıkanlar", view_all="/urunler", id="sepet-oneriler") }}{% endif %}
+{% endblock %}

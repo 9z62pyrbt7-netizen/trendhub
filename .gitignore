@@ -30,3 +30,8 @@ deploy/logs/
 
 # Test / tooling
 .pytest_cache/
+
+# Web mağazası e2e test çıktıları
+backend/tests/e2e/.img/
+backend/tests/e2e/node_modules/
+backend/tests/e2e/package*.json

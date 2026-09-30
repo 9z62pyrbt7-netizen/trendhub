@@ -14,6 +14,7 @@ EDITABLE = {
     "finance.commission_rate.trendyol": ("rate", "Trendyol tahmini komisyon oranı"),
     "finance.commission_rate.hepsiburada": ("rate", "Hepsiburada tahmini komisyon oranı"),
     "finance.commission_rate.amazon_tr": ("rate", "Amazon.com.tr tahmini komisyon oranı"),
+    "finance.commission_rate.storefront": ("rate", "Trendçantanız Web: ödeme sağlayıcısı (sanal POS) komisyon oranı"),
     "finance.service_fee_per_order": ("money", "Sipariş başı hizmet bedeli (₺)"),
     "finance.default_shipping_cost": ("money", "Kargo ücreti bilinmiyorsa varsayılan (₺)"),
     "finance.include_vat": ("bool", "Tutarlar KDV dahil"),

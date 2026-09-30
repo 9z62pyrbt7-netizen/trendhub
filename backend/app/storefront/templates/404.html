@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% import "partials/macros.html" as m %}
+{% block content %}
+<section class="section"><div class="container empty empty--page">
+  <p class="eyebrow">404</p>
+  <h1 class="page-title">Aradığın sayfayı bulamadık</h1>
+  <p>Bağlantı değişmiş ya da ürün satıştan kalkmış olabilir.</p>
+  <a class="btn btn--dark" href="/urunler"><span>Koleksiyona göz at</span>{% include "icons/arrow-right.svg" %}</a>
+</div></section>
+{% if rail %}{{ m.rail(rail, "Öne Çıkanlar", view_all="/urunler", id="bulunamadi") }}{% endif %}
+{% endblock %}

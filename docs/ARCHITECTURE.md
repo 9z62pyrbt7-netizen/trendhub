@@ -380,6 +380,69 @@ Bağlantı bilgisi, mağaza ekleme/kaldırma, yayın, kullanıcı ve ayar işlem
 * Ürün yaşam döngüsü: `/api/products/{id}/lifecycle` (tedarikçi, eşleştirme, ilan, sipariş, kargo, iade, finans, reklam, uyarı).
 * Hatalar: 422 Türkçe ve girilen değeri geri döndürmeden; 500 referans numaralı sade mesaj; arayüzde "Gelişmiş detay".
 
+## 8d. Trendçantanız web mağazası (storefront, migration 0008)
+
+Trendçantanız'ın kendi satış kanalı. Pazaryeri entegrasyonlarının **yerine değil, yanına** eklenir;
+Shopify veya başka bir SaaS'a bağlı değildir.
+
+```
+                                   ┌──────── nginx (web) ────────┐
+Müşteri ── https://www.trendcantaniz.com ──▶ :8090 ──▶ storefront (FastAPI + Jinja2, 2 worker)
+Operatör ── panel ───────────────────────────▶ :8081 ──▶ api (yönetim)       │
+                                                                             ▼
+                        worker (storefront.maintenance) ──────────▶ PostgreSQL (TrendHub DB)
+```
+
+* **Ayrı süreç:** `app/storefront/main.py`, `api` ile aynı imajı ve veritabanını kullanır ama yönetim
+  router'larını içermez (`/api/orders` mağaza adresinde 404). Tarayıcıya secret, maliyet, tedarikçi veya
+  pazaryeri bilgisi gönderilmez; fiyat/stok her istekte sunucuda hesaplanır.
+* **Ürün kaynağı:** TrendHub merkezi kataloğu `products` (tedarikçi beslemesi — ilk tedarikçi Çanta Bayim —
+  ve pazaryeri ilan içe aktarımı). Görünürlük: aktif + satış fiyatı > 0 + en az bir görsel; `storefront_products`
+  ile ürün bazında gizleme, web başlığı, üstü çizili fiyat (yalnızca satış fiyatından yüksekse), öne çıkarma.
+  `storefront.auto_publish=false` ise yalnızca açıkça yayınlananlar görünür. Fiyat = `products.sale_price` (TRY, KDV dahil).
+* **Varyantlar:** aynı `products.model_code` veya tedarikçi `parent_code`'u taşıyan ürünler tek sayfada;
+  renk/beden `supplier_products.color/size`'dan.
+* **Hero ürünü:** panelden seçilen → son 90 günde **tüm kanallarda** (order_items) en çok satan ve stokta olan
+  → satış verisi yoksa stokta olup en çok görseli olan. Seçim gerekçesi panelde gösterilir. "Çok Satanlar"
+  bölümü yalnızca gerçek satış verisiyle oluşur; veri yoksa "Öne Çıkanlar" başlığı kullanılır.
+* **Kanallar arası stok (overselling koruması, `services/stock_availability.py`):**
+  `kullanılabilir = products.stock − stock_updated_at'ten sonraki iptal/iade olmayan TÜM kanal siparişleri
+  (en fazla storefront.committed_window_hours) − süresi dolmamış stok ayırmaları − güvenlik payı`.
+  Web siparişi sırasında ürün satırları `FOR UPDATE` ile kilitlenir. Aynı değer panelde Ürün & Stok
+  listesinde `available_stock` olarak görünür. **Pazaryerlerine stok yazımı hâlâ kapalıdır**
+  (`CONNECTOR_WRITE_ENABLED=false`, canlı otomasyonla çakışmamak için): web satışı Trendyol'daki ilan stoğuna
+  tedarikçi beslemesi/canlı otomasyon güncellenince yansır. Aradaki süre için güvenlik payı ayarlanabilir.
+* **Sipariş akışı:** ürün → varyant → sepet (sunucu tarafı, `storefront_carts`, HttpOnly çerez) → teslimat/fatura
+  → ödeme yöntemi → onaylar (Ön Bilgilendirme + Mesafeli Satış, KVKK; zaman damgasıyla saklanır) → sipariş.
+  * Kapıda ödeme: `orders` satırı hemen oluşur (iç statü `new`, ham statü `CashOnDelivery`).
+  * Havale/EFT: `storefront_orders` + süreli stok ayırma; panelde **Ödeme alındı** ile `orders` satırı oluşur.
+    Süre dolarsa worker (`storefront.maintenance`, 10 dk) siparişi `expired` yapar, stoğu bırakır.
+  * Kart: `payments.CardPaymentProvider` soyutlaması; **uygulanmış sağlayıcı yok**, sahte başarılı ödeme yok.
+* **TrendHub'da kanal:** `marketplaces.code = 'storefront'` ("Trendçantanız Web"), `orders.source = 'storefront'`,
+  `external_order_id` = web sipariş no (TCyyMMdd + 5 karakter). Siparişler ekranında kanal filtresiyle ayrılır,
+  dashboard/finans kanal kırılımında görünür, aynı statü/kargo/finans akışını kullanır. Hizmet bedeli 0
+  (`financial_transactions`), komisyon oranı `finance.commission_rate.storefront` (sanal POS komisyonu, varsayılan 0).
+  Müşteri adres/telefon/e-postası yalnızca operatör ve yöneticiye gösterilir.
+* **Panel:** Web Sitesi → ödeme bekleyen siparişler (Ödeme alındı / İptal), ürün yayını, mağaza ayarları
+  (`storefront.*` app_settings; satıcı bilgileri ve yasal metinler eksikse mağaza sipariş almaz).
+* **SEO:** Türkçe başlık/açıklama, canonical (`STOREFRONT_BASE_URL`), OpenGraph/Twitter, Product+Offer (TRY,
+  stok durumu, GTIN), BreadcrumbList, Organization; `sitemap.xml`, `robots.txt`; temiz URL'ler
+  `/urun/<slug>-p<id>` (yanlış slug 301), `/kategori/<slug>`, `/yeni-gelenler`, `/cok-satanlar`.
+* **Performans:** sunucu tarafı HTML, tek CSS + tek bağımlılıksız JS (defer), kendi sunucumuzdan Playfair Display +
+  Jost (latin/latin-ext alt kümeleri, preload, swap), hero görseli preload + fetchpriority=high, diğerleri lazy.
+  Görseller imzalı `/img/<genişlik>/<imza>/<adres>` üzerinden WebP'ye dönüştürülüp boyutlandırılır ve diskte
+  önbelleklenir (SSRF koruması, 15 MB sınırı). Beyaz fonlu (dekupe) ürün fotoğrafları tarayıcıda tespit edilip
+  krem zemine karıştırılır; fotoğraflı görseller çerçeveli gösterilir. Scroll animasyonları yalnızca transform/opacity,
+  `prefers-reduced-motion` desteklenir. Katalog 30 sn önbelleklenir (ürün sayfası, sepet ve sipariş her zaman taze).
+* **Güvenlik:** CSP (inline script yok), X-Frame-Options, değiştirici `/api/store/*` isteklerinde özel başlık +
+  Origin kontrolü, SameSite=Lax HttpOnly çerez, IP başına hız sınırı (uygulama + nginx), ürün açıklamasındaki
+  HTML düz metne çevrilir (çalıştırılmaz), sipariş sayfası yalnızca tek kullanımlık erişim anahtarıyla açılır.
+
+**Bilinen eksikler:** kart ödeme sağlayıcısı, sipariş e-posta/SMS bildirimi, müşteri hesabı, e-fatura
+entegrasyonu, pazaryerlerine stok yazımı (bilinçli olarak kapalı), web siparişinin tedarikçiye otomatik iletimi
+(canlı Trendyol → Çanta Bayim otomasyonu yalnızca Trendyol siparişlerini işler; web siparişleri panelden
+"Tedarikçiye Aktarıldı" akışıyla yönetilir).
+
 ## 9. Güvenilirlik
 
 * **Idempotency**

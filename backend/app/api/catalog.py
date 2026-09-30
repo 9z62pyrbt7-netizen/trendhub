@@ -25,6 +25,7 @@ def list_products(page: Page = Depends(), q: str | None = Query(None, max_length
                   _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
     threshold = int(app_settings.get(conn, "stock.low_stock_threshold", 3))
     where, params = ["TRUE"], {"th": threshold}
+    from ..services import stock_availability
     if q:
         where.append("(p.sku ILIKE :q OR p.barcode ILIKE :q OR p.name ILIKE :q)")
         params["q"] = f"%{q.strip()}%"
@@ -38,12 +39,13 @@ def list_products(page: Page = Depends(), q: str | None = Query(None, max_length
         SELECT p.id, p.sku, p.barcode, p.name, p.brand, p.category, p.cost, p.sale_price, p.stock,
                p.vat_rate, p.is_active, p.updated_at,
                COALESCE(p.stock, 0) <= :th AS is_low_stock,
+               {stock_availability.available_sql('p')} AS available_stock,
                (SELECT COALESCE(SUM(i.quantity), 0) FROM order_items i JOIN orders o ON o.id = i.order_id
                  WHERE i.product_id = p.id AND o.internal_status <> 'cancelled'
                    AND o.order_date > NOW() - INTERVAL '30 days') AS sold_30d
           FROM products p WHERE {w}
          ORDER BY p.name LIMIT :limit OFFSET :offset
-    """, **params, limit=page.page_size, offset=page.offset)
+    """, **params, **stock_availability.params(conn), limit=page.page_size, offset=page.offset)
     summary = row(conn, """
         SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE COALESCE(stock,0) <= :th) AS low_stock,
                COUNT(*) FILTER (WHERE COALESCE(cost,0) = 0) AS missing_cost,

@@ -13,7 +13,8 @@ COPY alembic.ini main.py ./
 COPY migrations ./migrations
 COPY app ./app
 
-RUN useradd --system --uid 10001 --home /app trendhub
+RUN useradd --system --uid 10001 --home /app trendhub \
+    && mkdir -p /var/cache/trendcantaniz/img && chown -R trendhub /var/cache/trendcantaniz
 USER trendhub
 
 EXPOSE 8000

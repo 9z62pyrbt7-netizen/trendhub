@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     amazon_sp_marketplace_id: str = "A33AVAJ2PDY3EV"
     amazon_sp_endpoint: str = "https://sellingpartnerapi-eu.amazon.com"
 
+    # Trendçantanız web mağazası (storefront)
+    # Kanonik adres (ör. https://www.trendcantaniz.com). Boşsa isteğin adresi kullanılır;
+    # canlıda mutlaka doldurun (canonical, sitemap, OpenGraph bu adresi kullanır).
+    storefront_base_url: str = ""
+    # Ürün görselleri bu klasörde WebP olarak önbelleklenir (compose'da kalıcı volume).
+    storefront_image_cache_dir: str = "/tmp/trendcantaniz-img"
+    # Kartla ödeme sağlayıcısı kodu (app/storefront/payments.py). Hiçbir sağlayıcı uygulanmadığı
+    # için boş kalır; kartla ödeme seçeneği sağlayıcı eklenene kadar gösterilmez.
+    storefront_payment_provider: str = ""
+
     @property
     def sqlalchemy_url(self) -> str:
         url = self.database_url

@@ -194,7 +194,7 @@ def test_finance_reports_and_csv(client, engine):
 def test_system_health_jobs_and_events(client, engine):
     login(client)
     h = client.get("/api/system/health").json()
-    assert h["database"]["migration"] == "0007_supplier_import"
+    assert h["database"]["migration"] == "0008_storefront"
     assert h["worker_alive"] is False and h["status"] == "degraded"
     assert h["config"]["connector_write_enabled"] is False
     from app.services import jobs
@@ -239,7 +239,7 @@ def test_dashboard_and_finance_expose_estimated_tax_today_top_products(client, e
     assert d["today"]["orders"] == 2 and d["pending_orders"] == 1
     assert d["returns"]["period"] == 1
     assert d["top_products"][0]["sku"] == "SKU-9" and float(d["top_products"][0]["revenue"]) == 240
-    assert {m["code"] for m in d["by_marketplace"]} == {"trendyol", "hepsiburada", "amazon_tr"}
+    assert {m["code"] for m in d["by_marketplace"]} == {"trendyol", "hepsiburada", "amazon_tr", "storefront"}
     s = d["summary"]
     assert s["is_estimate"] is True
     # T1: satış 240 (KDV 40) - maliyet 60 (KDV 10) = 30; iade edilen T2'de KDV 0

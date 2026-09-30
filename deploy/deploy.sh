@@ -83,7 +83,7 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$REPO_DIR" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')}"
-for c in trendhub-db trendhub-api trendhub-web trendhub-worker; do
+for c in trendhub-db trendhub-api trendhub-web trendhub-worker trendhub-storefront; do
   if docker inspect "$c" >/dev/null 2>&1; then
     p="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$c" 2>/dev/null || true)"
     wd="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$c" 2>/dev/null || true)"
@@ -137,6 +137,20 @@ fi
 export TRENDHUB_HTTP_PORT="$NEW_PORT"
 ok "TrendHub web portu: $NEW_PORT"
 
+# Trendçantanız web mağazası portu (aynı nginx container'ı; varsayılan 8090)
+SF_PORT="$(envget TRENDCANTANIZ_HTTP_PORT)"; SF_PORT="${SF_PORT:-8090}"
+SF_NEW_PORT="$SF_PORT"
+[ "$SF_NEW_PORT" = "$NEW_PORT" ] && SF_NEW_PORT=$((NEW_PORT + 1))
+SF_NEW_PORT="$(pick_port "$SF_NEW_PORT")" || die "Web mağazası için 8081-8099 arasında boş port yok"
+[ "$SF_NEW_PORT" = "$NEW_PORT" ] && { SF_NEW_PORT="$(pick_port $((NEW_PORT + 1)))" || die "Web mağazası için boş port yok"; }
+if [ "$SF_NEW_PORT" != "$SF_PORT" ]; then
+  warn "Port $SF_PORT kullanımda; web mağazası için $SF_NEW_PORT seçildi"
+  if grep -qE '^TRENDCANTANIZ_HTTP_PORT=' .env; then sed -i "s/^TRENDCANTANIZ_HTTP_PORT=.*/TRENDCANTANIZ_HTTP_PORT=$SF_NEW_PORT/" .env
+  else printf '\nTRENDCANTANIZ_HTTP_PORT=%s\n' "$SF_NEW_PORT" >> .env; fi
+fi
+export TRENDCANTANIZ_HTTP_PORT="$SF_NEW_PORT"
+ok "Web mağazası portu: $SF_NEW_PORT"
+
 # ------------------------------------------------------------------ 3. kod
 say "3. Kod"
 if [ "${TRENDHUB_GIT_PULL:-1}" = "1" ] && [ -d .git ]; then
@@ -178,18 +192,18 @@ if [ "${TRENDHUB_BUILD:-1}" = "1" ]; then "${DC[@]}" build; else warn "TRENDHUB_
 "${DC[@]}" up -d db
 "${DC[@]}" run --rm migrate || die "Migration başarısız. Yedek: ${BACKUP:-yok}. Uygulama container'ları değiştirilmedi."
 ok "Migration tamam"
-"${DC[@]}" up -d --no-deps api worker web
+"${DC[@]}" up -d --no-deps api worker storefront web
 # nginx.conf bind-mount ile gelir; içerik değiştiyse compose container'ı yeniden oluşturmaz.
 "${DC[@]}" exec -T web nginx -t >/dev/null 2>&1 || die "nginx yapılandırması geçersiz"
 "${DC[@]}" exec -T web nginx -s reload >/dev/null
-ok "api, worker, web başlatıldı; nginx yapılandırması yeniden yüklendi"
+ok "api, worker, storefront, web başlatıldı; nginx yapılandırması yeniden yüklendi"
 
 # ------------------------------------------------------------ 6. sağlık
 say "6. Sağlık kontrolü"
 deadline=$(( $(date +%s) + ${TRENDHUB_HEALTH_TIMEOUT:-240} ))
 while :; do
   all=1; line=""
-  for s in db api worker web; do
+  for s in db api worker storefront web; do
     cid="$("${DC[@]}" ps -q "$s")"
     h="$( [ -n "$cid" ] && docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" || echo yok)"
     line="$line $s=$h"
@@ -199,19 +213,22 @@ while :; do
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$NEW_PORT/api/health" || true)"
   line="$line nginx->api=$code"
   [ "$code" = "200" ] || all=0
+  sf_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SF_NEW_PORT/api/store/health" || true)"
+  line="$line nginx->storefront=$sf_code"
+  [ "$sf_code" = "200" ] || all=0
   echo " $line"
   [ "$all" = 1 ] && break
-  [ "$(date +%s)" -lt "$deadline" ] || { "${DC[@]}" ps; "${DC[@]}" logs --tail 80 api worker web; die "Servisler zamanında sağlıklı olmadı"; }
+  [ "$(date +%s)" -lt "$deadline" ] || { "${DC[@]}" ps; "${DC[@]}" logs --tail 80 api worker storefront web; die "Servisler zamanında sağlıklı olmadı"; }
   sleep 5
 done
-ok "db, api, worker, web: healthy"
+ok "db, api, worker, storefront, web: healthy"
 
 BASE_URL="http://127.0.0.1:$NEW_PORT"
 curl -fsS "$BASE_URL/api/health" | grep -q '"healthy"' || die "$BASE_URL/api/health sağlıklı değil"
 if [ -n "${ADMIN_USER:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
-  BASE_URL="$BASE_URL" scripts/smoke_test.sh
+  BASE_URL="$BASE_URL" STOREFRONT_URL="http://127.0.0.1:$SF_NEW_PORT" scripts/smoke_test.sh
 else
-  BASE_URL="$BASE_URL" SMOKE_ANONYMOUS=1 scripts/smoke_test.sh
+  BASE_URL="$BASE_URL" STOREFRONT_URL="http://127.0.0.1:$SF_NEW_PORT" SMOKE_ANONYMOUS=1 scripts/smoke_test.sh
   warn "Girişli duman testi atlandı (ADMIN_USER/ADMIN_PASSWORD verilmedi)"
 fi
 
@@ -228,7 +245,8 @@ if [ -d "$PROTECTED_DIR" ]; then ok "$PROTECTED_DIR klasörüne erişilmedi/değ
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 say "TAMAM"
 echo "  Commit : $COMMIT"
-echo "  Adres  : http://${HOST_IP:-SUNUCU_IP}:$NEW_PORT"
+echo "  Panel  : http://${HOST_IP:-SUNUCU_IP}:$NEW_PORT"
+echo "  Mağaza : http://${HOST_IP:-SUNUCU_IP}:$SF_NEW_PORT (HTTPS için önüne TLS sonlandırıcı koyun)"
 echo "  Yedek  : ${BACKUP:-ilk kurulum, yedek yok}"
 echo "  Log    : $LOG"
 echo "  Yönetici hesabı yoksa: ./deploy/create-admin.sh"

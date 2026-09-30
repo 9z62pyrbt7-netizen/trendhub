@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="section order-page"><div class="container container--narrow">
+  <p class="eyebrow">Sipariş {{ o.public_code }}</p>
+  {% if o.status in ('awaiting_payment',) %}
+    <h1 class="page-title">Siparişiniz alındı, ödemeniz bekleniyor</h1>
+    <div class="notice notice--info">
+      <p>Aşağıdaki hesaba <strong>{{ fmt_try(o.total) }}</strong> tutarında havale/EFT yapın. Açıklama alanına sipariş numaranızı (<strong>{{ o.public_code }}</strong>) yazın.</p>
+      <dl class="specs">
+        <div><dt>Alıcı</dt><dd>{{ cfg.bank_transfer_account_name }}</dd></div>
+        {% if cfg.bank_transfer_bank_name %}<div><dt>Banka</dt><dd>{{ cfg.bank_transfer_bank_name }}</dd></div>{% endif %}
+        <div><dt>IBAN</dt><dd class="mono">{{ cfg.bank_transfer_iban }}</dd></div>
+      </dl>
+      <p class="small">Ödemeniz {{ cfg.bank_transfer_days }} gün içinde ulaşmazsa sipariş iptal edilir ve ürünler yeniden satışa açılır.</p>
+    </div>
+  {% elif o.status == 'pending_payment' %}
+    <h1 class="page-title">Ödemeniz tamamlanmadı</h1>
+  {% elif o.status in ('cancelled', 'expired', 'payment_failed') %}
+    <h1 class="page-title">{{ STATUS_LABELS[o.status] }}</h1>
+  {% else %}
+    <h1 class="page-title">Teşekkürler, siparişiniz alındı</h1>
+    <p>Siparişiniz hazırlanmaya başladığında sizi bilgilendireceğiz.{% if o.status == 'cash_on_delivery' %} Ödemeyi teslimatta yapacaksınız.{% endif %}</p>
+  {% endif %}
+  <dl class="specs mt">
+    <div><dt>Durum</dt><dd>{{ fulfilment or STATUS_LABELS.get(o.status, o.status) }}</dd></div>
+    <div><dt>Ödeme</dt><dd>{{ {"bank_transfer": "Havale / EFT", "cash_on_delivery": "Kapıda ödeme", "card": "Kart"}[o.payment_method] }} · {{ STATUS_LABELS.get(o.status, o.status) }}</dd></div>
+    <div><dt>Teslimat</dt><dd>{{ o.full_name }}<br>{{ o.address }}<br>{{ o.district }} / {{ o.city }}</dd></div>
+  </dl>
+  <ul class="mini-lines mt" role="list">
+    {% for line in o.lines %}
+    <li class="mini-line">
+      <span class="mini-line__media">{% if line.image %}<img src="{{ img(line.image, 160) }}" alt="" width="64" height="80" loading="lazy" data-cutout>{% endif %}<span class="mini-line__qty">{{ line.quantity }}</span></span>
+      <span class="mini-line__title">{{ line.title }}{% if line.color %}<small>{{ line.color }}</small>{% endif %}</span>
+      <span class="mini-line__total">{{ fmt_try(line.line_total) }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="summary mt">
+    <div class="summary__row"><span>Ara toplam</span><span>{{ fmt_try(o.items_total) }}</span></div>
+    <div class="summary__row"><span>Kargo / hizmet</span><span>{{ fmt_try(o.shipping_fee) }}</span></div>
+    <div class="summary__row summary__total"><span>Toplam</span><span>{{ fmt_try(o.total) }}</span></div>
+  </div>
+  <p class="small muted mt">Bu sayfanın adresini saklayın; siparişinizin durumunu buradan takip edebilirsiniz.</p>
+  <a class="btn btn--ghost mt" href="/urunler">Alışverişe devam et</a>
+</div></section>
+{% endblock %}

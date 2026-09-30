@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% import "partials/macros.html" as m %}
+{% block page_class %}home{% endblock %}
+{% block header_class %} header--transparent{% endblock %}
+{% block preload %}{% if hero and hero.images %}<link rel="preload" as="image" href="{{ img(hero.images[0], 800) }}" imagesrcset="{{ srcset(hero.images[0], (480, 640, 800, 1000, 1200)) }}" imagesizes="(min-width: 990px) 44vw, 88vw" fetchpriority="high">{% endif %}{% endblock %}
+{% block content %}
+
+<section class="hero hero--motion" data-hero aria-label="Trendçantanız">
+  <div class="hero__track" data-hero-track>
+    <div class="hero__stage" data-hero-stage>
+      <div class="hero__bg" aria-hidden="true"><span class="hero__arc"></span></div>
+      <p class="hero__wordmark" aria-hidden="true">TREND<span class="hero__wm-break"></span>ÇANTANIZ</p>
+
+      <div class="hero__product" data-hero-product>
+        {% if hero and hero.images %}
+        <a class="hero__product-link" href="{{ hero.url }}" tabindex="-1" aria-hidden="true">
+          <img class="hero__img" src="{{ img(hero.images[0], 800) }}" srcset="{{ srcset(hero.images[0], (480, 640, 800, 1000, 1200)) }}"
+               sizes="(min-width: 990px) 44vw, 88vw" alt="{{ hero.title }}" width="1000" height="1250" fetchpriority="high" loading="eager" decoding="async" data-cutout>
+        </a>
+        <span class="hero__shadow" aria-hidden="true"></span>
+        {% endif %}
+      </div>
+
+      <div class="hero__copy container">
+        <div class="hero__intro" data-hero-intro>
+          <p class="eyebrow">Kadın çanta koleksiyonu</p>
+          <h1 class="hero__title"><span class="visually-hidden">Trendçantanız — </span>Tarzını yanında taşı.</h1>
+          <div class="hero__ctas">
+            {% if hero %}<a class="btn btn--dark" href="{{ hero.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>{% endif %}
+            <a class="btn btn--ghost" href="/urunler">Koleksiyonu Keşfet</a>
+          </div>
+        </div>
+        {% if hero %}
+        <div class="hero__detail" data-hero-detail>
+          <p class="eyebrow">{% if hero.sold %}En çok tercih edilen{% else %}Öne çıkan{% endif %}</p>
+          <h2 class="hero__detail-title"><a href="{{ hero.url }}">{{ hero.title }}</a></h2>
+          {{ m.price(hero, 'hero__price') }}
+          {% if hero.colors|length > 1 %}<p class="hero__meta">{{ hero.colors|length }} renk seçeneği</p>{% elif hero.rep.color %}<p class="hero__meta">{{ hero.rep.color }}</p>{% endif %}
+          <div class="hero__ctas">
+            {% if hero.in_stock and hero.variants|length == 1 %}
+            <button type="button" class="btn btn--dark" data-quick-add="{{ hero.rep.id }}"><span data-add-label>Sepete Ekle</span>{% include "icons/bag.svg" %}</button>
+            <a class="btn btn--ghost" href="{{ hero.url }}">Ürünü İncele</a>
+            {% else %}
+            <a class="btn btn--dark" href="{{ hero.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+      <span class="hero__cue" aria-hidden="true"><span></span></span>
+    </div>
+  </div>
+</section>
+
+{% if bestsellers %}
+  {{ m.rail(bestsellers, "Çok Satanlar", eyebrow="Son 90 günün favorileri", view_all="/cok-satanlar", id="cok-satanlar") }}
+{% elif featured %}
+  {{ m.rail(featured, "Öne Çıkanlar", eyebrow="Koleksiyondan seçtiklerimiz", view_all="/urunler", id="one-cikanlar") }}
+{% else %}
+  <section class="section"><div class="container empty"><p class="empty__title">Koleksiyonumuz çok yakında burada.</p></div></section>
+{% endif %}
+
+{% if total_groups %}
+<section class="section tiles" aria-labelledby="kategoriler-title">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <div><p class="eyebrow">Koleksiyonlar</p><h2 class="section-title" id="kategoriler-title">Her ana bir çanta</h2></div>
+      <a class="link-arrow" href="/urunler">Tüm çantalar{% include "icons/arrow-right.svg" %}</a>
+    </div>
+    <ul class="tiles__grid" role="list">
+      {% if categories|length >= 2 %}
+        {% for c in categories %}
+        {% set g0 = c.groups[0] %}
+        <li class="tiles__item" data-reveal style="--i: {{ loop.index0 }}">
+          <a class="tile" href="/kategori/{{ c.slug }}">
+            <span class="tile__media">{% if g0.images %}<img class="tile__img" src="{{ img(g0.images[0], 640) }}" srcset="{{ srcset(g0.images[0], (320, 480, 640, 800)) }}" sizes="(min-width: 990px) 33vw, 80vw" alt="" width="800" height="1000" loading="lazy" decoding="async" data-cutout>{% endif %}</span>
+            <span class="tile__body"><span class="tile__title">{{ c.label }}</span><span class="tile__meta">{{ c.count }} model {% include "icons/arrow-right.svg" %}</span></span>
+          </a>
+        </li>
+        {% endfor %}
+      {% else %}
+        {% set tiles = [("Tüm Çantalar", "/urunler"), ("Yeni Gelenler", "/yeni-gelenler")] + ([("Çok Satanlar", "/cok-satanlar")] if has_sales else []) %}
+        {% set pool = bestsellers or featured %}
+        {% for label, href in tiles %}
+        {% set g0 = pool[loop.index0 % pool|length] if pool else None %}
+        {% set src = (g0.images[loop.index0 % g0.images|length]) if g0 and g0.images else None %}
+        <li class="tiles__item" data-reveal style="--i: {{ loop.index0 }}">
+          <a class="tile" href="{{ href }}">
+            <span class="tile__media">{% if src %}<img class="tile__img" src="{{ img(src, 640) }}" srcset="{{ srcset(src, (320, 480, 640, 800)) }}" sizes="(min-width: 990px) 33vw, 80vw" alt="" width="800" height="1000" loading="lazy" decoding="async" data-cutout>{% endif %}</span>
+            <span class="tile__body"><span class="tile__title">{{ label }}</span><span class="tile__meta">Keşfet {% include "icons/arrow-right.svg" %}</span></span>
+          </a>
+        </li>
+        {% endfor %}
+      {% endif %}
+    </ul>
+  </div>
+</section>
+{% endif %}
+
+{% if editorial %}
+<section class="editorial" aria-labelledby="editorial-title">
+  <div class="editorial__inner container">
+    <div class="editorial__visual">
+      <div class="editorial__main" data-parallax="0.06">
+        <img class="editorial__img" src="{{ img(editorial.images[1], 1000) }}" srcset="{{ srcset(editorial.images[1], (480, 640, 800, 1000, 1200)) }}" sizes="(min-width: 990px) 52vw, 92vw" alt="{{ editorial.title }}" width="1000" height="1250" loading="lazy" decoding="async" data-cutout>
+      </div>
+      {% if editorial.images|length > 2 %}
+      <div class="editorial__inset" data-parallax="-0.1" data-reveal>
+        <img class="editorial__img" src="{{ img(editorial.images[2], 480) }}" sizes="(min-width: 990px) 20vw, 40vw" alt="" width="600" height="600" loading="lazy" decoding="async">
+      </div>
+      {% endif %}
+      <p class="editorial__caption" aria-hidden="true">Trendçantanız — Editoryal</p>
+    </div>
+    <div class="editorial__copy" data-reveal>
+      <p class="eyebrow">Sezonun parçası</p>
+      <h2 class="editorial__title" id="editorial-title">Günden geceye<em>tek çanta.</em></h2>
+      <p class="editorial__text">{{ editorial.category or "Çanta" }} koleksiyonumuzdan, her kombine eşlik eden sade ve güçlü bir duruş.</p>
+      <div class="editorial__product">
+        <span class="editorial__product-name">{{ editorial.title }}</span>
+        {{ m.price(editorial) }}
+      </div>
+      <a class="btn btn--dark" href="{{ editorial.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if new_arrivals %}
+  {{ m.rail(new_arrivals, "Yeni Gelenler", eyebrow="Taze seçki", view_all="/yeni-gelenler", id="yeni-gelenler") }}
+{% endif %}
+
+<section class="section statement" aria-label="Marka">
+  <div class="container statement__inner" data-reveal>
+    <p class="eyebrow">Trendçantanız</p>
+    <p class="statement__text">Her gün yanında taşıdığın şey, <em>tarzının</em> en sade hâli olmalı.</p>
+    <a class="link-arrow" href="/urunler">Tüm çantaları gör{% include "icons/arrow-right.svg" %}</a>
+  </div>
+</section>
+
+{% include "partials/trust.html" %}
+{% endblock %}

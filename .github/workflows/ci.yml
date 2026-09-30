@@ -44,38 +44,12 @@ jobs:
         with:
           node-version: "20"
       - run: node --check web/assets/app.js
+      - run: node --check backend/app/storefront/static/sf.js
       - name: shell betikleri sözdizimi
         run: for f in deploy/*.sh scripts/*.sh; do bash -n "$f" || exit 1; done
       - name: nginx config syntax
         run: |
           docker run --rm --add-host api:127.0.0.1 -v "$PWD/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine nginx -t
-
-  storefront:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: storefront/dev
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: storefront/dev/package-lock.json
-      - run: npm ci
-      - name: Shopify Theme Check
-        run: node theme-check.mjs
-      - run: node --check ../theme/assets/theme.js
-      - run: npx playwright install --with-deps chromium
-      - name: Emülatörde render + satın alma akışı testleri
-        run: |
-          node genimg.mjs
-          EXTRA=1 node server.mjs > server.log 2>&1 &
-          for i in $(seq 1 20); do curl -sf http://localhost:9292/cart.js >/dev/null && break; sleep 1; done
-          node smoke.mjs
-          node e2e.mjs
-      - if: failure()
-        run: cat server.log || true
 
   docker:
     runs-on: ubuntu-latest
@@ -100,13 +74,14 @@ jobs:
             worker=$(docker inspect -f '{{.State.Health.Status}}' trendhub-worker 2>/dev/null || echo none)
             web=$(docker inspect -f '{{.State.Health.Status}}' trendhub-web 2>/dev/null || echo none)
             db=$(docker inspect -f '{{.State.Health.Status}}' trendhub-db 2>/dev/null || echo none)
-            echo "db=$db api=$api worker=$worker web=$web"
-            [ "$db" = healthy ] && [ "$api" = healthy ] && [ "$worker" = healthy ] && [ "$web" = healthy ] && exit 0
+            sf=$(docker inspect -f '{{.State.Health.Status}}' trendhub-storefront 2>/dev/null || echo none)
+            echo "db=$db api=$api worker=$worker web=$web storefront=$sf"
+            [ "$db" = healthy ] && [ "$api" = healthy ] && [ "$worker" = healthy ] && [ "$web" = healthy ] && [ "$sf" = healthy ] && exit 0
             sleep 5
           done
           docker compose ps; exit 1
       - name: Duman testi
-        run: ADMIN_USER=admin ADMIN_PASSWORD=ci-admin-password-123 BASE_URL=http://localhost:8081 scripts/smoke_test.sh
+        run: ADMIN_USER=admin ADMIN_PASSWORD=ci-admin-password-123 BASE_URL=http://localhost:8081 STOREFRONT_URL=http://localhost:8090 scripts/smoke_test.sh
       - name: migrate ikinci kez çalıştırılabilir (idempotent)
         run: docker compose run --rm migrate
       - name: api yeniden oluşturulunca nginx yeni IP'yi bulur (502 regresyonu)
@@ -124,7 +99,7 @@ jobs:
           ls -l backups/ | grep -q '\.dump' || { echo "yedek dosyası yok"; exit 1; }
       - name: api/worker loglarında log biçimleme hatası yok ve access log yazılıyor
         run: |
-          if docker compose logs api worker | grep -E "Logging error|TypeError"; then echo "::error::log hatası"; exit 1; fi
+          if docker compose logs api worker storefront | grep -E "Logging error|TypeError"; then echo "::error::log hatası"; exit 1; fi
           docker compose logs api | grep -q '"GET /api/health' || { echo "::error::access log yok"; exit 1; }
       - name: Loglar
         if: always()

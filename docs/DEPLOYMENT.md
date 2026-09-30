@@ -56,7 +56,8 @@ Betik sırasıyla şunları yapar ve bir adım başarısız olursa **durur** (hi
 5. Mevcut DB'nin `pg_dump` yedeği → `backups/trendhub-<zaman>-<commit>.dump` (izin 600,
    `pg_restore -l` ile doğrulanır). İlk kurulumda atlanır.
 6. İmaj derleme → `migrate` (Alembic; yalnızca ekleme yapan, tekrar çalıştırılabilir migration'lar)
-   → `api`, `worker`, `web` → nginx yapılandırma testi ve yeniden yükleme.
+   → `api`, `worker`, `storefront`, `web` → nginx yapılandırma testi ve yeniden yükleme.
+   Web mağazası portu `TRENDCANTANIZ_HTTP_PORT` (varsayılan 8090) doluysa boş bir port seçilir.
 7. `db`, `api`, `worker`, `web` servislerinin `healthy` olmasını ve nginx üzerinden
    `/api/health = 200` dönmesini bekler; duman testi.
 8. TrendHub dışındaki container'ların değişmediğini doğrular ve erişim adresini yazar.
@@ -141,3 +142,23 @@ durumu, son senkron ve sistem olayları. Credential değerleri hiçbir ekranda v
 
 `docker compose down -v`, `docker system prune`, `docker volume rm` ve TrendHub dışındaki herhangi
 bir container'ı durdurma/yeniden başlatma **hiçbir betikte yoktur**.
+
+
+## Trendçantanız web mağazası (storefront)
+
+Aynı `deploy.sh` ile kurulur/güncellenir; ayrı bir işlem gerekmez. Canlıya açmadan önce:
+
+1. **Alan adı + HTTPS:** `https://www.trendcantaniz.com` → sunucudaki `TRENDCANTANIZ_HTTP_PORT` (8090)
+   için önüne TLS sonlandırıcı koyun (Caddy, Traefik veya nginx + certbot). Sonlandırıcı
+   `X-Forwarded-Proto: https` ve orijinal `Host` başlığını iletmeli.
+2. `.env`: `STOREFRONT_BASE_URL=https://www.trendcantaniz.com` (canonical, sitemap, OpenGraph, yapılandırılmış veri)
+   ve `COOKIE_SECURE=auto` (HTTPS'te sepet çerezi Secure olur). Sonra `sudo bash deploy/install.sh`.
+3. Panel → **Web Sitesi → Mağaza ayarları:** satıcı unvanı/adres/telefon/e-posta, Mesafeli Satış
+   Sözleşmesi, Ön Bilgilendirme Formu, KVKK Aydınlatma Metni, İade ve Değişim Koşulları, ödeme
+   yöntemi (Havale/EFT için IBAN; kapıda ödeme kargo firmanızda aktifse), kargo ücreti.
+   Bunlar tamamlanmadan mağaza ürünleri gösterir ama **sipariş almaz** (panelde eksikler listelenir).
+4. Kartla ödeme: bir sanal POS sağlayıcısıyla sözleşme + `app/storefront/payments.py` altında
+   sağlayıcı sınıfı gerekir. Anahtarlar yalnızca `.env`'de tutulur. Sağlayıcı yokken kart seçeneği görünmez.
+5. Google Search Console'a `https://www.trendcantaniz.com/sitemap.xml` gönderin.
+
+Görsel önbelleği `storefront_images` volume'undadır (WebP); silinirse kendiliğinden yeniden üretilir.

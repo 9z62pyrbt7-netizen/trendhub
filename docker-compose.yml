@@ -5,7 +5,8 @@
 #   migrate  Tek seferlik: `alembic upgrade head` (yalnızca ekleme yapan migration'lar)
 #   api      FastAPI (yalnızca iç ağda, nginx üzerinden erişilir)
 #   worker   Senkronizasyon işleri + zamanlayıcı (SALT OKUNUR pazaryeri erişimi)
-#   web      nginx: statik panel + /api proxy
+#   web      nginx: statik panel + /api proxy (TRENDHUB_HTTP_PORT) ve web mağazası (TRENDCANTANIZ_HTTP_PORT)
+#   storefront  Trendçantanız web mağazası (FastAPI + sunucu tarafı HTML; yönetim API'sini içermez)
 #
 # Healthcheck: api -> /api/health, worker -> `python -m app.cli healthcheck worker`,
 # web -> nginx üzerinden /api/health. Durum: `docker compose ps`.
@@ -87,6 +88,32 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Trendçantanız web mağazası: TrendHub veritabanından katalog/stok okur, web siparişlerini
+  # "Trendçantanız Web" satış kanalı olarak yazar. Pazaryeri API'lerine hiçbir istek göndermez.
+  storefront:
+    logging: *default-logging
+    build: ./backend
+    image: trendhub-backend
+    container_name: trendhub-storefront
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      STOREFRONT_IMAGE_CACHE_DIR: /var/cache/trendcantaniz/img
+    command: ["uvicorn", "app.storefront.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    volumes:
+      - storefront_images:/var/cache/trendcantaniz
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if b'healthy' in urllib.request.urlopen('http://127.0.0.1:8000/api/store/health', timeout=3).read() else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   web:
     logging: *default-logging
     image: nginx:1.27-alpine
@@ -95,6 +122,8 @@ services:
     ports:
       # deploy/deploy.sh 8081 doluysa 8082-8099 arasından boş bir port seçip .env'e yazar
       - "${TRENDHUB_HTTP_PORT:-8081}:80"
+      # Trendçantanız web mağazası (önüne TLS sonlandırıcı konur: https://www.trendcantaniz.com → bu port)
+      - "${TRENDCANTANIZ_HTTP_PORT:-8090}:8090"
     volumes:
       - ./web:/usr/share/nginx/html:ro
       # Klasör olarak bağlanır (tek dosya bağlamak, git dosyayı yenilediğinde eski içeriği
@@ -111,3 +140,5 @@ services:
 
 volumes:
   trendhub_db:
+  # Web mağazası ürün görseli önbelleği (WebP); silinirse kendiliğinden yeniden üretilir
+  storefront_images:
