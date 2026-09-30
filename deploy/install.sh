@@ -45,7 +45,7 @@ else
 fi
 chmod 600 .env
 for kv in CONNECTOR_WRITE_ENABLED=false TRENDYOL_LISTINGS_ENABLED=false HEPSIBURADA_LISTINGS_ENABLED=false \
-          COOKIE_SECURE=auto TRENDHUB_HTTP_PORT=8081; do
+          COOKIE_SECURE=auto TRENDHUB_HTTP_PORT=8081 TRENDCANTANIZ_HTTP_PORT=8090; do
   grep -qE "^${kv%%=*}=" .env || { printf '\n%s\n' "$kv" >> .env; echo "  eklendi: ${kv%%=*}"; }
 done
 grep -qE '^CONNECTOR_WRITE_ENABLED=false$' .env || die "CONNECTOR_WRITE_ENABLED=false olmalı"

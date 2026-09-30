@@ -81,6 +81,37 @@ class Settings(BaseSettings):
     # Kartla ödeme sağlayıcısı kodu (app/storefront/payments.py). Hiçbir sağlayıcı uygulanmadığı
     # için boş kalır; kartla ödeme seçeneği sağlayıcı eklenene kadar gösterilmez.
     storefront_payment_provider: str = ""
+    # PayTR iFrame API (STOREFRONT_PAYMENT_PROVIDER=paytr). Anahtarlar yalnızca sunucu .env'inde tutulur.
+    paytr_merchant_id: str = ""
+    paytr_merchant_key: str = ""
+    paytr_merchant_salt: str = ""
+    # 1: PayTR test modu (yalnızca test kartları). Canlıda 0 olmalı.
+    paytr_test_mode: bool = False
+    paytr_api_url: str = "https://www.paytr.com"
+    # iyzico Ödeme Formu (STOREFRONT_PAYMENT_PROVIDER=iyzico). Sandbox: https://sandbox-api.iyzipay.com
+    iyzico_api_key: str = ""
+    iyzico_secret_key: str = ""
+    iyzico_base_url: str = "https://api.iyzipay.com"
+
+    # Bildirimler: SMTP (e-posta). SMTP_HOST boşsa e-posta gönderilmez (kayıtlar 'skipped' olur).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+    smtp_ssl: bool = False
+    # SMS sağlayıcısı: "" (kapalı) | "netgsm". Netgsm bilgileri yalnızca .env'de.
+    sms_provider: str = ""
+    netgsm_usercode: str = ""
+    netgsm_password: str = ""
+    netgsm_header: str = ""
+    netgsm_api_url: str = "https://api.netgsm.com.tr/sms/send/get"
+    # Mağaza sahibine yeni sipariş bildirimi (virgülle ayrılmış e-posta adresleri; boşsa gönderilmez).
+    storefront_order_alert_emails: str = ""
+
+    # E-fatura/e-arşiv sağlayıcısı: "" (kapalı). Uygulanmış sağlayıcı yoktur; bkz. app/services/einvoice.py
+    einvoice_provider: str = ""
 
     @property
     def sqlalchemy_url(self) -> str:

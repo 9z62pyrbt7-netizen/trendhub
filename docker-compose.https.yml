@@ -1,0 +1,23 @@
+# İsteğe bağlı HTTPS katmanı (trendcantaniz.com). Mevcut servisleri değiştirmez, yalnızca `https` ekler.
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --no-deps https
+# Ayrıntı: docs/DEPLOYMENT.md → "Alan adı ve HTTPS".
+services:
+  https:
+    image: caddy:2.8-alpine
+    container_name: trendhub-https
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/https/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

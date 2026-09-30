@@ -113,6 +113,30 @@ for (const [vp, opts] of Object.entries({ desktop: { viewport: { width: 1440, he
   await Promise.all([p.waitForURL(/sirala=fiyat-artan/, { timeout: 8000 }).catch(() => {}), p.selectOption('#SortBy', 'fiyat-artan')]);
   ok(T('sort'), p.url().includes('sirala=fiyat-artan'));
   if (shots) await p.screenshot({ path: `${shots}/${vp}_collection.png` });
+
+  // 10) Müşteri hesabı: üye ol → Hesabım → adres ekle → çıkış
+  await p.goto(base + '/hesap/giris', { waitUntil: 'networkidle' });
+  const reg = p.locator('form[data-api-form^="/api/store/account/register"]');
+  await reg.locator('[name=full_name]').fill('Deniz Aksoy');
+  await reg.locator('[name=email]').fill(`deniz.${vp}.${Date.now()}@example.com`);
+  await reg.locator('[name=password]').fill('kisa');
+  await reg.locator('button[type=submit]').click(); await p.waitForTimeout(700);
+  ok(T('register validation errors shown'), await reg.locator('.field__error').count() >= 1);
+  await reg.locator('[name=password]').fill('guvenliSifre1');
+  await reg.locator('[name=accept_kvkk]').check({ force: true });
+  await Promise.all([p.waitForURL(/\/hesabim/, { timeout: 8000 }).catch(() => {}), reg.locator('button[type=submit]').click()]);
+  ok(T('register → Hesabım'), p.url().endsWith('/hesabim') && (await p.locator('h1').innerText()).includes('Deniz'));
+  const addr = p.locator('form[data-api-form="/api/store/account/addresses"]');
+  await addr.locator('[name=phone]').fill('05321112233');
+  await addr.locator('[name=city]').selectOption('İzmir');
+  await addr.locator('[name=district]').fill('Bornova');
+  await addr.locator('[name=address]').fill('Kazımdirik Mah. 372 Sok. No:4');
+  await Promise.all([p.waitForLoadState('load'), addr.locator('button[type=submit]').click()]); await p.waitForTimeout(900);
+  ok(T('address saved'), (await p.locator('.account-address summary').first().innerText()).includes('Adresim'));
+  if (shots) await p.screenshot({ path: `${shots}/${vp}_account.png`, fullPage: true });
+  await Promise.all([p.waitForURL((u) => u.pathname === '/', { timeout: 8000 }).catch(() => {}), p.locator('[data-api-action="/api/store/account/logout"]').click()]);
+  const back = await p.goto(base + '/hesabim', { waitUntil: 'load' });
+  ok(T('logout ends session'), p.url().includes('/hesap/giris'), String(back && back.status()));
   await ctx.close();
 }
 await b.close();

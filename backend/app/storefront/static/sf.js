@@ -428,6 +428,62 @@
     });
   }
 
+  /* ---------- Hesap formları (giriş, kayıt, adres, şifre) ---------- */
+  const fieldError = (form, name, msg) => {
+    const input = form.elements[name];
+    const el = input && (input.length && !input.tagName ? input[0] : input);
+    const wrap = el && el.closest('.field, .check');
+    if (!wrap) return null;
+    wrap.classList.add('is-invalid');
+    const m = document.createElement('span'); m.className = 'field__error'; m.textContent = msg;
+    wrap.appendChild(m);
+    return el;
+  };
+  $$('[data-api-form]').forEach((f) => {
+    f.addEventListener('input', (e) => {
+      const w = e.target.closest('.field, .check');
+      if (w) { w.classList.remove('is-invalid'); const m = $('.field__error', w); if (m) m.remove(); }
+    });
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('button[type="submit"]', f);
+      const errBox = $('[data-form-error]', f);
+      if (errBox) errBox.hidden = true;
+      $$('.is-invalid', f).forEach((n) => n.classList.remove('is-invalid'));
+      $$('.field__error', f).forEach((n) => n.remove());
+      const body = {};
+      for (const [k, v] of new FormData(f).entries()) body[k] = typeof v === 'string' ? v.trim() : v;
+      $$('input[type="checkbox"]', f).forEach((c) => { body[c.name] = c.checked; });
+      Object.keys(body).forEach((k) => { if (body[k] === '') body[k] = null; });
+      if (btn) { btn.disabled = true; setBusy(btn, true); }
+      try {
+        const d = await api(f.dataset.apiForm, body);
+        if (d.redirect) { window.location.href = d.redirect; return; }
+        if (d.message) {
+          const ok = $('[data-form-ok]', f);
+          if (ok) { ok.textContent = d.message; ok.hidden = false; } else toast(d.message);
+        }
+        if (f.hasAttribute('data-reload')) window.location.reload();
+        else if (f.hasAttribute('data-reset')) f.reset();
+      } catch (err) {
+        if (errBox) { errBox.textContent = err.message; errBox.hidden = false; } else toast(err.message, false);
+        let first = null;
+        Object.entries((err.data && err.data.fields) || {}).forEach(([n, m]) => { first = fieldError(f, n, m) || first; });
+        if (first && first.focus) first.focus();
+      } finally {
+        if (btn) { btn.disabled = false; setBusy(btn, false); }
+      }
+    });
+  });
+  $$('[data-api-action]').forEach((b) => b.addEventListener('click', async () => {
+    if (b.dataset.confirm && !window.confirm(b.dataset.confirm)) return;
+    b.disabled = true;
+    try {
+      const d = await api(b.dataset.apiAction, {});
+      if (d.redirect) window.location.href = d.redirect; else window.location.reload();
+    } catch (err) { toast(err.message, false); b.disabled = false; }
+  }));
+
   /* ---------- Sıralama ---------- */
   $$('[data-sort]').forEach((s) => s.addEventListener('change', () => s.form.submit()));
 

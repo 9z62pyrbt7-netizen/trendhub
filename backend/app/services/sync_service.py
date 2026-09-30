@@ -26,6 +26,7 @@ ALERTS_SCAN = "alerts.scan"
 ALERTS_SCAN_EVERY_MINUTES = 15
 STOREFRONT_MAINTENANCE = "storefront.maintenance"
 STOREFRONT_MAINTENANCE_EVERY_MINUTES = 10
+STOREFRONT_NOTIFY = "storefront.notify"
 DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
@@ -38,8 +39,27 @@ JOB_LABELS_TR = {
     SUPPLIER_SYNC: "Tedarikçi senkronizasyonu",
     ALERTS_SCAN: "Uyarı taraması",
     "listing.publish": "Ürün yayınlama (onaylı)",
-    STOREFRONT_MAINTENANCE: "Web mağazası bakımı (süresi dolan ödeme beklemeleri, eski sepetler)",
+    STOREFRONT_MAINTENANCE: "Web mağazası bakımı (ödeme beklemeleri, sepetler, kargo bildirimi, tedarikçi taslakları, e-fatura)",
+    STOREFRONT_NOTIFY: "Web siparişi bildirimleri (e-posta/SMS)",
 }
+
+
+def run_storefront_maintenance(engine: Engine) -> dict:
+    """Web mağazası bakımı. Her adım ayrı işlemde çalışır; biri hata verirse diğerleri yine çalışır."""
+    from ..storefront.checkout import expire_stale
+    from . import einvoice, order_notifications, supplier_forwarding
+    out: dict = {}
+    steps = (("reservations", expire_stale), ("shipped_notifications", order_notifications.scan_shipped),
+             ("supplier_forwarding", supplier_forwarding.run_auto), ("einvoice", einvoice.process),
+             ("notify_retry", order_notifications.schedule_retry))
+    for name, fn in steps:
+        try:
+            with engine.begin() as conn:
+                out[name] = fn(conn)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Web mağazası bakımı adımı başarısız: %s", name)
+            out[name] = {"error": f"{exc.__class__.__name__}: {str(exc)[:200]}"}
+    return out
 
 
 def _require(connector, capability: str, what: str):
@@ -136,9 +156,10 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
     if t == ALERTS_SCAN:
         return run_alerts_scan(engine)
     if t == STOREFRONT_MAINTENANCE:
-        from ..storefront.checkout import expire_stale
-        with engine.begin() as conn:
-            return expire_stale(conn)
+        return run_storefront_maintenance(engine)
+    if t == STOREFRONT_NOTIFY:
+        from . import order_notifications
+        return order_notifications.deliver_pending(engine.begin)
     if t in (ORDERS_SYNC, ORDERS_DEEP_SYNC, LISTINGS_SYNC, SUPPLIER_SYNC):
         return _scan_after(engine, _execute_sync(engine, job, payload, settings))
     if t == INTEGRATION_CHECK:

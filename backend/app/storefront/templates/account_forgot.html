@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="section account">
+  <div class="container container--narrow">
+    <div class="page-head"><h1 class="page-title">Şifremi unuttum</h1><a class="link-quiet" href="/hesap/giris">← Girişe dön</a></div>
+    {% if email_available %}
+    <form class="form account__card" data-api-form="/api/store/account/password/forgot" data-reset novalidate>
+      <p class="muted">Hesabınıza kayıtlı e-posta adresini yazın; şifre yenileme bağlantısı gönderelim. Bağlantı 1 saat geçerlidir.</p>
+      <label class="field"><span>E-posta</span><input name="email" type="email" autocomplete="email" required maxlength="254" inputmode="email"></label>
+      <p class="form-message form-message--ok" data-form-ok hidden role="status"></p>
+      <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+      <button type="submit" class="btn btn--dark btn--block">Bağlantı gönder</button>
+    </form>
+    {% else %}
+    <div class="notice notice--info">
+      <p>Şifre yenileme e-postası şu anda gönderilemiyor. Hesabınıza erişmek için <a href="/iletisim">iletişim sayfasındaki</a> bilgilerden bize ulaşın.</p>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="section order-page"><div class="container container--narrow">
+  <p class="eyebrow">Sipariş {{ o.public_code }}</p>
+  <h1 class="page-title">Kartla güvenli ödeme</h1>
+  {% if error %}
+    <div class="notice" role="alert"><p>{{ error }}</p></div>
+    <a class="btn btn--ghost mt" href="{{ order_url }}">Sipariş durumuna dön</a>
+  {% elif start and start.iframe_url %}
+    <p class="muted">Ödenecek tutar: <strong>{{ fmt_try(o.total) }}</strong>. Kart bilgileriniz {{ provider.name }} güvenli ödeme sayfasında girilir; Trendçantanız kart bilgisi görmez ve saklamaz.</p>
+    <div class="pay-frame mt">
+      <iframe src="{{ start.iframe_url }}" title="{{ provider.name }} güvenli ödeme" loading="eager" referrerpolicy="no-referrer-when-downgrade"></iframe>
+    </div>
+    <p class="small muted mt">Ödeme tamamlandığında siparişiniz otomatik onaylanır. Stoklar 30 dakika sizin için ayrılmıştır. <a href="{{ order_url }}">Sipariş durumu</a></p>
+  {% endif %}
+</div></section>
+{% endblock %}

@@ -1,0 +1,24 @@
+# Trendçantanız — HTTPS (Let's Encrypt otomatik sertifika). docker-compose.https.yml ile kullanılır.
+# Önkoşul: trendcantaniz.com ve www.trendcantaniz.com DNS A kayıtları bu sunucuyu göstermeli,
+# 80 ve 443 portları dışarıya açık ve başka bir süreç tarafından kullanılmıyor olmalı.
+# Mevcut erişimler DEĞİŞMEZ: panel :8081, mağaza :8090 aynen çalışır.
+{
+	email {$ACME_EMAIL}
+}
+
+www.trendcantaniz.com {
+	redir https://trendcantaniz.com{uri} permanent
+}
+
+trendcantaniz.com {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	# nginx (web) mağaza sunucu bloğu; Host ve X-Forwarded-* başlıkları korunur.
+	reverse_proxy web:8090 {
+		header_up X-Forwarded-Proto https
+		header_up X-Real-IP {remote_host}
+	}
+}

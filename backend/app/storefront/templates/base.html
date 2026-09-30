@@ -50,6 +50,7 @@
     <div class="header__brand"><a href="/" class="header__logo wordmark">TRENDÇANTANIZ</a></div>
     <div class="header__right">
       <button type="button" class="header__icon" data-search-open aria-controls="SearchPanel" aria-expanded="false" aria-label="Ara">{% include "icons/search.svg" %}</button>
+      <a class="header__icon header__account" href="{{ '/hesabim' if customer else '/hesap/giris' }}" aria-label="{{ 'Hesabım' if customer else 'Giriş yap' }}">{% include "icons/user.svg" %}</a>
       <a class="header__icon header__cart" href="/sepet" data-cart-open>
         {% include "icons/bag.svg" %}
         <span class="cart-count{% if not cart_count %} is-empty{% endif %}" data-cart-count aria-hidden="true">{{ cart_count }}</span>
@@ -91,6 +92,7 @@
       </ul>
     </nav>
     <div class="drawer__foot mobile-nav__foot">
+      <a href="{{ '/hesabim' if customer else '/hesap/giris' }}" class="mobile-nav__util">{% include "icons/user.svg" %} {{ 'Hesabım' if customer else 'Giriş yap / Üye ol' }}</a>
       <a href="/iletisim" class="mobile-nav__util">{% include "icons/chat.svg" %} İletişim</a>
       {% include "partials/social.html" %}
     </div>

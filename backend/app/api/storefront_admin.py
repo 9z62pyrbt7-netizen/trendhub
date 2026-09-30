@@ -13,9 +13,9 @@ from sqlalchemy.engine import Connection
 from ..config import get_settings
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, admin, client_ip, operator, viewer
-from ..services import stock_availability
+from ..services import einvoice, order_notifications, stock_availability, supplier_forwarding
 from ..services.audit import log_audit
-from ..storefront import catalog, checkout, store_config
+from ..storefront import catalog, checkout, payments, store_config
 from .common import Page, not_found, paged
 
 router = APIRouter(prefix="/api/storefront", tags=["storefront"])
@@ -87,48 +87,88 @@ def json_eq(a, b) -> bool:
 
 
 # ------------------------------------------------------------------ ürün yayını
-@router.get("/products")
-def list_products(page: Page = Depends(), q: str | None = Query(None, max_length=100), status: str | None = None,
-                  _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
-    cfg = store_config.load(conn)
-    where, params = ["TRUE"], {}
+PRODUCT_STATUSES = {"visible", "hidden", "eligible_unpublished", "not_eligible"}
+
+
+def _product_filter(q: str | None, status: str | None, auto: bool) -> tuple[str, dict]:
+    where, params = ["TRUE"], {"auto": auto}
     if q:
-        where.append("(p.sku ILIKE :q OR p.barcode ILIKE :q OR p.name ILIKE :q OR sfp.title ILIKE :q)")
+        where.append("(p.sku ILIKE :q OR p.barcode ILIKE :q OR p.name ILIKE :q OR sfp.title ILIKE :q OR p.category ILIKE :q)")
         params["q"] = f"%{q.strip()}%"
-    has_image = "(jsonb_array_length(COALESCE(p.images, '[]'::jsonb)) > 0 OR COALESCE(p.image_url, '') <> '')"
-    visible = f"""(COALESCE(p.is_active, TRUE) AND COALESCE(p.sale_price, 0) > 0 AND {has_image}
-                   AND (sfp.published IS TRUE OR (sfp.product_id IS NULL AND :auto)))"""
+    visible = f"({catalog.ELIGIBLE_SQL} AND (sfp.published IS TRUE OR (sfp.product_id IS NULL AND :auto)))"
     if status == "visible":
         where.append(visible)
     elif status == "hidden":
         where.append(f"NOT {visible}")
-    w = " AND ".join(where)
-    base = f"FROM products p LEFT JOIN storefront_products sfp ON sfp.product_id = p.id WHERE {w}"
-    params.update(auto=cfg.auto_publish, **stock_availability.params(conn))
-    total = conn.execute(text(f"SELECT COUNT(*) {base}"), params).scalar()
+    elif status == "eligible_unpublished":
+        where.append(f"({catalog.ELIGIBLE_SQL}) AND NOT {visible}")
+    elif status == "not_eligible":
+        where.append(f"NOT ({catalog.ELIGIBLE_SQL})")
+    elif status:
+        raise HTTPException(422, "Geçersiz durum filtresi")
+    return " AND ".join(where), params
+
+
+PRODUCT_FROM = f"""FROM products p LEFT JOIN storefront_products sfp ON sfp.product_id = p.id
+          {catalog.SP_LATERAL}"""
+
+
+@router.get("/products")
+def list_products(page: Page = Depends(), q: str | None = Query(None, max_length=100), status: str | None = None,
+                  _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    cfg = store_config.load(conn)
+    w, params = _product_filter(q, status, cfg.auto_publish)
+    visible = f"({catalog.ELIGIBLE_SQL} AND (sfp.published IS TRUE OR (sfp.product_id IS NULL AND :auto)))"
+    params.update(**stock_availability.params(conn))
+    total = conn.execute(text(f"SELECT COUNT(*) {PRODUCT_FROM} WHERE {w}"), params).scalar()
     items = rows(conn, f"""
-        SELECT p.id, p.sku, p.barcode, p.name, p.category, p.sale_price, p.stock, p.is_active,
-               COALESCE(jsonb_array_length(COALESCE(p.images, '[]'::jsonb)), 0) + CASE WHEN COALESCE(p.image_url, '') <> '' THEN 1 ELSE 0 END AS image_count,
+        SELECT p.id, p.sku, p.barcode, p.name, p.category, p.sale_price, p.stock, p.is_active, p.model_code,
+               p.images, p.image_url, sp.images AS supplier_images,
+               sp.color AS supplier_color, sp.size AS supplier_size, sp.parent_code,
                sfp.published, sfp.title, sfp.compare_at_price, COALESCE(sfp.featured, FALSE) AS featured,
-               COALESCE(sfp.sort_order, 0) AS sort_order, {visible} AS visible,
+               COALESCE(sfp.sort_order, 0) AS sort_order, sfp.color, sfp.size, sfp.group_code,
+               sfp.seo_title, sfp.seo_description, sfp.description AS web_description,
+               {catalog.GROUP_KEY} AS group_key, {visible} AS visible, ({catalog.ELIGIBLE_SQL}) AS eligible,
                {stock_availability.available_sql('p')} AS available
-        {base} ORDER BY {visible} DESC, COALESCE(sfp.featured, FALSE) DESC, p.name LIMIT :limit OFFSET :offset
+        {PRODUCT_FROM} WHERE {w}
+        ORDER BY {visible} DESC, COALESCE(sfp.featured, FALSE) DESC, {catalog.GROUP_KEY}, p.name
+        LIMIT :limit OFFSET :offset
     """, **params, limit=page.page_size, offset=page.offset)
+    group_sizes = {}
+    keys = list({it["group_key"] for it in items})
+    if keys:
+        group_sizes = {r["k"]: r["n"] for r in rows(conn, f"""
+            SELECT {catalog.GROUP_KEY} AS k, COUNT(*) AS n {PRODUCT_FROM}
+             WHERE {catalog.GROUP_KEY} = ANY(:keys) GROUP BY 1""", keys=keys)}
     for it in items:
+        imgs = catalog._image_list(it.pop("images")) or ([it["image_url"]] if it["image_url"] else []) \
+            or catalog._image_list(it.pop("supplier_images", None))
+        it.pop("supplier_images", None)
+        it["image_count"] = len(imgs)
+        it["thumbnail"] = imgs[0] if imgs else None
+        it["effective_color"] = it["color"] or it["supplier_color"]
+        it["effective_size"] = it["size"] or it["supplier_size"]
+        it["variant_count"] = group_sizes.get(it["group_key"], 1)
         reasons = []
-        if not it["is_active"] and it["is_active"] is not None:
+        if it["is_active"] is False:
             reasons.append("Ürün pasif")
         if not it["sale_price"] or Decimal(it["sale_price"]) <= 0:
             reasons.append("Satış fiyatı yok")
-        if not it["image_count"]:
+        if not imgs:
             reasons.append("Görsel yok")
         if it["published"] is False:
             reasons.append("Web'de gizlendi")
         elif it["published"] is None and not cfg.auto_publish:
-            reasons.append("Otomatik yayın kapalı")
+            reasons.append("Yayınlanmadı (otomatik yayın kapalı)")
         it["hidden_reasons"] = reasons
         it["url"] = catalog.product_path(it["id"], it["title"] or it["name"]) if it["visible"] else None
-    return {**paged(items, total, page), "auto_publish": cfg.auto_publish}
+    counts = row(conn, f"""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE {visible}) AS visible,
+               COUNT(*) FILTER (WHERE ({catalog.ELIGIBLE_SQL}) AND NOT {visible}) AS eligible_unpublished,
+               COUNT(*) FILTER (WHERE NOT ({catalog.ELIGIBLE_SQL})) AS not_eligible
+        {PRODUCT_FROM}""", auto=cfg.auto_publish)
+    return {**paged(items, total, page), "auto_publish": cfg.auto_publish, "counts": counts}
 
 
 class ProductPatch(BaseModel):
@@ -138,6 +178,20 @@ class ProductPatch(BaseModel):
     compare_at_price: Decimal | None = Field(None, ge=0, le=Decimal("10000000"))
     featured: bool | None = None
     sort_order: int | None = Field(None, ge=-10000, le=10000)
+    color: str | None = Field(None, max_length=60)
+    size: str | None = Field(None, max_length=60)
+    group_code: str | None = Field(None, max_length=100)
+    seo_title: str | None = Field(None, max_length=70)
+    seo_description: str | None = Field(None, max_length=170)
+
+
+def _upsert(conn: Connection, product_id: int, changes: dict, user_id: int) -> None:
+    conn.execute(text("INSERT INTO storefront_products(product_id, updated_by) VALUES (:p, :u) ON CONFLICT (product_id) DO NOTHING"),
+                 {"p": product_id, "u": user_id})
+    if changes:
+        sets = ", ".join(f"{k} = :{k}" for k in changes)
+        conn.execute(text(f"UPDATE storefront_products SET {sets}, updated_by = :u, updated_at = NOW() WHERE product_id = :p"),
+                     {**changes, "p": product_id, "u": user_id})
 
 
 @router.patch("/products/{product_id}")
@@ -155,19 +209,59 @@ def patch_product(product_id: int, body: ProductPatch, request: Request, user: C
             changes["compare_at_price"] = None
         elif cmp_ <= Decimal(p["sale_price"] or 0):
             raise HTTPException(422, "Üstü çizili fiyat, satış fiyatından yüksek olmalı (gerçek olmayan indirim gösterilmez).")
-    for k in ("title", "description"):
+    for k in ("title", "description", "color", "size", "group_code", "seo_title", "seo_description"):
         if k in changes and changes[k] is not None:
             changes[k] = changes[k].strip() or None
-    conn.execute(text("INSERT INTO storefront_products(product_id, updated_by) VALUES (:p, :u) ON CONFLICT (product_id) DO NOTHING"),
-                 {"p": product_id, "u": user.id})
-    sets = ", ".join(f"{k} = :{k}" for k in changes)
-    conn.execute(text(f"UPDATE storefront_products SET {sets}, updated_by = :u, updated_at = NOW() WHERE product_id = :p"),
-                 {**changes, "p": product_id, "u": user.id})
+    _upsert(conn, product_id, changes, user.id)
     log_audit(conn, actor=user.username, user_id=user.id, action="storefront.product_updated", entity_type="product",
               entity_id=product_id, ip=client_ip(request),
               details={k: (str(v) if isinstance(v, Decimal) else v) for k, v in changes.items() if k != "description"})
     catalog.invalidate()
     return {"ok": True}
+
+
+class BulkIn(BaseModel):
+    action: str
+    product_ids: list[int] | None = Field(None, max_length=1000)
+    # Seçim yerine filtre: "Bu filtredeki tüm ürünler" (ör. yayına uygun ama yayında olmayanların tümü)
+    q: str | None = Field(None, max_length=100)
+    status: str | None = None
+
+
+BULK_ACTIONS = {"publish": {"published": True}, "unpublish": {"published": False},
+                "feature": {"featured": True}, "unfeature": {"featured": False}}
+
+
+@router.post("/products/bulk")
+def bulk_products(body: BulkIn, request: Request, user: CurrentUser = Depends(operator), conn: Connection = Depends(get_conn)):
+    """Toplu yayın. Yayına uygun olmayan (fiyatı/görseli yok, pasif) ürünler yayınlanmaz; nedenleriyle raporlanır."""
+    if body.action not in BULK_ACTIONS:
+        raise HTTPException(422, "Geçersiz işlem")
+    cfg = store_config.load(conn)
+    if body.product_ids:
+        ids = sorted(set(body.product_ids))
+        found = rows(conn, f"SELECT p.id, ({catalog.ELIGIBLE_SQL}) AS eligible {PRODUCT_FROM} WHERE p.id = ANY(:ids)", ids=ids)
+    elif body.q is not None or body.status is not None:
+        w, params = _product_filter(body.q, body.status, cfg.auto_publish)
+        found = rows(conn, f"SELECT p.id, ({catalog.ELIGIBLE_SQL}) AS eligible {PRODUCT_FROM} WHERE {w} LIMIT 5001", **params)
+        if len(found) > 5000:
+            raise HTTPException(422, "Tek seferde en fazla 5000 ürün; filtreyi daraltın.")
+    else:
+        raise HTTPException(422, "Ürün seçin veya filtre verin")
+    changed, skipped = [], []
+    for r in found:
+        if body.action == "publish" and not r["eligible"]:
+            skipped.append(r["id"])
+            continue
+        _upsert(conn, r["id"], BULK_ACTIONS[body.action], user.id)
+        changed.append(r["id"])
+    missing = sorted(set(body.product_ids or []) - {r["id"] for r in found})
+    log_audit(conn, actor=user.username, user_id=user.id, action=f"storefront.products_bulk_{body.action}",
+              entity_type="product", ip=client_ip(request),
+              details={"count": len(changed), "skipped_not_eligible": len(skipped), "filter": {"q": body.q, "status": body.status}
+                       if not body.product_ids else None, "product_ids": changed[:200]})
+    catalog.invalidate()
+    return {"ok": True, "changed": len(changed), "skipped_not_eligible": skipped, "not_found": missing}
 
 
 # ------------------------------------------------------------------ web siparişleri
@@ -235,4 +329,112 @@ def order_details(conn: Connection, order_id: int, user: CurrentUser) -> dict | 
            "paid_at": so["paid_at"], "created_at": so["created_at"], "customer_note": so["customer_note"]}
     if user.has_role("operator"):
         out.update({k: so[k] for k in ("full_name", "email", "phone", "city", "district", "address", "postal_code", "billing")})
+        out["supplier_orders"] = rows(conn, """
+            SELECT x.id, x.status, x.method, x.external_supplier_order_id, x.sent_at, x.last_error, s.name AS supplier_name
+              FROM supplier_orders x LEFT JOIN suppliers s ON s.id = x.supplier_id
+             WHERE x.order_id = :o AND x.channel = 'storefront' ORDER BY x.id""", o=order_id)
+        for x in out["supplier_orders"]:
+            x["status_label"] = supplier_forwarding.STATUS_LABELS.get(x["status"], x["status"])
     return out
+
+
+# ------------------------------------------------------------------ entegrasyon durumu
+@router.get("/integrations")
+def integrations(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Harici servislerin durumu (secret göstermez; yalnızca yapılandırılmış mı)."""
+    s = get_settings()
+    provider = payments.card_provider()
+    channels = order_notifications.channels_enabled(conn)
+    counts = row(conn, """
+        SELECT COUNT(*) FILTER (WHERE status = 'queued') AS queued, COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+               COUNT(*) FILTER (WHERE status = 'sent' AND sent_at > NOW() - INTERVAL '7 days') AS sent_7d
+          FROM notification_outbox""")
+    return {
+        "payment": {"selected": s.storefront_payment_provider or None, "active": provider.name if provider else None,
+                    "available": list(payments.PROVIDERS), "test_mode": bool(provider and provider.code == "paytr" and s.paytr_test_mode)},
+        "email": {"configured": order_notifications.email_configured(), "active": channels["email"],
+                  "owner_alerts": bool(s.storefront_order_alert_emails.strip())},
+        "sms": {"provider": s.sms_provider or None, "configured": order_notifications.sms_configured(), "active": channels["sms"]},
+        "notifications": counts,
+        "einvoice": einvoice.status(conn),
+        "supplier_forwarding": {"mode": supplier_forwarding.mode(conn), "connectors": list(supplier_forwarding.CONNECTORS)},
+        "base_url": s.storefront_base_url or None,
+    }
+
+
+@router.get("/notifications")
+def list_notifications(page: Page = Depends(), _: CurrentUser = Depends(operator), conn: Connection = Depends(get_conn)):
+    total = conn.execute(text("SELECT COUNT(*) FROM notification_outbox")).scalar()
+    items = rows(conn, """
+        SELECT n.id, n.channel, n.template, n.subject, n.status, n.attempts, n.last_error, n.provider, n.created_at, n.sent_at,
+               so.public_code
+          FROM notification_outbox n LEFT JOIN storefront_orders so ON so.id = n.storefront_order_id
+         ORDER BY n.id DESC LIMIT :limit OFFSET :offset""", limit=page.page_size, offset=page.offset)
+    return paged(items, total, page)
+
+
+# ------------------------------------------------------------------ tedarikçiye aktarım (yalnızca web kanalı)
+@router.get("/supplier-orders")
+def list_supplier_orders(page: Page = Depends(), status: str | None = None, _: CurrentUser = Depends(operator),
+                         conn: Connection = Depends(get_conn)):
+    where, params = ["x.channel = 'storefront'"], {}
+    if status:
+        if status not in supplier_forwarding.STATUS_LABELS:
+            raise HTTPException(422, "Geçersiz durum")
+        where.append("x.status = :st")
+        params["st"] = status
+    w = " AND ".join(where)
+    total = conn.execute(text(f"SELECT COUNT(*) FROM supplier_orders x WHERE {w}"), params).scalar()
+    items = rows(conn, f"""
+        SELECT x.id, x.order_id, x.status, x.method, x.cost, x.payload, x.external_supplier_order_id, x.sent_at,
+               x.last_error, x.created_at, s.name AS supplier_name, s.code AS supplier_code, o.external_order_id AS order_code
+          FROM supplier_orders x LEFT JOIN suppliers s ON s.id = x.supplier_id LEFT JOIN orders o ON o.id = x.order_id
+         WHERE {w} ORDER BY x.id DESC LIMIT :limit OFFSET :offset""", **params, limit=page.page_size, offset=page.offset)
+    for it in items:
+        it["status_label"] = supplier_forwarding.STATUS_LABELS.get(it["status"], it["status"])
+        it["can_send"] = supplier_forwarding.connector_for(it["supplier_code"]) is not None
+    return {**paged(items, total, page), "mode": supplier_forwarding.mode(conn)}
+
+
+def _forwarding(fn, conn, request, user, action, entity_id, **details):
+    try:
+        result = fn()
+    except supplier_forwarding.ForwardingError as exc:
+        raise HTTPException(409, str(exc)) from None
+    log_audit(conn, actor=user.username, user_id=user.id, action=action, entity_type="supplier_order",
+              entity_id=entity_id, ip=client_ip(request), details=details)
+    return result
+
+
+@router.post("/orders/{order_id}/supplier/prepare")
+def supplier_prepare(order_id: int, request: Request, user: CurrentUser = Depends(operator), conn: Connection = Depends(get_conn)):
+    ids = _forwarding(lambda: supplier_forwarding.prepare(conn, order_id), conn, request, user,
+                      "storefront.supplier_order_prepared", order_id, order_id=order_id)
+    if not ids:
+        raise HTTPException(409, "Sipariş kalemleri için tanımlı tedarikçi bulunamadı (ürünlerde tercih edilen tedarikçi yok).")
+    return {"ok": True, "supplier_order_ids": ids}
+
+
+@router.post("/supplier-orders/{so_id}/send")
+def supplier_send(so_id: int, request: Request, user: CurrentUser = Depends(operator), conn: Connection = Depends(get_conn)):
+    # Gönderim hatası 200 + ok=false döner: hata kaydı (status='failed', last_error) işlemle birlikte saklanır.
+    return _forwarding(lambda: supplier_forwarding.send(conn, so_id), conn, request, user,
+                       "storefront.supplier_order_sent", so_id)
+
+
+class ManualSentIn(BaseModel):
+    external_id: str | None = Field(None, max_length=100)
+
+
+@router.post("/supplier-orders/{so_id}/mark-sent")
+def supplier_mark_sent(so_id: int, body: ManualSentIn, request: Request, user: CurrentUser = Depends(operator),
+                       conn: Connection = Depends(get_conn)):
+    _forwarding(lambda: supplier_forwarding.mark_manual(conn, so_id, body.external_id), conn, request, user,
+                "storefront.supplier_order_manual_sent", so_id, external_id=body.external_id)
+    return {"ok": True}
+
+
+@router.post("/supplier-orders/{so_id}/cancel")
+def supplier_cancel(so_id: int, request: Request, user: CurrentUser = Depends(operator), conn: Connection = Depends(get_conn)):
+    _forwarding(lambda: supplier_forwarding.cancel(conn, so_id), conn, request, user, "storefront.supplier_order_cancelled", so_id)
+    return {"ok": True}

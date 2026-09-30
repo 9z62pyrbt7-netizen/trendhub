@@ -146,19 +146,44 @@ bir container'ı durdurma/yeniden başlatma **hiçbir betikte yoktur**.
 
 ## Trendçantanız web mağazası (storefront)
 
-Aynı `deploy.sh` ile kurulur/güncellenir; ayrı bir işlem gerekmez. Canlıya açmadan önce:
+Aynı `deploy.sh` ile kurulur/güncellenir; `storefront` servisi (trendhub-storefront) de başlatılır ve
+sağlık kontrolünden (`/api/store/health`, nginx üzerinden :8090) geçmeden deploy başarılı sayılmaz.
 
-1. **Alan adı + HTTPS:** `https://www.trendcantaniz.com` → sunucudaki `TRENDCANTANIZ_HTTP_PORT` (8090)
-   için önüne TLS sonlandırıcı koyun (Caddy, Traefik veya nginx + certbot). Sonlandırıcı
-   `X-Forwarded-Proto: https` ve orijinal `Host` başlığını iletmeli.
-2. `.env`: `STOREFRONT_BASE_URL=https://www.trendcantaniz.com` (canonical, sitemap, OpenGraph, yapılandırılmış veri)
-   ve `COOKIE_SECURE=auto` (HTTPS'te sepet çerezi Secure olur). Sonra `sudo bash deploy/install.sh`.
-3. Panel → **Web Sitesi → Mağaza ayarları:** satıcı unvanı/adres/telefon/e-posta, Mesafeli Satış
-   Sözleşmesi, Ön Bilgilendirme Formu, KVKK Aydınlatma Metni, İade ve Değişim Koşulları, ödeme
-   yöntemi (Havale/EFT için IBAN; kapıda ödeme kargo firmanızda aktifse), kargo ücreti.
-   Bunlar tamamlanmadan mağaza ürünleri gösterir ama **sipariş almaz** (panelde eksikler listelenir).
-4. Kartla ödeme: bir sanal POS sağlayıcısıyla sözleşme + `app/storefront/payments.py` altında
-   sağlayıcı sınıfı gerekir. Anahtarlar yalnızca `.env`'de tutulur. Sağlayıcı yokken kart seçeneği görünmez.
-5. Google Search Console'a `https://www.trendcantaniz.com/sitemap.xml` gönderin.
+> **Düzeltilen hata:** Eski `deploy.sh`, 3. adımda `git pull` ile kendi dosyasını güncelliyordu; bash çalışan
+> betiği diskten okumaya devam ettiği için eski adımlar (yalnızca `api worker web` başlatan satır) çalışıyor ve
+> yeni `storefront` servisi başlamıyordu. Artık betik güncellendiyse yeni sürüm baştan çalıştırılır
+> (`TRENDHUB_REEXEC`), başlatılacak servisler `docker compose config --services`'ten okunur ve herhangi biri
+> çalışmıyorsa logu gösterilerek durulur. **Bu düzeltme sunucuya ilk kez geldiğinde** eski betik hâlâ eski
+> adımları çalıştırabilir; bu yüzden ilk güncellemede `git pull` sonrası betiği bir kez daha çalıştırın
+> (veya doğrudan `sudo bash deploy/install.sh`).
+
+### Canlıya almadan önce
+
+1. **Alan adı + HTTPS (trendcantaniz.com)** — mevcut 8081 (panel) ve 8090 (mağaza) erişimi değişmez:
+   * DNS: `trendcantaniz.com` ve `www.trendcantaniz.com` için A kaydı → sunucu IP'si.
+   * **Seçenek A (Caddy, önerilen; 80/443 boşsa):** `.env` içine `ACME_EMAIL=...` ekleyin, sonra
+     `docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --no-deps https`.
+     Sertifika Let's Encrypt'ten otomatik alınır/yenilenir; www → apex 301 yönlendirilir.
+   * **Seçenek B (sunucuda zaten nginx + certbot varsa):** `deploy/https/nginx-host.conf.example`.
+   * Mağaza nginx bloğu yalnızca yerel/özel ağdan gelen `X-Forwarded-For`'a güvenir (hız sınırları ziyaretçi başına).
+2. `.env`: `STOREFRONT_BASE_URL=https://trendcantaniz.com` (canonical, sitemap, OpenGraph, ödeme dönüş ve
+   e-posta bağlantıları) ve `COOKIE_SECURE=auto`. Sonra `sudo bash deploy/install.sh`.
+3. Panel → **Web Sitesi → Mağaza ayarları:** satıcı bilgileri, yasal metinler, ödeme yöntemleri, kargo,
+   "Sipariş sonrası" (tedarikçiye aktarım modu, e-posta/SMS, e-fatura anahtarları).
+4. Panel → **Web Sitesi → Ürün yayını:** filtre "Yayına hazır" → "Filtredeki tümünü yayınla" veya seçerek yayınlayın.
+5. Google Search Console'a `https://trendcantaniz.com/sitemap.xml` gönderin.
+
+### Harici servisler (hepsi `.env`; yoksa özellik kapalı kalır, hiçbir dış isteğe çıkılmaz)
+
+| Özellik | .env | Not |
+|---|---|---|
+| Kart ödeme — PayTR | `STOREFRONT_PAYMENT_PROVIDER=paytr`, `PAYTR_MERCHANT_ID/KEY/SALT`, `PAYTR_TEST_MODE` | PayTR panelinde Bildirim URL: `https://trendcantaniz.com/odeme/geri-donus/paytr`. Önce `PAYTR_TEST_MODE=true` ile test kartıyla deneyin. |
+| Kart ödeme — iyzico | `STOREFRONT_PAYMENT_PROVIDER=iyzico`, `IYZICO_API_KEY/SECRET_KEY`, `IYZICO_BASE_URL` | Önce sandbox (`https://sandbox-api.iyzipay.com`) anahtarlarıyla deneyin. |
+| E-posta | `SMTP_HOST/PORT/USERNAME/PASSWORD/FROM`, `STOREFRONT_ORDER_ALERT_EMAILS` | Sipariş alındı / ödeme onayı / kargoya verildi / iptal + şifre sıfırlama. SPF/DKIM kayıtlarını ayarlayın. |
+| SMS | `SMS_PROVIDER=netgsm`, `NETGSM_USERCODE/PASSWORD/HEADER` | Onaylı SMS başlığı gerekir. |
+| E-fatura | `EINVOICE_PROVIDER` | Repoda uygulanmış entegratör yok; `app/services/einvoice.py` arayüzü hazır. |
+| Tedarikçi sipariş API'si | — | Bağlantı yok; web siparişleri panelden taslak → "Manuel iletildi". `app/services/supplier_forwarding.py`. |
+
+Durum: Panel → Web Sitesi → **Entegrasyonlar** (secret göstermez).
 
 Görsel önbelleği `storefront_images` volume'undadır (WebP); silinirse kendiliğinden yeniden üretilir.

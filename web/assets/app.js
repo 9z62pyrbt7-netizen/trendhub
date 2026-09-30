@@ -575,7 +575,11 @@ async function showOrder(id) {
         <dt>İletişim</dt><dd>${o.storefront.phone} · ${o.storefront.email}</dd>
         <dt>Fatura</dt><dd>${o.storefront.billing?.type === 'corporate' ? `${o.storefront.billing.company} · ${o.storefront.billing.tax_office} / ${o.storefront.billing.tax_number}` : 'Bireysel'}</dd>` : ''}
       ${o.storefront.customer_note ? html`<dt>Müşteri notu</dt><dd>${o.storefront.customer_note}</dd>` : ''}</dl>
-      <p class="small muted mt">Bu sipariş Trendçantanız web sitesinden geldi. Tedarik ve kargo süreci TrendHub'dan yönetilir; pazaryerine gönderilmez.</p></div>` : ''}
+      <p class="small muted mt">Bu sipariş Trendçantanız web sitesinden geldi. Tedarik ve kargo süreci TrendHub'dan yönetilir; pazaryerine gönderilmez.</p>
+      ${o.storefront.supplier_orders ? html`<h3 class="mt">Tedarikçiye aktarım</h3>${o.storefront.supplier_orders.length
+        ? html`<ul class="timeline mt">${o.storefront.supplier_orders.map((x) => html`<li><b>${x.supplier_name || 'Tedarikçi'}</b> · ${x.status_label}${x.external_supplier_order_id ? ` · ${x.external_supplier_order_id}` : ''}${x.last_error ? html`<br><span class="small neg">${x.last_error}</span>` : ''}</li>`)}</ul>
+          <a class="small" href="#/storefront?tab=supplier">Aktarım listesine git →</a>`
+        : html`<p class="small muted">Henüz tedarikçi taslağı yok.</p>${can('operator') ? html`<button class="btn btn-sm mt" data-sfprep="${o.id}">Tedarikçi siparişi taslağı hazırla</button>` : ''}`}` : ''}</div>` : ''}
     ${shipPlanCard(o.shipping_plan)}
     <div class="grid grid-2">
       <div class="card"><h3>Bilgiler</h3><dl class="kv mt">
@@ -625,6 +629,9 @@ async function showOrder(id) {
       await api(`/api/orders/${id}/adjustments`, { method: 'POST', body: { ...d, order_item_id: d.order_item_id ? Number(d.order_item_id) : null } });
       toast('Gider eklendi, kâr yeniden hesaplandı'); showOrder(id);
     });
+  });
+  $('[data-sfprep]', body)?.addEventListener('click', async () => {
+    try { await api(`/api/storefront/orders/${id}/supplier/prepare`, { method: 'POST' }); toast('Tedarikçi taslağı hazırlandı'); showOrder(id); } catch (e) { fail(e); }
   });
 }
 
@@ -2105,7 +2112,8 @@ PAGES.storefront = {
     const ov = await api('/api/storefront/overview');
     setHeader('Web Sitesi', 'Trendçantanız web mağazası: yayındaki ürünler, ödeme bekleyen siparişler ve mağaza ayarları',
       ov.base_url ? html`<a class="btn" href="${ov.base_url}" target="_blank" rel="noopener">Mağazayı aç ↗</a>` : '');
-    const tabs = [['orders', `Ödeme bekleyenler${ov.pending_payment ? ` (${ov.pending_payment})` : ''}`], ['products', 'Ürün yayını'], ...(can('admin') ? [['settings', 'Mağaza ayarları']] : [])];
+    const tabs = [['orders', `Ödeme bekleyenler${ov.pending_payment ? ` (${ov.pending_payment})` : ''}`], ['products', 'Ürün yayını'],
+      ...(can('operator') ? [['supplier', 'Tedarikçiye aktarım']] : []), ['integrations', 'Entegrasyonlar'], ...(can('admin') ? [['settings', 'Mağaza ayarları']] : [])];
     view().innerHTML = renderVal(html`
       ${ov.checkout_ready ? '' : html`<div class="notice bad" style="margin-bottom:16px"><b>Web mağazası şu anda sipariş kabul etmiyor.</b><ul class="small mt">${ov.blockers.map((b) => html`<li>${b}</li>`)}</ul></div>`}
       <div class="grid grid-4">
@@ -2118,12 +2126,14 @@ PAGES.storefront = {
         <p>${ov.hero ? html`<b>${ov.hero.title}</b> — ${ov.hero.reason}` : 'Yayında ürün yok.'}</p></div>
         ${ov.hero && ov.base_url ? html`<a class="btn btn-sm" href="${ov.base_url}${ov.hero.url}" target="_blank" rel="noopener">Ürünü gör ↗</a>` : ''}</div>
         <p class="small muted">Ödeme yöntemleri: ${ov.payment_methods.length ? ov.payment_methods.map((m) => m.label).join(', ') : 'yok'}.
-          Kartla ödeme için sanal POS sağlayıcısı ${ov.card_provider_configured ? 'yapılandırılmış' : 'henüz entegre edilmedi (sunucu ayarı + sağlayıcı sözleşmesi gerekir)'}.</p></div>
+          Kartla ödeme ${ov.card_provider_configured ? 'etkin (PayTR / iyzico, sunucu ayarı)' : 'kapalı: PayTR veya iyzico anahtarları sunucu .env dosyasına girilince açılır (Entegrasyonlar sekmesi)'}.</p></div>
       <div class="seg mt" role="tablist" style="margin-bottom:16px">${tabs.map(([k, l]) => html`<button role="tab" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}" data-sftab="${k}">${l}</button>`)}</div>
       <div id="sf-body"></div>`);
     $$('[data-sftab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/storefront?tab=${b.dataset.sftab}`; }));
     const box = $('#sf-body');
     if (tab === 'products') return sfProducts(box);
+    if (tab === 'supplier' && can('operator')) return sfSupplier(box);
+    if (tab === 'integrations') return sfIntegrations(box);
     if (tab === 'settings' && can('admin')) return sfSettings(box);
     return sfOrders(box);
   },
@@ -2162,42 +2172,143 @@ async function sfOrders(box, page = 1, status = 'pending') {
   }));
 }
 
+const SFP_STATUS = [['', 'Tümü'], ['visible', 'Yayında'], ['hidden', 'Yayında değil'], ['eligible_unpublished', 'Yayına hazır (yayında değil)'], ['not_eligible', 'Yayına uygun değil (fiyat/görsel yok)']];
 async function sfProducts(box, page = 1, f = { q: '', status: '' }) {
   const d = await api('/api/storefront/products', { query: { ...f, page, page_size: 25 } });
+  const op = can('operator');
+  const c = d.counts || {};
   box.innerHTML = renderVal(html`<div class="card">
-    <div class="card-head"><div><h2>Ürün yayını</h2><p>Ürünler TrendHub kataloğundan gelir (tedarikçi beslemesi / pazaryeri ilanı). Fiyat, stok ve görseller katalogla eşleşir; burada yalnızca web'e özel başlık, üstü çizili fiyat ve öne çıkarma ayarlanır.
-      ${d.auto_publish ? 'Aktif, fiyatı ve görseli olan ürünler otomatik yayınlanır.' : 'Otomatik yayın kapalı: yalnızca yayınlanan ürünler görünür.'}</p></div></div>
-    <form class="filters" id="sfp-filter"><input name="q" value="${f.q}" placeholder="SKU, barkod veya ad" aria-label="Ara">
-      <select name="status" aria-label="Durum"><option value="">Tümü</option><option value="visible" ${raw(f.status === 'visible' ? 'selected' : '')}>Yayında</option><option value="hidden" ${raw(f.status === 'hidden' ? 'selected' : '')}>Yayında değil</option></select>
+    <div class="card-head"><div><h2>Ürün yayını</h2><p>Ürünler TrendHub kataloğundan gelir (tedarikçi beslemesi / pazaryeri ilanı): ad, fiyat, stok, görseller ve renk katalogla eşleşir. Görseli veya fiyatı olmayan ürün yayınlanmaz.
+      ${d.auto_publish ? 'Aktif, fiyatı ve görseli olan ürünler otomatik yayınlanır.' : 'Otomatik yayın kapalı: yalnızca yayınlanan ürünler görünür.'}</p>
+      <p class="small muted">Yayında ${num(c.visible)} · yayına hazır ${num(c.eligible_unpublished)} · uygun değil ${num(c.not_eligible)} · toplam ${num(c.total)}</p></div></div>
+    <form class="filters" id="sfp-filter"><input name="q" value="${f.q}" placeholder="SKU, barkod, ad veya kategori" aria-label="Ara">
+      <select name="status" aria-label="Durum">${SFP_STATUS.map(([v, l]) => html`<option value="${v}" ${raw(f.status === v ? 'selected' : '')}>${l}</option>`)}</select>
       <button class="btn btn-sm" type="submit">Filtrele</button></form>
-    ${d.items.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Ürün</th><th class="r">Fiyat</th><th class="r" title="Katalog stoğu">Stok</th><th class="r" title="Son stok güncellemesinden sonraki tüm kanal siparişleri ve ödeme bekleyen web siparişleri düşülmüş">Satılabilir</th><th>Web durumu</th><th></th></tr></thead><tbody>
-      ${d.items.map((x) => html`<tr><td><b>${x.title || x.name}</b><span class="muted small ellipsis">${x.sku || '—'} · ${x.category || 'kategori yok'} · ${num(x.image_count)} görsel</span></td>
+    ${op && d.items.length ? html`<div class="row mt" id="sfp-bulk"><span class="muted small" id="sfp-count">Seçili: 0</span>
+      <button class="btn btn-sm btn-primary" data-bulk="publish" disabled>Seçilenleri yayınla</button><button class="btn btn-sm" data-bulk="unpublish" disabled>Seçilenleri gizle</button>
+      <button class="btn btn-sm" data-bulk="feature" disabled>Öne çıkar</button><button class="btn btn-sm" data-bulk="unfeature" disabled>Öne çıkarmayı kaldır</button>
+      <span class="spacer"></span><button class="btn btn-sm" data-bulkall="publish" title="Filtreye uyan tüm ürünler (en fazla 5000)">Filtredeki tümünü yayınla (${num(d.total)})</button></div>` : ''}
+    ${d.items.length ? html`<div class="table-wrap mt"><table><thead><tr>${op ? html`<th><input type="checkbox" id="sfp-all" aria-label="Sayfadakilerin tümünü seç"></th>` : ''}<th>Ürün</th><th>Renk / varyant</th><th class="r">Fiyat</th><th class="r" title="Katalog stoğu">Stok</th><th class="r" title="Son stok güncellemesinden sonraki tüm kanal siparişleri ve ödeme bekleyen web siparişleri düşülmüş">Satılabilir</th><th>Web durumu</th><th></th></tr></thead><tbody>
+      ${d.items.map((x) => html`<tr>${op ? html`<td><input type="checkbox" data-sel="${x.id}" aria-label="Seç"></td>` : ''}<td><b>${x.title || x.name}</b><span class="muted small ellipsis">${x.sku || '—'} · ${x.category || 'kategori yok'} · ${num(x.image_count)} görsel</span></td>
+        <td>${x.effective_color || '—'}${x.effective_size ? ` · ${x.effective_size}` : ''}<span class="muted small">${x.variant_count > 1 ? `${x.variant_count} varyantlı model` : 'tek varyant'} · ${x.group_key}</span></td>
         <td class="r num">${money(x.sale_price)}${x.compare_at_price ? html`<br><s class="muted small">${money(x.compare_at_price)}</s>` : ''}</td>
         <td class="r num">${num(x.stock)}</td><td class="r num ${Number(x.available) <= 0 ? 'neg' : ''}">${num(x.available)}</td>
         <td>${x.visible ? html`<span class="badge tone-good">Yayında</span>${x.featured ? html` <span class="badge tone-info">Öne çıkan</span>` : ''}` : html`<span class="badge">Yayında değil</span><span class="muted small">${x.hidden_reasons.join(' · ')}</span>`}</td>
-        <td class="r">${can('operator') ? html`<button class="btn btn-sm" data-sfedit="${x.id}">Düzenle</button>` : ''}</td></tr>`)}
+        <td class="r">${op ? html`<button class="btn btn-sm" data-sfedit="${x.id}">Düzenle</button>` : ''}</td></tr>`)}
       </tbody></table></div>${pager(d, (p) => sfProducts(box, p, f))}` : empty('Ürün yok', 'Kataloğa ürün eklendiğinde (Tedarikçiler → Ürün havuzu → Kataloğa al) burada görünür.')}</div>`);
   $('#sfp-filter').addEventListener('submit', (e) => { e.preventDefault(); sfProducts(box, 1, formData(e.target)); });
+  const selected = () => $$('[data-sel]', box).filter((i) => i.checked).map((i) => Number(i.dataset.sel));
+  const sync = () => { const n = selected().length; const cnt = $('#sfp-count'); if (cnt) cnt.textContent = `Seçili: ${n}`; $$('[data-bulk]', box).forEach((b) => { b.disabled = !n; }); };
+  $$('[data-sel]', box).forEach((i) => i.addEventListener('change', sync));
+  const all = $('#sfp-all');
+  if (all) all.addEventListener('change', () => { $$('[data-sel]', box).forEach((i) => { i.checked = all.checked; }); sync(); });
+  const bulk = async (body, label) => {
+    try {
+      const r = await api('/api/storefront/products/bulk', { method: 'POST', body });
+      const skipped = r.skipped_not_eligible.length;
+      toast(`${label}: ${num(r.changed)} ürün${skipped ? ` · ${skipped} ürün fiyat/görsel eksik olduğu için atlandı` : ''}`);
+      sfProducts(box, page, f);
+    } catch (e) { fail(e); }
+  };
+  const labels = { publish: 'Yayınlandı', unpublish: 'Gizlendi', feature: 'Öne çıkarıldı', unfeature: 'Öne çıkarma kaldırıldı' };
+  $$('[data-bulk]', box).forEach((b) => b.addEventListener('click', () => bulk({ action: b.dataset.bulk, product_ids: selected() }, labels[b.dataset.bulk])));
+  $$('[data-bulkall]', box).forEach((b) => b.addEventListener('click', () => {
+    if (!confirm(`Filtreye uyan ${d.total} ürünün yayına uygun olanları yayınlansın mı?`)) return;
+    bulk({ action: 'publish', q: f.q || null, status: f.status || null }, labels.publish);
+  }));
   $$('[data-sfedit]', box).forEach((b) => b.addEventListener('click', () => {
     const x = d.items.find((i) => String(i.id) === b.dataset.sfedit);
     const body = openModal(html`<h2>Web ayarı · ${x.name}</h2><form class="stack" id="sfp-form">
       <label class="check"><input type="checkbox" name="published" value="1" ${raw(x.published === false ? '' : 'checked')}>Web sitesinde yayınla</label>
       <label class="check"><input type="checkbox" name="featured" value="1" ${raw(x.featured ? 'checked' : '')}>Öne çıkan (listelerde önce gösterilir)</label>
       <label>Web başlığı (boş = katalog adı)<input name="title" maxlength="300" value="${x.title || ''}" placeholder="${x.name}"></label>
-      <label>Üstü çizili fiyat (₺, boş = yok; satış fiyatından yüksek olmalı)<input name="compare_at_price" type="number" step="0.01" min="0" value="${x.compare_at_price ?? ''}"></label>
-      <label>Sıra (küçük önce)<input name="sort_order" type="number" step="1" value="${x.sort_order}"></label>
-      <p class="small muted">Satış fiyatı ve stok katalogdan gelir (Ürün & Stok ekranı). İndirim rozeti yalnızca gerçek üstü çizili fiyat girilirse gösterilir.</p>
+      <label>Web açıklaması (boş = katalog açıklaması)<textarea name="description" rows="4" maxlength="20000">${x.web_description || ''}</textarea></label>
+      <div class="form-grid">
+        <label>Renk (boş = tedarikçi: ${x.supplier_color || 'yok'})<input name="color" maxlength="60" value="${x.color || ''}"></label>
+        <label>Beden / ölçü (boş = tedarikçi: ${x.supplier_size || 'yok'})<input name="size" maxlength="60" value="${x.size || ''}"></label>
+        <label class="full">Varyant grubu kodu (aynı koda sahip ürünler tek ürün sayfasında renk seçeneği olur; boş = ${x.model_code || x.parent_code || 'tekil'})<input name="group_code" maxlength="100" value="${x.group_code || ''}"></label>
+        <label>Üstü çizili fiyat (₺, boş = yok; satış fiyatından yüksek olmalı)<input name="compare_at_price" type="number" step="0.01" min="0" value="${x.compare_at_price ?? ''}"></label>
+        <label>Sıra (küçük önce)<input name="sort_order" type="number" step="1" value="${x.sort_order}"></label>
+        <label class="full">SEO başlığı (en fazla 70 karakter; boş = ürün adı)<input name="seo_title" maxlength="70" value="${x.seo_title || ''}"></label>
+        <label class="full">SEO açıklaması (en fazla 170 karakter; boş = açıklamadan otomatik)<textarea name="seo_description" rows="2" maxlength="170">${x.seo_description || ''}</textarea></label>
+      </div>
+      <p class="small muted">Satış fiyatı, stok ve görseller katalogdan gelir (Ürün & Stok ekranı). İndirim rozeti yalnızca gerçek üstü çizili fiyat girilirse gösterilir.</p>
       <p class="form-error"></p><div class="row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>`);
     $('#sfp-form', body).addEventListener('submit', (e) => {
       e.preventDefault();
       submitting(e.target, async () => {
         const v = formData(e.target);
         await api(`/api/storefront/products/${x.id}`, { method: 'PATCH', body: { published: v.published === '1', featured: v.featured === '1', title: v.title || null,
+          description: v.description || null, color: v.color || null, size: v.size || null, group_code: v.group_code || null,
+          seo_title: v.seo_title || null, seo_description: v.seo_description || null,
           compare_at_price: v.compare_at_price === '' ? 0 : Number(v.compare_at_price), sort_order: parseInt(v.sort_order || '0', 10) } });
         closeLayer('modal'); toast('Kaydedildi. Mağazada en geç 30 sn içinde görünür.'); sfProducts(box, page, f);
       });
     });
   }));
+}
+
+const SFS_TONE = { draft: 'tone-warn', sent: 'tone-good', manual_sent: 'tone-good', failed: 'tone-bad', cancelled: '' };
+async function sfSupplier(box, page = 1, status = 'draft') {
+  const d = await api('/api/storefront/supplier-orders', { query: { status: status === 'all' ? '' : status, page, page_size: 25 } });
+  const modes = { off: 'Kapalı', manual: 'Panelden onayla', auto: 'Otomatik' };
+  box.innerHTML = renderVal(html`<div class="card">
+    <div class="card-head"><div><h2>Web siparişlerinin tedarikçiye aktarımı</h2>
+      <p>Yalnızca Trendçantanız web siparişleri içindir; Trendyol → Çanta Bayim otomasyonu ayrı çalışır ve buradan etkilenmez. Ödemesi alınmış veya kapıda ödemeli web siparişleri için tedarikçi başına taslak hazırlanır (mod: <b>${modes[d.mode] || d.mode}</b>, Mağaza ayarları).
+      Tedarikçinin sipariş API bağlantısı henüz tanımlı değilse siparişi tedarikçiye iletip “Manuel iletildi” olarak işaretleyin.</p></div>
+      <select id="sfs-status" aria-label="Durum">${[['draft', 'Onay bekleyen'], ['all', 'Tümü'], ['sent', 'Gönderildi'], ['manual_sent', 'Manuel iletildi'], ['failed', 'Hatalı'], ['cancelled', 'İptal']].map(([v, l]) => html`<option value="${v}" ${raw(v === status ? 'selected' : '')}>${l}</option>`)}</select></div>
+    ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Sipariş</th><th>Tedarikçi</th><th>Ürünler</th><th>Teslimat</th><th class="r">Maliyet</th><th>Durum</th><th></th></tr></thead><tbody>
+      ${d.items.map((x) => html`<tr><td><a href="#" data-order="${x.order_id}"><b>${x.order_code}</b></a><span class="muted small">${dateTime(x.created_at)}</span></td>
+        <td>${x.supplier_name || '—'}</td>
+        <td>${(x.payload?.lines || []).map((l) => html`<div class="small"><b>${l.sku || l.barcode || '—'}</b> × ${l.quantity}<span class="muted ellipsis">${l.name}</span></div>`)}</td>
+        <td class="small">${x.payload?.ship_to ? html`${x.payload.ship_to.full_name}<br>${x.payload.ship_to.district} / ${x.payload.ship_to.city}` : '—'}</td>
+        <td class="r num">${money(x.cost)}</td>
+        <td><span class="badge ${SFS_TONE[x.status] || ''}">${x.status_label}</span>${x.external_supplier_order_id ? html`<span class="muted small">${x.external_supplier_order_id}</span>` : ''}${x.last_error ? html`<span class="small neg">${x.last_error}</span>` : ''}</td>
+        <td class="r">${['draft', 'failed'].includes(x.status) ? html`<span class="row nowrap">${x.can_send ? html`<button class="btn btn-sm btn-primary" data-sfsend="${x.id}">Gönder</button>` : ''}
+          <button class="btn btn-sm" data-sfmanual="${x.id}">Manuel iletildi</button><button class="btn btn-sm" data-sfscancel="${x.id}">İptal</button></span>` : ''}</td></tr>`)}
+      </tbody></table></div>${pager(d, (p) => sfSupplier(box, p, status))}` : empty('Kayıt yok', status === 'draft' ? 'Onay bekleyen tedarikçi siparişi yok.' : 'Bu durumda kayıt yok.')}</div>`);
+  $('#sfs-status').addEventListener('change', (e) => sfSupplier(box, 1, e.target.value));
+  $$('[data-order]', box).forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); showOrder(Number(a.dataset.order)); }));
+  $$('[data-sfsend]', box).forEach((b) => b.addEventListener('click', async () => {
+    try { const r = await api(`/api/storefront/supplier-orders/${b.dataset.sfsend}/send`, { method: 'POST' }); toast(r.ok ? `Gönderildi: ${r.external_id}` : `Gönderilemedi: ${r.error}`, !r.ok); sfSupplier(box, page, status); } catch (e) { fail(e); }
+  }));
+  $$('[data-sfmanual]', box).forEach((b) => b.addEventListener('click', () => {
+    const body = openModal(html`<h2>Tedarikçiye manuel iletildi</h2><form class="stack" id="sfm-form">
+      <label>Tedarikçi sipariş no (isteğe bağlı)<input name="external_id" maxlength="100"></label>
+      <p class="form-error"></p><div class="row"><span class="spacer"></span><button class="btn" type="button" data-close>Vazgeç</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>`);
+    $('#sfm-form', body).addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitting(e.target, async () => {
+        await api(`/api/storefront/supplier-orders/${b.dataset.sfmanual}/mark-sent`, { method: 'POST', body: { external_id: formData(e.target).external_id || null } });
+        closeLayer('modal'); toast('İşaretlendi'); sfSupplier(box, page, status);
+      });
+    });
+  }));
+  $$('[data-sfscancel]', box).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Tedarikçi taslağı iptal edilsin mi?')) return;
+    try { await api(`/api/storefront/supplier-orders/${b.dataset.sfscancel}/cancel`, { method: 'POST' }); toast('İptal edildi'); sfSupplier(box, page, status); } catch (e) { fail(e); }
+  }));
+}
+
+async function sfIntegrations(box) {
+  const d = await api('/api/storefront/integrations');
+  const st = (ok, on, off) => (ok ? html`<span class="badge tone-good">${on}</span>` : html`<span class="badge">${off}</span>`);
+  const n = d.notifications || {};
+  box.innerHTML = renderVal(html`<div class="grid grid-2">
+    <div class="card"><h3>Kartla ödeme</h3><p class="mt">${st(d.payment.active, `Etkin: ${d.payment.active}${d.payment.test_mode ? ' (TEST modu)' : ''}`, 'Kapalı')}</p>
+      <p class="small muted mt">Sunucu .env: <code>STOREFRONT_PAYMENT_PROVIDER=paytr</code> + <code>PAYTR_MERCHANT_ID / KEY / SALT</code> veya <code>iyzico</code> + <code>IYZICO_API_KEY / SECRET_KEY</code>. PayTR panelinde bildirim adresi: <code>${d.base_url || 'https://alan-adınız'}/odeme/geri-donus/paytr</code>. Anahtarlar panele/veritabanına yazılmaz.</p></div>
+    <div class="card"><h3>E-posta bildirimleri</h3><p class="mt">${st(d.email.active, 'Etkin (SMTP)', d.email.configured ? 'SMTP var, panelde kapalı' : 'Kapalı (SMTP yok)')}</p>
+      <p class="small muted mt">Sipariş alındı, ödeme onayı, kargoya verildi ve iptal e-postaları; müşteri şifre sıfırlama. Sahibe yeni sipariş e-postası: ${d.email.owner_alerts ? 'açık' : 'kapalı (STOREFRONT_ORDER_ALERT_EMAILS)'}.</p>
+      <p class="small">Kuyrukta ${num(n.queued)} · hatalı ${num(n.failed)} · son 7 gün gönderilen ${num(n.sent_7d)}</p></div>
+    <div class="card"><h3>SMS bildirimleri</h3><p class="mt">${st(d.sms.active, `Etkin (${d.sms.provider})`, d.sms.configured ? 'Sağlayıcı var, panelde kapalı' : 'Kapalı (sağlayıcı yok)')}</p>
+      <p class="small muted mt">Desteklenen: Netgsm (<code>SMS_PROVIDER=netgsm</code>, <code>NETGSM_USERCODE / PASSWORD / HEADER</code>). Onaylı SMS başlığı gerekir.</p></div>
+    <div class="card"><h3>E-fatura / e-arşiv</h3><p class="mt">${st(d.einvoice.active, `Etkin: ${d.einvoice.provider}`, 'Kapalı')}</p>
+      <p class="small muted mt">Entegratör bağlantısı ${d.einvoice.provider_configured ? 'tanımlı' : 'yok (EINVOICE_PROVIDER; entegratör sözleşmesi ve bağlantı kodu gerekir)'}; panel anahtarı ${d.einvoice.setting_enabled ? 'açık' : 'kapalı'}. Pazaryeri siparişlerinin faturaları bu katmandan kesilmez.</p></div>
+    <div class="card"><h3>Tedarikçiye aktarım</h3><p class="mt">Mod: <b>${{ off: 'Kapalı', manual: 'Panelden onayla', auto: 'Otomatik' }[d.supplier_forwarding.mode]}</b></p>
+      <p class="small muted mt">API bağlantısı olan tedarikçi: ${d.supplier_forwarding.connectors.length ? d.supplier_forwarding.connectors.join(', ') : 'yok (manuel iletim)'}.</p></div>
+    <div class="card"><h3>Alan adı</h3><p class="mt">${d.base_url ? html`<a href="${d.base_url}" target="_blank" rel="noopener">${d.base_url}</a>` : html`<span class="badge tone-warn">STOREFRONT_BASE_URL tanımlı değil</span>`}</p>
+      <p class="small muted mt">Canonical, sitemap, OpenGraph ve ödeme dönüş adresleri bu adresi kullanır.</p></div>
+  </div>`);
 }
 
 async function sfSettings(box) {
@@ -2225,7 +2336,14 @@ async function sfSettings(box) {
       ${txt('bank_transfer_days', 'Ödeme süresi (gün; sonra sipariş kapanır, stok serbest kalır)', v.bank_transfer_days, 'type="number" min="1"')}
       <label class="check full"><input type="checkbox" name="cash_on_delivery_enabled" ${raw(v.cash_on_delivery_enabled ? 'checked' : '')}>Kapıda ödeme (kargo firmanızın hizmeti olmalı)</label>
       ${txt('cash_on_delivery_fee', 'Kapıda ödeme hizmet bedeli (₺)', v.cash_on_delivery_fee, 'type="number" step="0.01" min="0"')}
-      <p class="small muted full">Kartla ödeme: sanal POS sağlayıcısı (ör. iyzico, PayTR) ile sözleşme ve sunucu tarafı entegrasyon gerekir; anahtarlar yalnızca sunucu ortamında tutulur.</p>
+      <p class="small muted full">Kartla ödeme: PayTR veya iyzico anahtarları sunucu .env dosyasına girilince otomatik açılır; anahtarlar yalnızca sunucu ortamında tutulur.</p>
+    </div></fieldset>
+    <fieldset class="fieldset mt"><legend>Sipariş sonrası</legend><div class="form-grid">
+      <label>Web siparişlerini tedarikçiye aktarım<select name="supplier_forwarding_mode">${[['off', 'Kapalı'], ['manual', 'Panelden onayla (önerilen)'], ['auto', 'Ödeme alınınca otomatik (API bağlantısı olan tedarikçiler)']].map(([k, l]) => html`<option value="${k}" ${raw(v.supplier_forwarding_mode === k ? 'selected' : '')}>${l}</option>`)}</select></label>
+      <label class="check full"><input type="checkbox" name="notify_email" ${raw(v.notify_email ? 'checked' : '')}>Müşteriye e-posta bildirimleri (SMTP sunucu ayarı gerekir)</label>
+      <label class="check full"><input type="checkbox" name="notify_sms" ${raw(v.notify_sms ? 'checked' : '')}>Müşteriye SMS bildirimleri (SMS sağlayıcısı gerekir)</label>
+      <label class="check full"><input type="checkbox" name="einvoice_enabled" ${raw(v.einvoice_enabled ? 'checked' : '')}>Web siparişleri için e-fatura/e-arşiv oluştur (entegratör bağlantısı gerekir)</label>
+      <p class="small muted full">Sağlayıcı bilgileri sunucu .env dosyasındadır; tanımlı değilse bu seçenekler açık olsa bile hiçbir dış servise istek yapılmaz. Durum: Entegrasyonlar sekmesi.</p>
     </div></fieldset>
     <fieldset class="fieldset mt"><legend>Satıcı bilgileri</legend><div class="form-grid">
       ${s.seller_fields.map((f) => txt(`seller.${f.key}`, f.label + (f.required ? ' *' : ''), v.seller[f.key], 'maxlength="500"'))}
@@ -2242,7 +2360,8 @@ async function sfSettings(box) {
     submitting(e.target, async () => {
       const el = e.target.elements;
       const values = { seller: {}, social: {}, legal: {} };
-      ['enabled', 'auto_publish', 'bank_transfer_enabled', 'cash_on_delivery_enabled'].forEach((k) => { values[k] = el[k].checked; });
+      ['enabled', 'auto_publish', 'bank_transfer_enabled', 'cash_on_delivery_enabled', 'notify_email', 'notify_sms', 'einvoice_enabled'].forEach((k) => { values[k] = el[k].checked; });
+      values.supplier_forwarding_mode = el.supplier_forwarding_mode.value;
       ['announcement', 'bank_transfer_iban', 'bank_transfer_account_name', 'bank_transfer_bank_name'].forEach((k) => { values[k] = el[k].value.trim(); });
       ['stock_buffer', 'committed_window_hours', 'bank_transfer_days'].forEach((k) => { values[k] = parseInt(el[k].value || '0', 10); });
       ['shipping_fee', 'cash_on_delivery_fee'].forEach((k) => { values[k] = el[k].value || '0'; });

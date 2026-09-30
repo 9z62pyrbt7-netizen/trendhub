@@ -75,7 +75,8 @@ os.environ.update({
 })
 run_migrations(_APP_DB)
 
-DATA_TABLES = ["storefront_payment_events", "stock_reservations", "storefront_cart_items", "storefront_carts",
+DATA_TABLES = ["notification_outbox", "einvoice_records", "storefront_password_resets", "storefront_customer_sessions",
+               "storefront_customer_addresses", "storefront_customers", "storefront_payment_events", "stock_reservations", "storefront_cart_items", "storefront_carts",
                "storefront_orders", "storefront_products", "listing_publications", "publish_requests", "alerts", "marketplace_connections", "ad_performance",
                "ad_spend", "ad_campaign_products", "ad_campaigns", "ad_accounts", "listing_drafts", "marketplace_category_mappings", "marketplace_rules", "supplier_product_changes",
                "supplier_sync_runs", "supplier_field_mappings", "supplier_connections", "financial_transactions", "order_status_history", "supplier_orders", "shipments", "order_items",

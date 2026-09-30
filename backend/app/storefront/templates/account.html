@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% macro address_fields(a) %}
+  <div class="form__row">
+    <label class="field"><span>Adres başlığı</span><input name="title" required maxlength="40" value="{{ a.title if a else 'Adresim' }}"></label>
+    <label class="field"><span>Ad Soyad</span><input name="full_name" autocomplete="name" required maxlength="120" value="{{ a.full_name if a else me.full_name }}"></label>
+  </div>
+  <div class="form__row">
+    <label class="field"><span>Cep telefonu</span><input name="phone" type="tel" autocomplete="tel" required maxlength="20" inputmode="tel" value="{{ a.phone if a else (me.phone or '') }}"></label>
+    <label class="field"><span>İl</span><select name="city" autocomplete="address-level1" required><option value="">Seçin</option>{% for c in CITIES %}<option{% if a and a.city == c %} selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
+  </div>
+  <div class="form__row">
+    <label class="field"><span>İlçe</span><input name="district" autocomplete="address-level2" required maxlength="80" value="{{ a.district if a else '' }}"></label>
+    <label class="field"><span>Posta kodu (isteğe bağlı)</span><input name="postal_code" autocomplete="postal-code" maxlength="5" inputmode="numeric" value="{{ (a.postal_code or '') if a else '' }}"></label>
+  </div>
+  <label class="field"><span>Açık adres</span><textarea name="address" rows="3" autocomplete="street-address" required maxlength="500">{{ a.address if a else '' }}</textarea></label>
+  <label class="check"><input type="checkbox" name="is_default" value="1"{% if a and a.is_default %} checked{% endif %}><span class="check__box">{% include "icons/check.svg" %}</span><span>Varsayılan teslimat adresi</span></label>
+{% endmacro %}
+{% block content %}
+<section class="section account">
+  <div class="container">
+    <div class="page-head">
+      <h1 class="page-title">Merhaba, {{ me.full_name.split(' ')[0] }}</h1>
+      <button type="button" class="link-quiet" data-api-action="/api/store/account/logout">Çıkış yap</button>
+    </div>
+    <nav class="chips chips--scroll account__nav" aria-label="Hesap bölümleri">
+      <a class="chip" href="#siparisler">Siparişlerim</a><a class="chip" href="#adresler">Adreslerim</a><a class="chip" href="#bilgiler">Bilgilerim</a><a class="chip" href="#sifre">Şifre</a>
+    </nav>
+
+    <section id="siparisler" class="account__section">
+      <h2 class="account__title">Siparişlerim</h2>
+      {% if orders %}
+      <ul class="account-orders" role="list">
+        {% for o in orders %}
+        <li><a class="account-order" href="/hesabim/siparis/{{ o.public_code }}">
+          <span class="mini-line__media">{% if o.image %}<img src="{{ img(o.image, 160) }}" alt="" width="64" height="80" loading="lazy" data-cutout>{% endif %}</span>
+          <span class="account-order__main"><strong>{{ o.public_code }}</strong><small>{{ o.created_at.strftime('%d.%m.%Y') }} · {{ o.item_count }} ürün</small></span>
+          <span class="account-order__side"><strong>{{ fmt_try(o.total) }}</strong><small>{{ STATUS_LABELS.get(o.status, o.status) }}</small></span>
+        </a></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">Henüz siparişiniz yok. <a class="link-quiet" href="/urunler">Koleksiyonu keşfedin</a></p>
+      {% endif %}
+    </section>
+
+    <section id="adresler" class="account__section">
+      <h2 class="account__title">Adreslerim</h2>
+      <div class="account__grid">
+        {% for a in addresses %}
+        <details class="account__card account-address">
+          <summary><strong>{{ a.title }}</strong>{% if a.is_default %} <span class="badge">Varsayılan</span>{% endif %}
+            <span class="muted small">{{ a.full_name }} · {{ a.district }} / {{ a.city }}</span></summary>
+          <form class="form mt" data-api-form="/api/store/account/addresses/{{ a.id }}" data-reload novalidate>
+            {{ address_fields(a) }}
+            <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+            <div class="account__actions">
+              <button type="submit" class="btn btn--dark btn--sm">Kaydet</button>
+              <button type="button" class="link-quiet" data-api-action="/api/store/account/addresses/{{ a.id }}/delete" data-confirm="Bu adres silinsin mi?">Sil</button>
+            </div>
+          </form>
+        </details>
+        {% endfor %}
+        <details class="account__card account-address"{% if not addresses %} open{% endif %}>
+          <summary><strong>+ Yeni adres ekle</strong></summary>
+          <form class="form mt" data-api-form="/api/store/account/addresses" data-reload novalidate>
+            {{ address_fields(None) }}
+            <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+            <button type="submit" class="btn btn--dark btn--sm">Adresi kaydet</button>
+          </form>
+        </details>
+      </div>
+    </section>
+
+    <section id="bilgiler" class="account__section">
+      <h2 class="account__title">Bilgilerim</h2>
+      <form class="form account__card" data-api-form="/api/store/account/profile" novalidate>
+        <div class="form__row">
+          <label class="field"><span>Ad Soyad</span><input name="full_name" autocomplete="name" required maxlength="120" value="{{ me.full_name }}"></label>
+          <label class="field"><span>Cep telefonu</span><input name="phone" type="tel" autocomplete="tel" maxlength="20" inputmode="tel" value="{{ me.phone or '' }}"></label>
+        </div>
+        <label class="field"><span>E-posta</span><input value="{{ me.email }}" disabled></label>
+        <label class="check"><input type="checkbox" name="marketing" value="1"{% if me.marketing_consent_at %} checked{% endif %}><span class="check__box">{% include "icons/check.svg" %}</span><span>Kampanya ve yeniliklerden haberdar olmak istiyorum.</span></label>
+        <p class="form-message form-message--ok" data-form-ok hidden role="status"></p>
+        <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+        <button type="submit" class="btn btn--dark btn--sm">Kaydet</button>
+      </form>
+    </section>
+
+    <section id="sifre" class="account__section">
+      <h2 class="account__title">Şifre değiştir</h2>
+      <form class="form account__card" data-api-form="/api/store/account/password/change" data-reset novalidate>
+        <div class="form__row">
+          <label class="field"><span>Mevcut şifre</span><input name="current_password" type="password" autocomplete="current-password" required maxlength="200"></label>
+          <label class="field"><span>Yeni şifre</span><input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="200"></label>
+        </div>
+        <p class="form-message form-message--ok" data-form-ok hidden role="status"></p>
+        <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+        <button type="submit" class="btn btn--dark btn--sm">Şifreyi güncelle</button>
+      </form>
+    </section>
+  </div>
+</section>
+{% endblock %}

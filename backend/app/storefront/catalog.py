@@ -156,6 +156,8 @@ class Variant:
     featured: bool
     sort_order: int
     group_key: str
+    seo_title: str | None = None
+    seo_description: str | None = None
 
     @property
     def url(self) -> str:
@@ -248,9 +250,22 @@ class Group:
 
 
 # ------------------------------------------------------------------ sorgular
+def _arr(expr: str) -> str:
+    return f"(jsonb_typeof({expr}) = 'array' AND jsonb_array_length({expr}) > 0)"
+
+
+# Tedarikçi teklifi (tercih edilen tedarikçi önce): renk, beden, ana ürün kodu ve görsel yedeği
+SP_LATERAL = """LEFT JOIN LATERAL (
+              SELECT x.color, x.size, x.parent_code, x.images FROM supplier_products x WHERE x.product_id = p.id
+               ORDER BY (x.supplier_id = p.preferred_supplier_id) DESC NULLS LAST, x.id LIMIT 1) sp ON TRUE"""
+# Varyant grubu: panelden verilen grup kodu > katalog model kodu > tedarikçi ana ürün kodu > tek ürün
+GROUP_KEY = "COALESCE(NULLIF(sfp.group_code, ''), NULLIF(p.model_code, ''), NULLIF(sp.parent_code, ''), 'p' || p.id)"
+HAS_IMAGE = f"({_arr('p.images')} OR COALESCE(p.image_url, '') <> '' OR {_arr('sp.images')})"
+ELIGIBLE_SQL = f"COALESCE(p.is_active, TRUE) AND COALESCE(p.sale_price, 0) > 0 AND {HAS_IMAGE}"
+
+
 def _visible_sql() -> str:
-    return """COALESCE(p.is_active, TRUE) AND COALESCE(p.sale_price, 0) > 0
-          AND (jsonb_array_length(COALESCE(p.images, '[]'::jsonb)) > 0 OR COALESCE(p.image_url, '') <> '')
+    return f"""{ELIGIBLE_SQL}
           AND (sfp.published IS TRUE OR (sfp.product_id IS NULL AND :auto_publish))"""
 
 
@@ -258,24 +273,26 @@ def _variants(conn: Connection, where: str = "TRUE", **params) -> list[Variant]:
     cfg = store_config.load(conn)
     sql = f"""
         SELECT p.id, p.sku, p.barcode, COALESCE(NULLIF(sfp.title, ''), p.name) AS title, p.sale_price AS price,
-               sfp.compare_at_price, p.images, p.image_url, sp.color, sp.size, p.brand, p.category,
+               sfp.compare_at_price, p.images, p.image_url, sp.images AS supplier_images,
+               COALESCE(NULLIF(sfp.color, ''), sp.color) AS color, COALESCE(NULLIF(sfp.size, ''), sp.size) AS size,
+               p.brand, p.category, sfp.seo_title, sfp.seo_description,
                COALESCE(NULLIF(sfp.description, ''), p.description) AS description, p.created_at,
                COALESCE(sfp.featured, FALSE) AS featured, COALESCE(sfp.sort_order, 0) AS sort_order,
-               COALESCE(NULLIF(p.model_code, ''), NULLIF(sp.parent_code, ''), 'p' || p.id) AS group_key,
+               {GROUP_KEY} AS group_key,
                {stock_availability.available_sql('p')} AS available
           FROM products p
           LEFT JOIN storefront_products sfp ON sfp.product_id = p.id
-          LEFT JOIN LATERAL (
-              SELECT x.color, x.size, x.parent_code FROM supplier_products x WHERE x.product_id = p.id
-               ORDER BY (x.supplier_id = p.preferred_supplier_id) DESC NULLS LAST, x.id LIMIT 1) sp ON TRUE
+          {SP_LATERAL}
          WHERE {_visible_sql()} AND {where}
          ORDER BY COALESCE(sfp.featured, FALSE) DESC, COALESCE(sfp.sort_order, 0), p.id
     """
     out = []
     for r in conn.execute(text(sql), {"auto_publish": cfg.auto_publish, **stock_availability.params(conn), **params}).mappings():
-        imgs = [u for u in (r["images"] or []) if isinstance(u, str) and u.startswith(("http://", "https://", "/"))]
+        imgs = _image_list(r["images"])
         if not imgs and r["image_url"]:
             imgs = [r["image_url"]]
+        if not imgs:
+            imgs = _image_list(r["supplier_images"])
         price = Decimal(r["price"])
         cmp_ = Decimal(r["compare_at_price"]) if r["compare_at_price"] is not None else None
         out.append(Variant(id=r["id"], sku=r["sku"], barcode=r["barcode"], title=(r["title"] or "").strip() or f"Ürün {r['id']}",
@@ -283,7 +300,20 @@ def _variants(conn: Connection, where: str = "TRUE", **params) -> list[Variant]:
                            color=(r["color"] or "").strip() or None, size=(r["size"] or "").strip() or None,
                            available=int(r["available"]), brand=r["brand"], category=r["category"],
                            description=r["description"], created_at=r["created_at"], featured=r["featured"],
-                           sort_order=r["sort_order"], group_key=r["group_key"]))
+                           sort_order=r["sort_order"], group_key=r["group_key"],
+                           seo_title=r["seo_title"], seo_description=r["seo_description"]))
+    return out
+
+
+def _image_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out = []
+    for u in value:
+        if isinstance(u, dict):  # bazı beslemeler {"url": ...} biçiminde verir
+            u = u.get("url") or u.get("src")
+        if isinstance(u, str) and u.strip().startswith(("http://", "https://", "/")) and u.strip() not in out:
+            out.append(u.strip())
     return out
 
 
@@ -421,15 +451,12 @@ def hero(conn: Connection, snap: Snapshot) -> tuple[Group | None, str]:
 
 def product_group(conn: Connection, product_id: int) -> Group | None:
     """Ürün sayfası: taze (önbelleksiz) stokla ürün ve aynı modelin diğer varyantları."""
-    key = conn.execute(text("""
-        SELECT COALESCE(NULLIF(p.model_code, ''), NULLIF(sp.parent_code, ''), 'p' || p.id)
-          FROM products p LEFT JOIN LATERAL (
-              SELECT x.parent_code FROM supplier_products x WHERE x.product_id = p.id
-               ORDER BY (x.supplier_id = p.preferred_supplier_id) DESC NULLS LAST, x.id LIMIT 1) sp ON TRUE
-         WHERE p.id = :id"""), {"id": product_id}).scalar()
+    key = conn.execute(text(f"""
+        SELECT {GROUP_KEY} FROM products p LEFT JOIN storefront_products sfp ON sfp.product_id = p.id
+          {SP_LATERAL} WHERE p.id = :id"""), {"id": product_id}).scalar()
     if key is None:
         return None
-    variants = _variants(conn, """COALESCE(NULLIF(p.model_code, ''), NULLIF(sp.parent_code, ''), 'p' || p.id) = :key""", key=key)
+    variants = _variants(conn, f"{GROUP_KEY} = :key", key=key)
     if not any(v.id == product_id for v in variants):
         return None
     g = group_variants(variants, _sales(conn))[0]

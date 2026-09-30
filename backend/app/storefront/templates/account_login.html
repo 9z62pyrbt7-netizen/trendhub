@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="section account">
+  <div class="container">
+    <div class="page-head"><h1 class="page-title">Hesabım</h1></div>
+    {% if reset_done %}<p class="form-message form-message--ok" role="status">Şifreniz yenilendi. Yeni şifrenizle giriş yapabilirsiniz.</p>{% endif %}
+    <div class="account__grid">
+      <form class="form account__card" data-api-form="/api/store/account/login?sonra={{ next|urlencode }}" novalidate>
+        <h2 class="account__title">Giriş yap</h2>
+        <label class="field"><span>E-posta</span><input name="email" type="email" autocomplete="email" required maxlength="254" inputmode="email"></label>
+        <label class="field"><span>Şifre</span><input name="password" type="password" autocomplete="current-password" required maxlength="200"></label>
+        <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+        <button type="submit" class="btn btn--dark btn--block">Giriş yap</button>
+        <a class="link-quiet" href="/hesap/sifremi-unuttum">Şifremi unuttum</a>
+      </form>
+      <form class="form account__card" data-api-form="/api/store/account/register?sonra={{ next|urlencode }}" novalidate>
+        <h2 class="account__title">Üye ol</h2>
+        <p class="muted small">Siparişlerinizi takip edin, adreslerinizi kaydedin, ödemeyi daha hızlı tamamlayın.</p>
+        <label class="field"><span>Ad Soyad</span><input name="full_name" autocomplete="name" required maxlength="120"></label>
+        <div class="form__row">
+          <label class="field"><span>E-posta</span><input name="email" type="email" autocomplete="email" required maxlength="254" inputmode="email"></label>
+          <label class="field"><span>Cep telefonu (isteğe bağlı)</span><input name="phone" type="tel" autocomplete="tel" maxlength="20" placeholder="05xx xxx xx xx" inputmode="tel"></label>
+        </div>
+        <label class="field"><span>Şifre</span><input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="200"><small class="field-hint">En az 8 karakter; harf ve rakam içermeli.</small></label>
+        <label class="check"><input type="checkbox" name="accept_kvkk" value="1"><span class="check__box">{% include "icons/check.svg" %}</span>
+          <span><a href="/sayfa/kvkk-aydinlatma-metni" target="_blank" rel="noopener">KVKK Aydınlatma Metni</a>'ni okudum; üyelik için kişisel verilerimin işleneceğini biliyorum.</span></label>
+        <label class="check"><input type="checkbox" name="marketing" value="1"><span class="check__box">{% include "icons/check.svg" %}</span>
+          <span>Kampanya ve yeniliklerden e-posta/SMS ile haberdar olmak istiyorum (isteğe bağlı).</span></label>
+        <p class="form-message form-message--error" data-form-error hidden role="alert"></p>
+        <button type="submit" class="btn btn--dark btn--block">Üye ol</button>
+      </form>
+    </div>
+  </div>
+</section>
+{% endblock %}

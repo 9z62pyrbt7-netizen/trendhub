@@ -39,7 +39,9 @@ SOCIAL_FIELDS = ("instagram", "tiktok", "facebook", "pinterest", "youtube", "wha
 KEYS = ("enabled", "auto_publish", "hero_product_id", "stock_buffer", "committed_window_hours", "shipping_fee",
         "free_shipping_threshold", "bank_transfer_enabled", "bank_transfer_iban", "bank_transfer_account_name",
         "bank_transfer_bank_name", "bank_transfer_days", "cash_on_delivery_enabled", "cash_on_delivery_fee",
-        "seller", "legal", "announcement", "social")
+        "seller", "legal", "announcement", "social", "supplier_forwarding_mode", "notify_email", "notify_sms",
+        "einvoice_enabled")
+FORWARDING_MODES = {"off": "Kapalı", "manual": "Panelden onayla (önerilen)", "auto": "Ödeme alınınca otomatik"}
 
 
 def _dec(v, default: str = "0") -> Decimal:
@@ -69,6 +71,10 @@ class StoreConfig:
     legal: dict = field(default_factory=dict)
     announcement: str = ""
     social: dict = field(default_factory=dict)
+    supplier_forwarding_mode: str = "manual"
+    notify_email: bool = True
+    notify_sms: bool = False
+    einvoice_enabled: bool = False
 
     # ---- türetilmiş
     @property
@@ -142,6 +148,11 @@ def load(conn: Connection) -> StoreConfig:
     c.legal = raw.get("legal") if isinstance(raw.get("legal"), dict) else {}
     c.announcement = str(raw.get("announcement") or "")
     c.social = raw.get("social") if isinstance(raw.get("social"), dict) else {}
+    mode = raw.get("supplier_forwarding_mode", "manual")
+    c.supplier_forwarding_mode = mode if mode in FORWARDING_MODES else "manual"
+    c.notify_email = bool(raw.get("notify_email", True))
+    c.notify_sms = bool(raw.get("notify_sms", False))
+    c.einvoice_enabled = bool(raw.get("einvoice_enabled", False))
     return c
 
 
@@ -155,7 +166,12 @@ def validate(values: dict) -> dict:
     for k, v in values.items():
         if k not in KEYS:
             raise ValueError(f"Bilinmeyen ayar: {k}")
-        if k in ("enabled", "auto_publish", "bank_transfer_enabled", "cash_on_delivery_enabled"):
+        if k == "supplier_forwarding_mode":
+            if v not in FORWARDING_MODES:
+                raise ValueError("Tedarikçi aktarım modu geçersiz")
+            out[k] = v
+        elif k in ("enabled", "auto_publish", "bank_transfer_enabled", "cash_on_delivery_enabled", "notify_email",
+                   "notify_sms", "einvoice_enabled"):
             if not isinstance(v, bool):
                 raise ValueError(f"{k}: evet/hayır olmalı")
             out[k] = v

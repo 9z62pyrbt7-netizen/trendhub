@@ -5,7 +5,7 @@ yalnızca GERÇEK sipariş için oluşur:
   * Kapıda ödeme: sipariş verildiği anda (iç statü 'new').
   * Havale/EFT: panelde "Ödeme alındı" onayıyla. O zamana kadar stok süreli ayrılır
     (`stock_reservations`, süre = storefront.bank_transfer_days); süre dolarsa sipariş 'expired' olur.
-  * Kart: ödeme sağlayıcısı geri dönüşü sunucuda doğrulandığında (şu an sağlayıcı yok).
+  * Kart: ödeme sağlayıcısı (PayTR / iyzico) geri dönüşü sunucuda doğrulandığında.
 Böylece ödenmemiş siparişler ciro/kâr raporlarına girmez ama stok diğer kanallara karşı korunur.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from ..services import stock_availability
+from ..services import einvoice, order_notifications, stock_availability
 from ..services.finance_service import recalculate_order
 from ..services.orders_sync import ensure_store
 from . import catalog, store_config
@@ -51,6 +51,48 @@ STATUS_LABELS = {
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,}$")
 
 
+def norm_space(v):
+    return re.sub(r"\s+", " ", v).strip() if isinstance(v, str) else v
+
+
+def valid_name(v: str) -> str:
+    v = norm_space(v)
+    if len(v.split(" ")) < 2:
+        raise ValueError("Ad ve soyadınızı girin")
+    return v
+
+
+def valid_email(v: str) -> str:
+    v = (v or "").strip()
+    if not EMAIL_RE.match(v):
+        raise ValueError("Geçerli bir e-posta adresi girin")
+    return v.lower()
+
+
+def valid_phone(v: str) -> str:
+    d = re.sub(r"\D", "", v or "")
+    if d.startswith("90") and len(d) == 12:
+        d = d[2:]
+    if d.startswith("0"):
+        d = d[1:]
+    if not re.match(r"^5\d{9}$", d):
+        raise ValueError("Cep telefonunuzu 05xx xxx xx xx biçiminde girin")
+    return f"0{d[:3]} {d[3:6]} {d[6:8]} {d[8:]}"
+
+
+def valid_city(v: str) -> str:
+    if v not in CITIES:
+        raise ValueError("İl seçin")
+    return v
+
+
+def valid_zip(v):
+    v = (v or "").strip()
+    if v and not re.match(r"^\d{5}$", v):
+        raise ValueError("Posta kodu 5 haneli olmalı")
+    return v or None
+
+
 class CheckoutError(ValueError):
     def __init__(self, message: str, fields: dict | None = None):
         super().__init__(message)
@@ -77,49 +119,32 @@ class CheckoutIn(BaseModel):
     @field_validator("full_name", "district", "address", "company", "tax_office", "note")
     @classmethod
     def _strip(cls, v):
-        return re.sub(r"\s+", " ", v).strip() if isinstance(v, str) else v
+        return norm_space(v)
 
     @field_validator("full_name")
     @classmethod
     def _name(cls, v):
-        if len(v.split(" ")) < 2:
-            raise ValueError("Ad ve soyadınızı girin")
-        return v
+        return valid_name(v)
 
     @field_validator("email")
     @classmethod
     def _email(cls, v):
-        v = v.strip()
-        if not EMAIL_RE.match(v):
-            raise ValueError("Geçerli bir e-posta adresi girin")
-        return v.lower()
+        return valid_email(v)
 
     @field_validator("phone")
     @classmethod
     def _phone(cls, v):
-        d = re.sub(r"\D", "", v)
-        if d.startswith("90") and len(d) == 12:
-            d = d[2:]
-        if d.startswith("0"):
-            d = d[1:]
-        if not re.match(r"^5\d{9}$", d):
-            raise ValueError("Cep telefonunuzu 05xx xxx xx xx biçiminde girin")
-        return f"0{d[:3]} {d[3:6]} {d[6:8]} {d[8:]}"
+        return valid_phone(v)
 
     @field_validator("city")
     @classmethod
     def _city(cls, v):
-        if v not in CITIES:
-            raise ValueError("İl seçin")
-        return v
+        return valid_city(v)
 
     @field_validator("postal_code")
     @classmethod
     def _zip(cls, v):
-        v = (v or "").strip()
-        if v and not re.match(r"^\d{5}$", v):
-            raise ValueError("Posta kodu 5 haneli olmalı")
-        return v or None
+        return valid_zip(v)
 
     @model_validator(mode="after")
     def _billing(self):
@@ -145,7 +170,8 @@ def _new_code(conn: Connection) -> str:
     raise RuntimeError("Sipariş numarası üretilemedi")
 
 
-def place_order(conn: Connection, cart_id: int | None, data: CheckoutIn, ip: str | None) -> dict:
+def place_order(conn: Connection, cart_id: int | None, data: CheckoutIn, ip: str | None,
+                customer_id: int | None = None) -> dict:
     cfg = store_config.load(conn)
     blockers = cfg.checkout_blockers()
     if blockers:
@@ -204,10 +230,10 @@ def place_order(conn: Connection, cart_id: int | None, data: CheckoutIn, ip: str
     sfo_id = conn.execute(text("""
         INSERT INTO storefront_orders(public_code, access_token_hash, status, payment_method, full_name, email, phone,
                                       city, district, address, postal_code, billing, customer_note, lines, items_total,
-                                      shipping_fee, total, consents, ip)
+                                      shipping_fee, total, consents, ip, customer_id)
         VALUES (:code, :th, :status, :pm, :name, :email, :phone, :city, :district, :address, :zip, CAST(:billing AS JSONB),
-                :note, CAST(:lines AS JSONB), :items_total, :shipping, :total, CAST(:consents AS JSONB), :ip)
-        RETURNING id"""), {
+                :note, CAST(:lines AS JSONB), :items_total, :shipping, :total, CAST(:consents AS JSONB), :ip, :cust)
+        RETURNING id"""), {"cust": customer_id,
         "code": code, "th": _hash(token), "status": status, "pm": data.payment_method, "name": data.full_name,
         "email": data.email, "phone": data.phone, "city": data.city, "district": data.district, "address": data.address,
         "zip": data.postal_code, "billing": json.dumps(billing, ensure_ascii=False), "note": data.note,
@@ -266,19 +292,26 @@ def create_trendhub_order(conn: Connection, sfo_id: int, *, raw_status: str) -> 
     conn.execute(text("UPDATE stock_reservations SET released_at = NOW() WHERE storefront_order_id = :id AND released_at IS NULL"),
                  {"id": sfo_id})
     recalculate_order(conn, order_id)
+    einvoice.queue(conn, order_id)  # sağlayıcı/ayar kapalıysa hiçbir şey yapmaz
     return order_id
 
 
-def confirm_payment(conn: Connection, sfo_id: int, *, reference: str | None = None, provider: str | None = None) -> int:
+def confirm_payment(conn: Connection, sfo_id: int, *, reference: str | None = None, provider: str | None = None,
+                    allow_expired: bool = False) -> int:
+    """Ödemeyi onaylar. `allow_expired`: sağlayıcının doğruladığı ödeme, ayırma süresi dolduktan sonra geldiyse
+    para tahsil edilmiştir; sipariş yine oluşturulur (panelde stok/iade kararı verilir)."""
     sfo = conn.execute(text("SELECT id, status FROM storefront_orders WHERE id = :id FOR UPDATE"), {"id": sfo_id}).mappings().first()
     if sfo is None:
         raise CheckoutError("Web siparişi bulunamadı")
-    if sfo["status"] not in ("awaiting_payment", "pending_payment"):
+    allowed = ("awaiting_payment", "pending_payment") + (("expired", "payment_failed") if allow_expired else ())
+    if sfo["status"] not in allowed:
         raise CheckoutError(f"Bu siparişin ödemesi onaylanamaz (durum: {STATUS_LABELS.get(sfo['status'], sfo['status'])}).")
     conn.execute(text("""UPDATE storefront_orders SET status = 'paid', paid_at = NOW(), payment_reference = COALESCE(:ref, payment_reference),
                          payment_provider = COALESCE(:prov, payment_provider), updated_at = NOW() WHERE id = :id"""),
                  {"id": sfo_id, "ref": reference, "prov": provider})
     order_id = create_trendhub_order(conn, sfo_id, raw_status="Paid")
+    # Kartla ödemede "sipariş alındı" ödeme doğrulanınca gönderilir; havalede ödeme onayı ayrı bildirimdir.
+    order_notifications.notify_order(conn, sfo_id, "payment_confirmed" if sfo["status"] == "awaiting_payment" else "order_received")
     catalog.invalidate()
     return order_id
 
@@ -293,6 +326,9 @@ def cancel_unpaid(conn: Connection, sfo_id: int, *, status: str = "cancelled") -
                  {"s": status, "id": sfo_id})
     conn.execute(text("UPDATE stock_reservations SET released_at = NOW() WHERE storefront_order_id = :id AND released_at IS NULL"),
                  {"id": sfo_id})
+    if sfo["status"] == "awaiting_payment":
+        # Havale/EFT siparişine "alındı" bildirimi gitmişti; iptal de bildirilir. Tamamlanmamış kart denemesine gönderilmez.
+        order_notifications.notify_order(conn, sfo_id, "cancelled")
     catalog.invalidate()
 
 

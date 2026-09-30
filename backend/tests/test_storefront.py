@@ -319,7 +319,11 @@ def test_storefront_maintenance_job_runs_in_worker(engine, conn):
     from app.services import sync_service
     job_id = sync_service.schedule_storefront_maintenance(conn)
     assert job_id and sync_service.schedule_storefront_maintenance(conn) is None
-    assert sync_service.execute(engine, {"job_type": sync_service.STOREFRONT_MAINTENANCE, "payload": {}}) == {"expired_orders": 0, "deleted_carts": 0}
+    res = sync_service.execute(engine, {"job_type": sync_service.STOREFRONT_MAINTENANCE, "payload": {}})
+    assert res["reservations"] == {"expired_orders": 0, "deleted_carts": 0}
+    # Sağlayıcı yok / ayar kapalı: bildirim, e-fatura ve tedarikçi adımları hiçbir şey yapmaz
+    assert res["shipped_notifications"] == 0 and res["einvoice"] == {"issued": 0, "failed": 0}
+    assert res["supplier_forwarding"] == {"mode": "manual", "prepared": 0, "sent": 0} and res["notify_retry"] is None
 
 
 # ------------------------------------------------------------------ panel API

@@ -33,6 +33,9 @@ if [ -n "${STOREFRONT_URL:-}" ]; then
   [ "$code" = "404" ] || fail "yönetim API'si mağaza adresinden erişilebilir olmamalı (gelen $code)"
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"product_id":1}' "$STOREFRONT_URL/api/store/cart/add")
   [ "$code" = "403" ] || fail "özel başlıksız sepet isteği reddedilmeli (gelen $code)"
+  curl -fsS "$STOREFRONT_URL/hesap/giris" | grep -q 'Üye ol' || fail "müşteri giriş sayfası"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$STOREFRONT_URL/api/store/account/login")
+  [ "$code" = "403" ] || fail "özel başlıksız hesap isteği reddedilmeli (gelen $code)"
 fi
 
 if [ "${SMOKE_ANONYMOUS:-0}" = "1" ]; then
@@ -61,7 +64,7 @@ n=$(echo "$integ" | grep -o '"state":"not_connected"' | wc -l)
 step "credential yokken hiçbir senkron işi planlanmaz"
 # Yalnızca iç (dışarıya istek atmayan) uyarı taraması ve web mağazası bakımı beklenir; pazaryeri/tedarikçi işi olmamalı.
 jobs=$(curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs?page_size=200")
-others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' || true)
+others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' || true)
 [ -z "$others" ] || fail "beklenmeyen iş var: $others"
 
 step "dashboard ve panel"

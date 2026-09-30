@@ -417,7 +417,7 @@ Operatör ── panel ───────────────────
   * Kapıda ödeme: `orders` satırı hemen oluşur (iç statü `new`, ham statü `CashOnDelivery`).
   * Havale/EFT: `storefront_orders` + süreli stok ayırma; panelde **Ödeme alındı** ile `orders` satırı oluşur.
     Süre dolarsa worker (`storefront.maintenance`, 10 dk) siparişi `expired` yapar, stoğu bırakır.
-  * Kart: `payments.CardPaymentProvider` soyutlaması; **uygulanmış sağlayıcı yok**, sahte başarılı ödeme yok.
+  * Kart: PayTR / iyzico (bkz. 8e); sahte başarılı ödeme yok.
 * **TrendHub'da kanal:** `marketplaces.code = 'storefront'` ("Trendçantanız Web"), `orders.source = 'storefront'`,
   `external_order_id` = web sipariş no (TCyyMMdd + 5 karakter). Siparişler ekranında kanal filtresiyle ayrılır,
   dashboard/finans kanal kırılımında görünür, aynı statü/kargo/finans akışını kullanır. Hizmet bedeli 0
@@ -438,10 +438,39 @@ Operatör ── panel ───────────────────
   Origin kontrolü, SameSite=Lax HttpOnly çerez, IP başına hız sınırı (uygulama + nginx), ürün açıklamasındaki
   HTML düz metne çevrilir (çalıştırılmaz), sipariş sayfası yalnızca tek kullanımlık erişim anahtarıyla açılır.
 
-**Bilinen eksikler:** kart ödeme sağlayıcısı, sipariş e-posta/SMS bildirimi, müşteri hesabı, e-fatura
-entegrasyonu, pazaryerlerine stok yazımı (bilinçli olarak kapalı), web siparişinin tedarikçiye otomatik iletimi
-(canlı Trendyol → Çanta Bayim otomasyonu yalnızca Trendyol siparişlerini işler; web siparişleri panelden
-"Tedarikçiye Aktarıldı" akışıyla yönetilir).
+### 8e. Üretim özellikleri (migration 0009, yalnızca ekleme)
+
+* **Ürün yayını:** panelden tek tek veya toplu (seçili ürünler ya da filtredeki tümü, en fazla 5000) yayınla/gizle/
+  öne çıkar (`POST /api/storefront/products/bulk`, operatör, denetim kaydı). Yayına uygun olmayanlar (pasif,
+  fiyatsız, görselsiz) atlanır ve raporlanır. Görsel kaynağı: `products.images` → `image_url` →
+  `supplier_products.images` (Çanta Bayim beslemesinde görseller tedarikçi kaydında). Ürün bazında renk, beden,
+  varyant grubu kodu (`group_code`), SEO başlığı (≤70) ve açıklaması (≤170) düzeltilebilir. Gruplama anahtarı:
+  `group_code` → `model_code` → tedarikçi `parent_code` → tekil.
+* **Kart ödeme (`storefront/payments.py`):** PayTR iFrame API (HMAC-SHA256 token; bildirimde imza + sipariş kodu +
+  `payment_amount` doğrulanır, canlı modda test ödemesi reddedilir, yanıt `OK`) ve iyzico Ödeme Formu (IYZWSv2 imza;
+  dönüşte `checkoutform/auth/ecom/detail` sunucudan sorgulanır, basketId/tutar/para birimi doğrulanır). Sipariş
+  `pending_payment` + 30 dk stok ayırma ile oluşur; yalnızca doğrulanmış ödemede `orders` satırı yazılır. Tüm
+  geri bildirimler `storefront_payment_events`'e kaydedilir. Ayırma süresi dolduktan sonra gelen doğrulanmış ödeme
+  de siparişe dönüştürülür (para tahsil edilmiştir). Anahtar yoksa kart seçeneği hiç gösterilmez.
+* **Bildirimler (`services/order_notifications.py`):** `notification_outbox` + `storefront.notify` worker işi;
+  SMTP e-posta ve Netgsm SMS; olay başına tekil (`dedupe_key`), 5 deneme. Kargoya verildi bildirimi bakım işinde
+  `orders.internal_status` değişiminden algılanır (mevcut sipariş akışına kod eklenmedi).
+* **Tedarikçiye aktarım (`services/supplier_forwarding.py`):** yalnızca `orders.source='storefront'`.
+  `supplier_orders` satırı `channel='storefront'`, tedarikçi başına taslak (`draft`) + teslimat bilgisi/satırlar
+  (`payload`). Mod `off|manual|auto`; gönderim `SupplierOrderConnector` ile (şu an bağlantı yok → manuel iletim
+  işaretlenir). Trendyol siparişleri ve `/opt/trendcantamiz-xml` otomasyonu kapsam dışıdır.
+* **E-fatura (`services/einvoice.py`):** `EInvoiceProvider` arayüzü + `einvoice_records`; sağlayıcı ve panel
+  anahtarı birlikte açık değilse hiçbir kayıt oluşmaz.
+* **Müşteri hesabı (`storefront/accounts.py`):** kayıt (KVKK onayı zaman damgalı, isteğe bağlı pazarlama izni),
+  argon2 parola, `tc_hesap` HttpOnly/SameSite=Lax oturum çerezi (DB'de SHA-256 özeti), 5 hatalı girişte 15 dk
+  kilit, hesap varlığını sızdırmayan mesajlar, adres defteri (≤10), sipariş geçmişi (yalnızca `customer_id` ile
+  bağlı siparişler), tek kullanımlık 1 saatlik şifre sıfırlama (SMTP yoksa kapalı), şifre değişiminde diğer
+  oturumların kapatılması. Ödeme formu kayıtlı adresle dolar.
+* **Deploy:** `deploy.sh` güncellendiğinde kendini yeniden çalıştırır; servis listesi compose'dan okunur.
+  HTTPS: `docker-compose.https.yml` (Caddy) veya `deploy/https/nginx-host.conf.example`.
+
+**Bilinen eksikler:** gerçek sağlayıcı anahtarlarıyla uçtan uca doğrulama (PayTR/iyzico/SMTP/Netgsm), e-fatura
+entegratörü, tedarikçi sipariş API'si, pazaryerlerine stok yazımı (bilinçli olarak kapalı).
 
 ## 9. Güvenilirlik
 

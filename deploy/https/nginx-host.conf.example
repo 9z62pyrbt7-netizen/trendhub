@@ -1,0 +1,34 @@
+# Alternatif: sunucuda zaten nginx + certbot varsa (80/443 onun elindeyse) Caddy yerine bunu kullanın.
+#   sudo cp deploy/https/nginx-host.conf.example /etc/nginx/sites-available/trendcantaniz.conf
+#   sudo ln -s ../sites-available/trendcantaniz.conf /etc/nginx/sites-enabled/
+#   sudo certbot --nginx -d trendcantaniz.com -d www.trendcantaniz.com
+#   sudo nginx -t && sudo systemctl reload nginx
+server {
+    listen 80;
+    server_name trendcantaniz.com www.trendcantaniz.com;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://trendcantaniz.com$request_uri; }
+}
+server {
+    listen 443 ssl http2;
+    server_name www.trendcantaniz.com;
+    ssl_certificate     /etc/letsencrypt/live/trendcantaniz.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/trendcantaniz.com/privkey.pem;
+    return 301 https://trendcantaniz.com$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name trendcantaniz.com;
+    ssl_certificate     /etc/letsencrypt/live/trendcantaniz.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/trendcantaniz.com/privkey.pem;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    client_max_body_size 2m;
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

@@ -14,21 +14,21 @@
       <form class="checkout__form form" data-checkout-form novalidate>
         <fieldset class="checkout__section">
           <legend class="checkout__legend"><span>1</span> İletişim</legend>
-          <label class="field"><span>Ad Soyad</span><input name="full_name" autocomplete="name" required maxlength="120"></label>
+          <label class="field"><span>Ad Soyad</span><input name="full_name" autocomplete="name" required maxlength="120" value="{{ pre.full_name or '' }}"></label>
           <div class="form__row">
-            <label class="field"><span>E-posta</span><input name="email" type="email" autocomplete="email" required maxlength="254" inputmode="email"></label>
-            <label class="field"><span>Cep telefonu</span><input name="phone" type="tel" autocomplete="tel" required maxlength="20" placeholder="05xx xxx xx xx" inputmode="tel"></label>
+            <label class="field"><span>E-posta</span><input name="email" type="email" autocomplete="email" required maxlength="254" inputmode="email" value="{{ pre.email or '' }}"></label>
+            <label class="field"><span>Cep telefonu</span><input name="phone" type="tel" autocomplete="tel" required maxlength="20" placeholder="05xx xxx xx xx" inputmode="tel" value="{{ pre.phone or '' }}"></label>
           </div>
         </fieldset>
         <fieldset class="checkout__section">
           <legend class="checkout__legend"><span>2</span> Teslimat adresi</legend>
           <div class="form__row">
             <label class="field"><span>İl</span>
-              <select name="city" autocomplete="address-level1" required><option value="">Seçin</option>{% for c in CITIES %}<option>{{ c }}</option>{% endfor %}</select></label>
-            <label class="field"><span>İlçe</span><input name="district" autocomplete="address-level2" required maxlength="80"></label>
+              <select name="city" autocomplete="address-level1" required><option value="">Seçin</option>{% for c in CITIES %}<option{% if pre.city == c %} selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
+            <label class="field"><span>İlçe</span><input name="district" autocomplete="address-level2" required maxlength="80" value="{{ pre.district or '' }}"></label>
           </div>
-          <label class="field"><span>Açık adres</span><textarea name="address" rows="3" autocomplete="street-address" required maxlength="500" placeholder="Mahalle, cadde/sokak, bina ve daire no"></textarea></label>
-          <label class="field field--sm"><span>Posta kodu (isteğe bağlı)</span><input name="postal_code" autocomplete="postal-code" maxlength="5" inputmode="numeric"></label>
+          <label class="field"><span>Açık adres</span><textarea name="address" rows="3" autocomplete="street-address" required maxlength="500" placeholder="Mahalle, cadde/sokak, bina ve daire no">{{ pre.address or '' }}</textarea></label>
+          <label class="field field--sm"><span>Posta kodu (isteğe bağlı)</span><input name="postal_code" autocomplete="postal-code" maxlength="5" inputmode="numeric" value="{{ pre.postal_code or '' }}"></label>
         </fieldset>
         <fieldset class="checkout__section">
           <legend class="checkout__legend"><span>3</span> Fatura</legend>

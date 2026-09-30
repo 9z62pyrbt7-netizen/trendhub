@@ -15,6 +15,11 @@
     </div>
   {% elif o.status == 'pending_payment' %}
     <h1 class="page-title">Ödemeniz tamamlanmadı</h1>
+    {% if payment_failed %}<div class="notice" role="alert"><p>Ödeme gerçekleşmedi. Kartınızdan tutar çekilmediyse tekrar deneyebilirsiniz.</p></div>{% endif %}
+    {% if o.payment_method == 'card' and card_available and t %}
+    <p>Ürünleriniz kısa bir süre için ayrıldı. Ödemenizi tamamlayarak siparişinizi onaylayın.</p>
+    <a class="btn btn--dark mt" href="/odeme/kart/{{ o.public_code }}?t={{ t }}">Ödemeye devam et</a>
+    {% endif %}
   {% elif o.status in ('cancelled', 'expired', 'payment_failed') %}
     <h1 class="page-title">{{ STATUS_LABELS[o.status] }}</h1>
   {% else %}
@@ -40,7 +45,11 @@
     <div class="summary__row"><span>Kargo / hizmet</span><span>{{ fmt_try(o.shipping_fee) }}</span></div>
     <div class="summary__row summary__total"><span>Toplam</span><span>{{ fmt_try(o.total) }}</span></div>
   </div>
+  {% if from_account %}
+  <a class="btn btn--ghost mt" href="/hesabim#siparisler">← Siparişlerim</a>
+  {% else %}
   <p class="small muted mt">Bu sayfanın adresini saklayın; siparişinizin durumunu buradan takip edebilirsiniz.</p>
   <a class="btn btn--ghost mt" href="/urunler">Alışverişe devam et</a>
+  {% endif %}
 </div></section>
 {% endblock %}

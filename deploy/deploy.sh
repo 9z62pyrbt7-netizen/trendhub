@@ -19,6 +19,8 @@
 set -Eeuo pipefail
 
 PROTECTED_DIR="/opt/trendcantamiz-xml"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+SELF_SHA="$(sha256sum "$SELF" | cut -d' ' -f1)"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$REPO_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -158,11 +160,25 @@ if [ "${TRENDHUB_GIT_PULL:-1}" = "1" ] && [ -d .git ]; then
   git fetch --quiet origin "${TRENDHUB_BRANCH:-main}"
   git checkout --quiet "${TRENDHUB_BRANCH:-main}"
   git pull --quiet --ff-only origin "${TRENDHUB_BRANCH:-main}"
+  # Bash betiği çalışırken diskten okumaya devam eder: git pull bu dosyayı değiştirdiyse ESKİ adımlar
+  # (ör. storefront servisini başlatmayan eski 'up -d' satırı) çalışmaya devam ederdi. Yeni sürümü baştan çalıştır.
+  if [ "$(sha256sum "$SELF" | cut -d' ' -f1)" != "$SELF_SHA" ] && [ -z "${TRENDHUB_REEXEC:-}" ]; then
+    warn "deploy.sh güncellendi; yeni sürüm baştan çalıştırılıyor (git pull tekrarlanmaz)"
+    trap - ERR
+    exec env TRENDHUB_GIT_PULL=0 TRENDHUB_REEXEC=1 bash "$SELF" "$@"
+  fi
 fi
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo bilinmiyor)"
 ok "Deploy edilecek commit: $COMMIT"
 "${DC[@]}" config -q || die "docker compose config geçersiz"
 ok "compose yapılandırması geçerli"
+# Uygulama servisleri compose dosyasından okunur (db ve tek seferlik migrate hariç): yeni eklenen bir servis
+# (ör. storefront) bu listeye otomatik girer, elle güncellenmesi unutulamaz.
+mapfile -t APP_SERVICES < <("${DC[@]}" config --services | grep -vxE 'db|migrate')
+for s in api worker storefront web; do
+  printf '%s\n' "${APP_SERVICES[@]}" | grep -qx "$s" || die "docker-compose.yml içinde '$s' servisi yok"
+done
+ok "Başlatılacak servisler: ${APP_SERVICES[*]}"
 
 # ---------------------------------------------------------------- 4. yedek
 say "4. Veritabanı yedeği"
@@ -192,18 +208,28 @@ if [ "${TRENDHUB_BUILD:-1}" = "1" ]; then "${DC[@]}" build; else warn "TRENDHUB_
 "${DC[@]}" up -d db
 "${DC[@]}" run --rm migrate || die "Migration başarısız. Yedek: ${BACKUP:-yok}. Uygulama container'ları değiştirilmedi."
 ok "Migration tamam"
-"${DC[@]}" up -d --no-deps api worker storefront web
+# web (nginx) storefront:8000'e yönlendirir; önce uygulama servisleri, sonra web başlatılır.
+NON_WEB=(); for s in "${APP_SERVICES[@]}"; do [ "$s" = web ] || NON_WEB+=("$s"); done
+"${DC[@]}" up -d --no-deps "${NON_WEB[@]}"
+"${DC[@]}" up -d --no-deps web
+for s in "${APP_SERVICES[@]}"; do
+  cid="$("${DC[@]}" ps -q "$s")"
+  if [ -z "$cid" ] || [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != "true" ]; then
+    "${DC[@]}" ps -a; "${DC[@]}" logs --tail 80 "$s" || true
+    die "'$s' servisi başlamadı (yukarıdaki log). Veri silinmedi; yedek: ${BACKUP:-yok}"
+  fi
+done
 # nginx.conf bind-mount ile gelir; içerik değiştiyse compose container'ı yeniden oluşturmaz.
 "${DC[@]}" exec -T web nginx -t >/dev/null 2>&1 || die "nginx yapılandırması geçersiz"
 "${DC[@]}" exec -T web nginx -s reload >/dev/null
-ok "api, worker, storefront, web başlatıldı; nginx yapılandırması yeniden yüklendi"
+ok "${APP_SERVICES[*]} çalışıyor; nginx yapılandırması yeniden yüklendi"
 
 # ------------------------------------------------------------ 6. sağlık
 say "6. Sağlık kontrolü"
 deadline=$(( $(date +%s) + ${TRENDHUB_HEALTH_TIMEOUT:-240} ))
 while :; do
   all=1; line=""
-  for s in db api worker storefront web; do
+  for s in db "${APP_SERVICES[@]}"; do
     cid="$("${DC[@]}" ps -q "$s")"
     h="$( [ -n "$cid" ] && docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" || echo yok)"
     line="$line $s=$h"
@@ -218,10 +244,10 @@ while :; do
   [ "$sf_code" = "200" ] || all=0
   echo " $line"
   [ "$all" = 1 ] && break
-  [ "$(date +%s)" -lt "$deadline" ] || { "${DC[@]}" ps; "${DC[@]}" logs --tail 80 api worker storefront web; die "Servisler zamanında sağlıklı olmadı"; }
+  [ "$(date +%s)" -lt "$deadline" ] || { "${DC[@]}" ps; "${DC[@]}" logs --tail 80 "${APP_SERVICES[@]}"; die "Servisler zamanında sağlıklı olmadı"; }
   sleep 5
 done
-ok "db, api, worker, storefront, web: healthy"
+ok "db ${APP_SERVICES[*]}: healthy; mağaza sağlık uç noktası 200"
 
 BASE_URL="http://127.0.0.1:$NEW_PORT"
 curl -fsS "$BASE_URL/api/health" | grep -q '"healthy"' || die "$BASE_URL/api/health sağlıklı değil"

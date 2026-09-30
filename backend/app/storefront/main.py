@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qsl
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -28,11 +30,13 @@ from sqlalchemy.engine import Connection
 from ..config import cookie_secure_for, get_settings
 from ..db import get_conn, transaction
 from ..logging_setup import configure_logging
+from ..services import order_notifications
 from . import cart as cart_svc
-from . import catalog, checkout, images, store_config
+from . import accounts, catalog, checkout, images, payments, store_config
 from .store_config import LEGAL_PAGES, fmt_try
 
 log = logging.getLogger("trendhub.storefront")
+ORDER_CODE_RE = re.compile(r"^TC\d{6}[A-Z0-9]{5}$")
 HERE = Path(__file__).parent
 STATIC_VERSION = str(int(max(p.stat().st_mtime for p in (HERE / "static").glob("*.*"))))
 BRAND = "Trendçantanız"
@@ -45,8 +49,13 @@ env.globals.update(slugify=catalog.slugify, fmt_try=fmt_try, img=images.img_url,
 env.filters["json"] = lambda v: Markup(json.dumps(v, ensure_ascii=False, default=str)
                                         .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
-CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
-       "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+def _csp(frame: tuple[str, ...] = ()) -> str:
+    return ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+            "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            + (f"; frame-src {' '.join(frame)}" if frame else ""))
+
+
+CSP = _csp()
 
 
 def create_app() -> FastAPI:
@@ -82,7 +91,7 @@ def create_app() -> FastAPI:
         response.headers.setdefault("Content-Security-Policy", CSP)
         if request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        elif request.url.path.startswith(("/api/store/", "/sepet", "/odeme", "/siparis")):
+        elif request.url.path.startswith(("/api/store/", "/sepet", "/odeme", "/siparis", "/hesap")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -105,6 +114,7 @@ def create_app() -> FastAPI:
                             "Lütfen biraz sonra tekrar deneyin.</p>", status_code=500)
 
     _routes(app)
+    _account_routes(app)
     return app
 
 
@@ -143,8 +153,9 @@ def _ctx(request: Request, conn: Connection, *, title: str | None = None, descri
     if cfg.seller.get("phone"):
         org["contactPoint"] = {"@type": "ContactPoint", "telephone": cfg.seller["phone"], "contactType": "customer service",
                                "areaServed": "TR", "availableLanguage": "Turkish"}
+    customer = accounts.resolve(conn, request.cookies.get(accounts.COOKIE))
     return {
-        "org_jsonld": org,
+        "org_jsonld": org, "customer": customer,
         "request": request, "cfg": cfg, "base": base, "path": request.url.path,
         "title": f"{title} | {BRAND}" if title else f"{BRAND} — Kadın Çanta",
         "description": description or "Trendçantanız kadın çanta koleksiyonu: omuz, çapraz ve el çantaları. Güvenli ödeme, kolay sipariş.",
@@ -164,6 +175,21 @@ def _ip(request: Request) -> str | None:
 
 
 _hits: dict[str, deque] = defaultdict(deque)
+
+
+def _invalid(exc: ValidationError) -> JSONResponse:
+    fields = {}
+    for e in exc.errors():
+        key = str(e["loc"][0]) if e.get("loc") else "_"
+        msg = str(e.get("msg", "")).removeprefix("Value error, ")
+        if e.get("type") == "missing":
+            msg = "Bu alan zorunlu"
+        elif e.get("type") == "string_too_short":
+            msg = "Çok kısa"
+        elif e.get("type") == "string_too_long":
+            msg = "Çok uzun"
+        fields[key] = msg
+    return JSONResponse({"detail": "Lütfen işaretli alanları kontrol edin.", "fields": fields}, status_code=422)
 
 
 def _rate_limit(key: str, limit: int, seconds: int) -> None:
@@ -238,7 +264,7 @@ def _routes(app: FastAPI) -> None:
         v = next(x for x in g.variants if x.id == pid)
         if request.url.path != v.url:
             return RedirectResponse(v.url, status_code=301)
-        ctx = _ctx(request, conn, title=v.title, description=catalog.plain(v.description) or
+        ctx = _ctx(request, conn, title=v.seo_title or v.title, description=v.seo_description or catalog.plain(v.description) or
                    f"{v.title} — {fmt_try(v.price)}. {BRAND} güvencesiyle güvenli ödeme.", image=v.images[0] if v.images else None,
                    og_type="product")
         snap = catalog.snapshot(conn)
@@ -325,8 +351,100 @@ def _routes(app: FastAPI) -> None:
         if not cv.lines:
             return RedirectResponse("/sepet", status_code=303)
         ctx = _ctx(request, conn, title="Ödeme", noindex=True)
-        ctx.update(cart=cv, methods=ctx["cfg"].payment_methods(), blockers=ctx["cfg"].checkout_blockers())
+        pre: dict = {}
+        if ctx["customer"]:
+            c = ctx["customer"]
+            addrs = accounts.addresses(conn, c["id"])
+            pre = {**(addrs[0] if addrs else {}), "email": c["email"]}
+            pre.setdefault("full_name", c["full_name"])
+            pre.setdefault("phone", c["phone"])
+        ctx.update(cart=cv, methods=ctx["cfg"].payment_methods(), blockers=ctx["cfg"].checkout_blockers(), pre=pre)
         return _render("checkout.html", ctx)
+
+    # ------------------------------------------------------------- kartla ödeme
+    @app.get("/odeme/kart/{code}", response_class=HTMLResponse)
+    def card_payment(code: str, request: Request, t: str | None = None):
+        with transaction() as conn:
+            sfo = checkout.find_public(conn, code, t)
+            if sfo is None:
+                raise HTTPException(404)
+            order_url = f"/siparis/{code}?t={t}"
+            if sfo["status"] != "pending_payment" or sfo["payment_method"] != "card":
+                return RedirectResponse(order_url, status_code=303)
+            provider = payments.card_provider()
+            ctx = _ctx(request, conn, title="Kartla ödeme", noindex=True)
+            ctx.update(o=sfo, order_url=order_url, provider=provider, start=None, error=None)
+            if provider is None:
+                ctx["error"] = "Kartla ödeme şu anda kullanılamıyor. Siparişiniz ödeme alınmadan oluşturulmaz."
+                return _render("card_payment.html", ctx)
+            base = store_config.base_url(request)
+            try:
+                start = provider.start(sfo, ok_url=base + order_url, fail_url=base + order_url + "&odeme=basarisiz",
+                                       callback_url=f"{base}/odeme/geri-donus/{provider.code}?c={code}&t={t}",
+                                       user_ip=_ip(request) or "127.0.0.1")
+            except payments.PaymentNotConfigured as exc:
+                ctx["error"] = str(exc)
+                return _render("card_payment.html", ctx)
+            conn.execute(text("""UPDATE storefront_orders SET payment_provider = :p,
+                                 payment_reference = COALESCE(:r, payment_reference), updated_at = NOW() WHERE id = :id"""),
+                         {"p": provider.code, "r": start.reference, "id": sfo["id"]})
+            conn.execute(text("""INSERT INTO storefront_payment_events(storefront_order_id, provider, kind, verified, details)
+                                 VALUES (:o, :p, 'start', FALSE, '{}'::jsonb)"""), {"o": sfo["id"], "p": provider.code})
+        if start.redirect_url:
+            return RedirectResponse(start.redirect_url, status_code=303)
+        ctx["start"] = start
+        response = _render("card_payment.html", ctx)
+        response.headers["Content-Security-Policy"] = _csp(frame=provider.frame_src)
+        return response
+
+    @app.post("/odeme/geri-donus/{provider_code}")
+    async def payment_callback(provider_code: str, request: Request, c: str | None = None, t: str | None = None):
+        """Sağlayıcı geri bildirimi. PayTR: sunucudan sunucuya bildirim ('OK' beklenir). iyzico: tarayıcı yönlendirmesi."""
+        _rate_limit(f"paycb:{_ip(request)}", 120, 60)
+        provider = payments.card_provider()
+        if provider is None or provider.code != provider_code:
+            raise HTTPException(404)
+        raw = await request.body()
+        if len(raw) > 65536:
+            raise HTTPException(413)
+        # Sağlayıcılar application/x-www-form-urlencoded gönderir (ek bağımlılık gerektirmeden ayrıştırılır).
+        form = dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+        if c:
+            form["_code"] = c
+        code = str(provider.order_code(form) or "")
+        outcome = "unknown"
+        sfo = None
+        with transaction() as conn:
+            if ORDER_CODE_RE.match(code):
+                sfo = conn.execute(text("SELECT * FROM storefront_orders WHERE public_code = :c FOR UPDATE"),
+                                   {"c": code}).mappings().first()
+            if sfo is None:
+                log.warning("Ödeme geri bildirimi: sipariş bulunamadı (%s)", provider_code)
+            else:
+                result = provider.verify_callback(form, dict(sfo))
+                conn.execute(text("""INSERT INTO storefront_payment_events(storefront_order_id, provider, kind, verified, details)
+                                     VALUES (:o, :p, 'callback', :v, CAST(:d AS JSONB))"""),
+                             {"o": sfo["id"], "p": provider.code, "v": result.verified,
+                              "d": json.dumps({"paid": result.paid, "message": result.message, **result.details},
+                                              ensure_ascii=False, default=str)})
+                if result.verified and result.paid:
+                    if sfo["status"] in ("pending_payment", "expired", "payment_failed"):
+                        checkout.confirm_payment(conn, sfo["id"], reference=result.reference, provider=provider.code,
+                                                 allow_expired=True)
+                    outcome = "paid"
+                elif result.verified:
+                    outcome = "failed"
+                else:
+                    outcome = "invalid"
+                    log.warning("Ödeme geri bildirimi doğrulanamadı (%s %s): %s", provider_code, code, result.message)
+        if provider.code == "paytr":
+            # PayTR, 'OK' yanıtı alana kadar bildirimi tekrarlar; doğrulanamayan istek için OK dönülmez.
+            ok = outcome in ("paid", "failed")
+            return PlainTextResponse("OK" if ok else "FAIL", status_code=200 if ok else 400)
+        if sfo is None or not t:
+            raise HTTPException(404)
+        suffix = "" if outcome == "paid" else "&odeme=basarisiz"
+        return RedirectResponse(f"/siparis/{code}?t={t}{suffix}", status_code=303)
 
     @app.get("/siparis/{code}", response_class=HTMLResponse)
     def order_page(code: str, request: Request, t: str | None = None, conn: Connection = Depends(get_conn)):
@@ -335,7 +453,8 @@ def _routes(app: FastAPI) -> None:
             raise HTTPException(404)
         ctx = _ctx(request, conn, title=f"Sipariş {code}", noindex=True)
         from ..domain.order_status import LABELS_TR
-        ctx.update(o=sfo, fulfilment=LABELS_TR.get(sfo.get("internal_status")) if sfo.get("internal_status") else None)
+        ctx.update(o=sfo, t=t, payment_failed=request.query_params.get("odeme") == "basarisiz",
+                   card_available=ctx["cfg"].card_available, fulfilment=LABELS_TR.get(sfo.get("internal_status")) if sfo.get("internal_status") else None)
         return _render("order.html", ctx)
 
     @app.get("/sayfa/{slug}", response_class=HTMLResponse)
@@ -361,6 +480,7 @@ def _routes(app: FastAPI) -> None:
     def robots(request: Request):
         base = store_config.base_url(request)
         return ("User-agent: *\nDisallow: /sepet\nDisallow: /odeme\nDisallow: /siparis/\nDisallow: /api/\n"
+                "Disallow: /hesap/\nDisallow: /hesabim\n"
                 f"Disallow: /ara\n\nSitemap: {base}/sitemap.xml\n")
 
     @app.get("/sitemap.xml")
@@ -444,27 +564,231 @@ def _routes(app: FastAPI) -> None:
         try:
             data = checkout.CheckoutIn(**(payload if isinstance(payload, dict) else {}))
         except ValidationError as exc:
-            fields = {}
-            for e in exc.errors():
-                key = str(e["loc"][0]) if e.get("loc") else "_"
-                msg = str(e.get("msg", "")).removeprefix("Value error, ")
-                if e.get("type") == "missing":
-                    msg = "Bu alan zorunlu"
-                elif e.get("type") == "string_too_short":
-                    msg = "Çok kısa"
-                elif e.get("type") == "string_too_long":
-                    msg = "Çok uzun"
-                fields[key] = msg
-            return JSONResponse({"detail": "Lütfen işaretli alanları kontrol edin.", "fields": fields}, status_code=422)
+            return _invalid(exc)
         token = request.cookies.get(cart_svc.COOKIE)
         try:
             with transaction() as conn:
                 cid = cart_svc.find(conn, token)
-                result = checkout.place_order(conn, cid, data, _ip(request))
+                customer = accounts.resolve(conn, request.cookies.get(accounts.COOKIE))
+                customer_id = customer["id"] if customer else None
+                result = checkout.place_order(conn, cid, data, _ip(request), customer_id=customer_id)
+                url = f"/siparis/{result['public_code']}?t={result['access_token']}"
+                if result["status"] != "pending_payment":
+                    order_notifications.notify_order(conn, result["id"], "order_received",
+                                               order_url=store_config.base_url(request) + url)
         except checkout.CheckoutError as exc:
             return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
-        url = f"/siparis/{result['public_code']}?t={result['access_token']}"
+        if result["status"] == "pending_payment":
+            url = f"/odeme/kart/{result['public_code']}?t={result['access_token']}"
         return {"ok": True, "public_code": result["public_code"], "status": result["status"], "redirect": url}
+
+
+
+def _safe_next(v: str | None) -> str:
+    """Açık yönlendirme engeli: yalnızca site içi yol."""
+    return v if v and v.startswith("/") and not v.startswith("//") and "\\" not in v and len(v) < 300 else "/hesabim"
+
+
+def _session_cookie(response: Response, request: Request, token: str | None) -> None:
+    if token is None:
+        response.delete_cookie(accounts.COOKIE, path="/")
+        return
+    response.set_cookie(accounts.COOKIE, token, max_age=accounts.SESSION_DAYS * 86400, httponly=True, samesite="lax",
+                        secure=cookie_secure_for(get_settings(), request.headers.get("x-forwarded-proto") or request.url.scheme),
+                        path="/")
+
+
+def _account_routes(app: FastAPI) -> None:
+    def _me(request: Request, conn: Connection) -> dict | None:
+        return accounts.resolve(conn, request.cookies.get(accounts.COOKIE))
+
+    async def _body(request: Request, model):
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return None, JSONResponse({"detail": "Geçersiz istek"}, status_code=400)
+        try:
+            return model(**(payload if isinstance(payload, dict) else {})), None
+        except ValidationError as exc:
+            return None, _invalid(exc)
+
+    def _err(exc: accounts.AccountError) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=exc.status)
+
+    # ------------------------------------------------------------- sayfalar
+    @app.get("/hesap/giris", response_class=HTMLResponse)
+    def login_page(request: Request, sonra: str | None = None, conn: Connection = Depends(get_conn)):
+        if _me(request, conn):
+            return RedirectResponse(_safe_next(sonra), status_code=303)
+        ctx = _ctx(request, conn, title="Giriş yap / Üye ol", noindex=True)
+        ctx.update(next=_safe_next(sonra), reset_done=request.query_params.get("yenilendi") == "1")
+        return _render("account_login.html", ctx)
+
+    @app.get("/hesap/sifremi-unuttum", response_class=HTMLResponse)
+    def forgot_page(request: Request, conn: Connection = Depends(get_conn)):
+        ctx = _ctx(request, conn, title="Şifremi unuttum", noindex=True)
+        ctx["email_available"] = order_notifications.email_configured()
+        return _render("account_forgot.html", ctx)
+
+    @app.get("/hesap/sifre-yenile", response_class=HTMLResponse)
+    def reset_page(request: Request, anahtar: str | None = None, conn: Connection = Depends(get_conn)):
+        ctx = _ctx(request, conn, title="Yeni şifre", noindex=True)
+        ctx["token"] = anahtar or ""
+        return _render("account_reset.html", ctx)
+
+    @app.get("/hesabim", response_class=HTMLResponse)
+    def account_page(request: Request, conn: Connection = Depends(get_conn)):
+        me = _me(request, conn)
+        if me is None:
+            return RedirectResponse("/hesap/giris?sonra=/hesabim", status_code=303)
+        ctx = _ctx(request, conn, title="Hesabım", noindex=True)
+        ctx.update(me=me, orders=accounts.orders(conn, me["id"]), addresses=accounts.addresses(conn, me["id"]))
+        return _render("account.html", ctx)
+
+    @app.get("/hesabim/siparis/{code}", response_class=HTMLResponse)
+    def account_order(code: str, request: Request, conn: Connection = Depends(get_conn)):
+        me = _me(request, conn)
+        if me is None:
+            return RedirectResponse(f"/hesap/giris?sonra=/hesabim/siparis/{code}", status_code=303)
+        sfo = accounts.order(conn, me["id"], code)
+        if sfo is None:
+            raise HTTPException(404)
+        from ..domain.order_status import LABELS_TR
+        ctx = _ctx(request, conn, title=f"Sipariş {code}", noindex=True)
+        ctx.update(o=sfo, t=None, payment_failed=False, card_available=False, from_account=True,
+                   fulfilment=LABELS_TR.get(sfo.get("internal_status")) if sfo.get("internal_status") else None)
+        return _render("order.html", ctx)
+
+    # ------------------------------------------------------------- JSON uçları
+    @app.post("/api/store/account/register")
+    async def register(request: Request):
+        _rate_limit(f"acct:{_ip(request)}", 20, 600)
+        data, bad = await _body(request, accounts.RegisterIn)
+        if bad:
+            return bad
+        try:
+            with transaction() as conn:
+                cid = accounts.register(conn, data)
+                token = accounts.create_session(conn, cid)
+        except accounts.AccountError as exc:
+            return _err(exc)
+        response = JSONResponse({"ok": True, "redirect": _safe_next(request.query_params.get("sonra"))})
+        _session_cookie(response, request, token)
+        return response
+
+    @app.post("/api/store/account/login")
+    async def login(request: Request):
+        _rate_limit(f"login:{_ip(request)}", 20, 600)
+        data, bad = await _body(request, accounts.LoginIn)
+        if bad:
+            return bad
+        with transaction() as conn:
+            cid, error = accounts.authenticate(conn, data.email, data.password)
+            token = accounts.create_session(conn, cid) if cid else None
+        if error:
+            return JSONResponse({"detail": error, "fields": {}}, status_code=401)
+        response = JSONResponse({"ok": True, "redirect": _safe_next(request.query_params.get("sonra"))})
+        _session_cookie(response, request, token)
+        return response
+
+    @app.post("/api/store/account/logout")
+    def logout(request: Request, conn: Connection = Depends(get_conn)):
+        accounts.logout(conn, request.cookies.get(accounts.COOKIE))
+        response = JSONResponse({"ok": True, "redirect": "/"})
+        _session_cookie(response, request, None)
+        return response
+
+    @app.post("/api/store/account/password/forgot")
+    async def forgot(request: Request):
+        _rate_limit(f"forgot:{_ip(request)}", 5, 600)
+        data, bad = await _body(request, accounts.ForgotIn)
+        if bad:
+            return bad
+        if not order_notifications.email_configured():
+            return JSONResponse({"detail": "Şifre yenileme e-postası şu anda gönderilemiyor. Lütfen iletişim sayfasındaki "
+                                           "bilgilerden bize ulaşın."}, status_code=503)
+        with transaction() as conn:
+            res = accounts.create_reset(conn, data.email)
+            if res:
+                customer, token = res
+                order_notifications.send_password_reset(conn, customer, f"{store_config.base_url(request)}/hesap/sifre-yenile?anahtar={token}")
+        return {"ok": True, "message": "Bu e-posta adresine kayıtlı bir hesap varsa şifre yenileme bağlantısı gönderildi."}
+
+    @app.post("/api/store/account/password/reset")
+    async def reset(request: Request):
+        _rate_limit(f"reset:{_ip(request)}", 10, 600)
+        data, bad = await _body(request, accounts.ResetIn)
+        if bad:
+            return bad
+        try:
+            with transaction() as conn:
+                accounts.reset_password(conn, data)
+        except accounts.AccountError as exc:
+            return _err(exc)
+        response = JSONResponse({"ok": True, "redirect": "/hesap/giris?yenilendi=1"})
+        _session_cookie(response, request, None)
+        return response
+
+    def _authed(request: Request, conn: Connection) -> dict:
+        me = _me(request, conn)
+        if me is None:
+            raise HTTPException(401, "Oturumunuz sona erdi. Lütfen tekrar giriş yapın.")
+        return me
+
+    @app.post("/api/store/account/password/change")
+    async def change_password(request: Request):
+        _rate_limit(f"pwchange:{_ip(request)}", 10, 600)
+        data, bad = await _body(request, accounts.ChangePasswordIn)
+        if bad:
+            return bad
+        try:
+            with transaction() as conn:
+                me = _authed(request, conn)
+                accounts.change_password(conn, me["id"], data, request.cookies.get(accounts.COOKIE))
+        except accounts.AccountError as exc:
+            return _err(exc)
+        return {"ok": True, "message": "Şifreniz güncellendi. Diğer cihazlardaki oturumlar kapatıldı."}
+
+    @app.post("/api/store/account/profile")
+    async def profile(request: Request):
+        data, bad = await _body(request, accounts.ProfileIn)
+        if bad:
+            return bad
+        with transaction() as conn:
+            accounts.update_profile(conn, _authed(request, conn)["id"], data)
+        return {"ok": True, "message": "Bilgileriniz kaydedildi."}
+
+    @app.post("/api/store/account/addresses")
+    async def add_address(request: Request):
+        data, bad = await _body(request, accounts.AddressIn)
+        if bad:
+            return bad
+        try:
+            with transaction() as conn:
+                accounts.save_address(conn, _authed(request, conn)["id"], data)
+        except accounts.AccountError as exc:
+            return _err(exc)
+        return {"ok": True, "message": "Adres kaydedildi."}
+
+    @app.post("/api/store/account/addresses/{address_id}")
+    async def update_address(address_id: int, request: Request):
+        data, bad = await _body(request, accounts.AddressIn)
+        if bad:
+            return bad
+        try:
+            with transaction() as conn:
+                accounts.save_address(conn, _authed(request, conn)["id"], data, address_id)
+        except accounts.AccountError as exc:
+            return _err(exc)
+        return {"ok": True, "message": "Adres güncellendi."}
+
+    @app.post("/api/store/account/addresses/{address_id}/delete")
+    def delete_address(address_id: int, request: Request, conn: Connection = Depends(get_conn)):
+        try:
+            accounts.delete_address(conn, _authed(request, conn)["id"], address_id)
+        except accounts.AccountError as exc:
+            return _err(exc)
+        return {"ok": True}
 
 
 app = create_app()
