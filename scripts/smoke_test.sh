@@ -22,6 +22,19 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/dashboard")
 step "güvenlik başlıkları"
 curl -fsSI "$BASE_URL/" | grep -qi 'content-security-policy' || fail "CSP başlığı yok"
 
+if [ -n "${STOREFRONT_URL:-}" ]; then
+  step "web mağazası (storefront)"
+  curl -fsS "$STOREFRONT_URL/api/store/health" | grep -q '"healthy"' || fail "storefront /api/store/health"
+  curl -fsS "$STOREFRONT_URL/" | grep -q 'TRENDÇANTANIZ' || fail "mağaza ana sayfası"
+  curl -fsSI "$STOREFRONT_URL/" | grep -qi 'content-security-policy' || fail "mağaza CSP başlığı yok"
+  curl -fsS "$STOREFRONT_URL/robots.txt" | grep -q 'Sitemap:' || fail "robots.txt"
+  curl -fsS "$STOREFRONT_URL/sitemap.xml" | grep -q '<urlset' || fail "sitemap.xml"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$STOREFRONT_URL/api/orders")
+  [ "$code" = "404" ] || fail "yönetim API'si mağaza adresinden erişilebilir olmamalı (gelen $code)"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"product_id":1}' "$STOREFRONT_URL/api/store/cart/add")
+  [ "$code" = "403" ] || fail "özel başlıksız sepet isteği reddedilmeli (gelen $code)"
+fi
+
 if [ "${SMOKE_ANONYMOUS:-0}" = "1" ]; then
   step "panel dosyaları"
   curl -fsS "$BASE_URL/" | grep -q 'TrendHub' || fail "panel HTML"
@@ -46,9 +59,9 @@ n=$(echo "$integ" | grep -o '"state":"not_connected"' | wc -l)
 [ "$n" -eq 3 ] || fail "3 entegrasyon da not_connected olmalı: $integ"
 
 step "credential yokken hiçbir senkron işi planlanmaz"
-# Yalnızca iç (dışarıya istek atmayan) uyarı taraması beklenir; pazaryeri/tedarikçi işi olmamalı.
+# Yalnızca iç (dışarıya istek atmayan) uyarı taraması ve web mağazası bakımı beklenir; pazaryeri/tedarikçi işi olmamalı.
 jobs=$(curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs?page_size=200")
-others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v '"job_type":"alerts.scan"' || true)
+others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' || true)
 [ -z "$others" ] || fail "beklenmeyen iş var: $others"
 
 step "dashboard ve panel"

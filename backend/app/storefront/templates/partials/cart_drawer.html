@@ -1,0 +1,30 @@
+<div class="drawer drawer--right" id="CartDrawer" data-drawer="cart" aria-hidden="true">
+  <div class="drawer__overlay" data-drawer-close></div>
+  <div class="drawer__panel cart-drawer" role="dialog" aria-modal="true" aria-labelledby="CartDrawerTitle" tabindex="-1">
+    <div class="drawer__head">
+      <h2 class="drawer__title" id="CartDrawerTitle">Sepetim <span class="drawer__count" data-cart-drawer-count>({{ cart_count }})</span></h2>
+      <button type="button" class="header__icon" data-drawer-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
+    </div>
+    <div class="drawer__body" data-cart-drawer-body>
+      <p class="drawer__loading">Sepet yükleniyor…</p>
+    </div>
+    <div class="drawer__foot" data-cart-drawer-foot hidden>
+      <div class="summary">
+        <div class="summary__row"><span>Ara toplam</span><span data-cart-items-total></span></div>
+        <div class="summary__row"><span>Kargo</span><span data-cart-shipping></span></div>
+        <div class="summary__row summary__total"><span>Toplam</span><span data-cart-total></span></div>
+        <p class="summary__note">Fiyatlara KDV dahildir.</p>
+        <a class="btn btn--dark btn--block" href="/odeme">{% include "icons/lock.svg" %}<span>Güvenli Ödemeye Geç</span></a>
+        <a class="link-quiet summary__view" href="/sepet">Sepeti görüntüle</a>
+      </div>
+    </div>
+  </div>
+</div>
+<template id="CartEmptyTpl">
+  <div class="cart-empty">
+    <span class="cart-empty__icon">{% include "icons/bag.svg" %}</span>
+    <p class="cart-empty__title">Sepetin şu an boş</p>
+    <p class="cart-empty__text">Tarzına eşlik edecek çantayı keşfetmeye ne dersin?</p>
+    <a class="btn btn--dark" href="/urunler"><span>Alışverişe başla</span>{% include "icons/arrow-right.svg" %}</a>
+  </div>
+</template>

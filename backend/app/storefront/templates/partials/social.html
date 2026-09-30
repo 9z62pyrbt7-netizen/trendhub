@@ -1,0 +1,9 @@
+{% set s = cfg.social %}
+{% if s.instagram or s.tiktok or s.facebook or s.pinterest or s.youtube or s.whatsapp %}
+<ul class="social" aria-label="Sosyal medya">
+  {% for k, label in [("instagram", "Instagram"), ("tiktok", "TikTok"), ("facebook", "Facebook"), ("pinterest", "Pinterest"), ("youtube", "YouTube")] %}
+  {% if s.get(k) %}<li><a href="{{ s[k] }}" target="_blank" rel="noopener" aria-label="{{ label }}">{% include "icons/" ~ k ~ ".svg" %}</a></li>{% endif %}
+  {% endfor %}
+  {% if s.whatsapp %}<li><a href="https://wa.me/{{ s.whatsapp }}" target="_blank" rel="noopener" aria-label="WhatsApp">{% include "icons/whatsapp.svg" %}</a></li>{% endif %}
+</ul>
+{% endif %}

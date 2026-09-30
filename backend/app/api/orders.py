@@ -98,7 +98,7 @@ def _apply_finance(o: dict, f: dict | None) -> None:
 
 
 @router.get("/{order_id}")
-def get_order(order_id: int, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+def get_order(order_id: int, user: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
     o = row(conn, """
         SELECT o.*, m.code AS marketplace, m.name AS marketplace_name, s.name AS store_name
           FROM orders o LEFT JOIN stores s ON s.id = o.store_id
@@ -152,6 +152,8 @@ def get_order(order_id: int, _: CurrentUser = Depends(viewer), conn: Connection 
                              id=order_id)
     rev = o["gross_revenue"] or 0
     o["margin"] = float(o["net_profit"] / rev) if rev else None
+    from .storefront_admin import order_details
+    o["storefront"] = order_details(conn, order_id, user)
     return o
 
 

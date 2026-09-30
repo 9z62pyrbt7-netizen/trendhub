@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block page_class %}checkout{% endblock %}
+{% block content %}
+<section class="section checkout">
+  <div class="container">
+    <div class="page-head"><h1 class="page-title">Ödeme</h1><a class="link-quiet" href="/sepet">← Sepete dön</a></div>
+    {% if blockers %}
+    <div class="notice" role="alert">
+      <strong>Web mağazamız şu anda sipariş kabul etmiyor.</strong>
+      <p>Sipariş almaya çok yakında başlıyoruz. Sorularınız için <a href="/iletisim">bize ulaşın</a>.</p>
+    </div>
+    {% endif %}
+    <div class="checkout__grid">
+      <form class="checkout__form form" data-checkout-form novalidate>
+        <fieldset class="checkout__section">
+          <legend class="checkout__legend"><span>1</span> İletişim</legend>
+          <label class="field"><span>Ad Soyad</span><input name="full_name" autocomplete="name" required maxlength="120"></label>
+          <div class="form__row">
+            <label class="field"><span>E-posta</span><input name="email" type="email" autocomplete="email" required maxlength="254" inputmode="email"></label>
+            <label class="field"><span>Cep telefonu</span><input name="phone" type="tel" autocomplete="tel" required maxlength="20" placeholder="05xx xxx xx xx" inputmode="tel"></label>
+          </div>
+        </fieldset>
+        <fieldset class="checkout__section">
+          <legend class="checkout__legend"><span>2</span> Teslimat adresi</legend>
+          <div class="form__row">
+            <label class="field"><span>İl</span>
+              <select name="city" autocomplete="address-level1" required><option value="">Seçin</option>{% for c in CITIES %}<option>{{ c }}</option>{% endfor %}</select></label>
+            <label class="field"><span>İlçe</span><input name="district" autocomplete="address-level2" required maxlength="80"></label>
+          </div>
+          <label class="field"><span>Açık adres</span><textarea name="address" rows="3" autocomplete="street-address" required maxlength="500" placeholder="Mahalle, cadde/sokak, bina ve daire no"></textarea></label>
+          <label class="field field--sm"><span>Posta kodu (isteğe bağlı)</span><input name="postal_code" autocomplete="postal-code" maxlength="5" inputmode="numeric"></label>
+        </fieldset>
+        <fieldset class="checkout__section">
+          <legend class="checkout__legend"><span>3</span> Fatura</legend>
+          <div class="choice-row">
+            <label class="choice"><input type="radio" name="billing_type" value="individual" checked><span>Bireysel</span></label>
+            <label class="choice"><input type="radio" name="billing_type" value="corporate"><span>Kurumsal</span></label>
+          </div>
+          <div class="corporate" data-corporate hidden>
+            <label class="field"><span>Firma unvanı</span><input name="company" maxlength="200" autocomplete="organization"></label>
+            <div class="form__row">
+              <label class="field"><span>Vergi dairesi</span><input name="tax_office" maxlength="100"></label>
+              <label class="field"><span>Vergi numarası</span><input name="tax_number" maxlength="11" inputmode="numeric"></label>
+            </div>
+          </div>
+          <p class="field-hint">Bireysel faturanız teslimat adresine düzenlenir.</p>
+        </fieldset>
+        <fieldset class="checkout__section">
+          <legend class="checkout__legend"><span>4</span> Ödeme yöntemi</legend>
+          {% if methods %}
+          <div class="pay-methods">
+            {% for pm in methods %}
+            <label class="pay-method"><input type="radio" name="payment_method" value="{{ pm.code }}" {% if loop.first %}checked{% endif %}>
+              <span class="pay-method__body"><strong>{{ pm.label }}</strong><span>{{ pm.note }}</span></span></label>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="field-hint">Şu anda kullanılabilir ödeme yöntemi yok.</p>
+          {% endif %}
+          <label class="field"><span>Sipariş notu (isteğe bağlı)</span><textarea name="note" rows="2" maxlength="500"></textarea></label>
+        </fieldset>
+        <fieldset class="checkout__section">
+          <label class="check"><input type="checkbox" name="accept_terms" value="1"><span class="check__box">{% include "icons/check.svg" %}</span>
+            <span><a href="/sayfa/on-bilgilendirme-formu" target="_blank" rel="noopener">Ön Bilgilendirme Formu</a>'nu ve <a href="/sayfa/mesafeli-satis-sozlesmesi" target="_blank" rel="noopener">Mesafeli Satış Sözleşmesi</a>'ni okudum, onaylıyorum.</span></label>
+          <label class="check"><input type="checkbox" name="accept_kvkk" value="1"><span class="check__box">{% include "icons/check.svg" %}</span>
+            <span><a href="/sayfa/kvkk-aydinlatma-metni" target="_blank" rel="noopener">KVKK Aydınlatma Metni</a>'ni okudum; siparişimin işlenmesi için kişisel verilerimin kullanılacağını biliyorum.</span></label>
+        </fieldset>
+        <p class="form-message form-message--error" data-checkout-error hidden role="alert"></p>
+        <button type="submit" class="btn btn--dark btn--block btn--lg" data-checkout-submit {% if blockers or cart.has_issues %}disabled{% endif %}>
+          {% include "icons/lock.svg" %}<span data-add-label>Siparişi Onayla · {{ fmt_try(cart.total) }}</span></button>
+        <p class="summary__reassure">Siparişi onayladığınızda ödeme yükümlülüğü doğar. Bilgileriniz şifreli bağlantı ile iletilir.</p>
+      </form>
+
+      <aside class="checkout__summary" aria-label="Sipariş özeti">
+        <h2 class="section-title section-title--sm">Sipariş özeti</h2>
+        <ul class="mini-lines" role="list">
+          {% for line in cart.lines %}{% set x = line.variant %}
+          <li class="mini-line">
+            <span class="mini-line__media">{% if x.images %}<img src="{{ img(x.images[0], 160) }}" alt="" width="64" height="80" loading="lazy" data-cutout>{% endif %}<span class="mini-line__qty">{{ line.quantity }}</span></span>
+            <span class="mini-line__title">{{ x.title }}{% if x.color %}<small>{{ x.color }}</small>{% endif %}{% if line.issue %}<small class="neg">{{ line.issue }}</small>{% endif %}</span>
+            <span class="mini-line__total">{{ fmt_try(line.total) }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        <div class="summary">
+          <div class="summary__row"><span>Ara toplam</span><span>{{ fmt_try(cart.items_total) }}</span></div>
+          <div class="summary__row"><span>Kargo</span><span>{% if cart.shipping > 0 %}{{ fmt_try(cart.shipping) }}{% else %}Ücretsiz{% endif %}</span></div>
+          {% if cfg.cash_on_delivery_enabled and cfg.cash_on_delivery_fee > 0 %}<p class="summary__hint">Kapıda ödemede +{{ fmt_try(cfg.cash_on_delivery_fee) }} hizmet bedeli eklenir.</p>{% endif %}
+          <div class="summary__row summary__total"><span>Toplam</span><span>{{ fmt_try(cart.total) }}</span></div>
+          <p class="summary__note">Fiyatlara KDV dahildir.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+{% endblock %}

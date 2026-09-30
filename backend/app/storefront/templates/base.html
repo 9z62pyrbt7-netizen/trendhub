@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>{{ title }}</title>
+<meta name="description" content="{{ description }}">
+<link rel="canonical" href="{{ canonical }}">
+{% if noindex %}<meta name="robots" content="noindex,follow">{% endif %}
+<meta name="theme-color" content="#FBF8F3">
+<meta property="og:site_name" content="{{ BRAND }}">
+<meta property="og:locale" content="tr_TR">
+<meta property="og:type" content="{{ og_type }}">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ description }}">
+<meta property="og:url" content="{{ canonical }}">
+{% if og_image %}<meta property="og:image" content="{{ og_image if og_image.startswith('http') else base ~ og_image }}">{% endif %}
+<meta name="twitter:card" content="summary_large_image">
+{% block head_extra %}{% endblock %}
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/playfair-display-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/jost-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+{% block preload %}{% endblock %}
+<link rel="stylesheet" href="/static/sf.css?v={{ V }}">
+<script src="/static/sf.js?v={{ V }}" defer></script>
+</head>
+<body class="page-{% block page_class %}default{% endblock %}">
+<a class="skip-link" href="#icerik">İçeriğe geç</a>
+{% if cfg.announcement %}<div class="announcement"><p class="announcement__inner">{{ cfg.announcement }}</p></div>{% endif %}
+
+<div class="section-header">
+<header class="header{% block header_class %}{% endblock %}" data-header>
+  <div class="header__inner container">
+    <div class="header__left">
+      <button type="button" class="header__icon header__burger" data-drawer-open="menu" aria-controls="MenuDrawer" aria-expanded="false" aria-label="Menü">{% include "icons/menu.svg" %}</button>
+      <nav class="header__nav" aria-label="Ana menü">
+        <ul class="nav">
+          <li class="nav__item nav__item--has-children">
+            <a class="nav__link{% if path.startswith('/kategori') or path == '/urunler' %} is-active{% endif %}" href="/urunler">Kategoriler {% include "icons/chevron-down.svg" %}</a>
+            <div class="nav__dropdown"><ul>
+              <li><a href="/urunler">Tüm Çantalar</a></li>
+              {% for c in nav_categories %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}
+            </ul></div>
+          </li>
+          <li class="nav__item"><a class="nav__link{% if path == '/yeni-gelenler' %} is-active{% endif %}" href="/yeni-gelenler">Yeni Gelenler</a></li>
+          <li class="nav__item"><a class="nav__link{% if path == '/cok-satanlar' %} is-active{% endif %}" href="/cok-satanlar">Çok Satanlar</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="header__brand"><a href="/" class="header__logo wordmark">TRENDÇANTANIZ</a></div>
+    <div class="header__right">
+      <button type="button" class="header__icon" data-search-open aria-controls="SearchPanel" aria-expanded="false" aria-label="Ara">{% include "icons/search.svg" %}</button>
+      <a class="header__icon header__cart" href="/sepet" data-cart-open>
+        {% include "icons/bag.svg" %}
+        <span class="cart-count{% if not cart_count %} is-empty{% endif %}" data-cart-count aria-hidden="true">{{ cart_count }}</span>
+        <span class="visually-hidden">Sepet, <span data-cart-count-label>{{ cart_count }} ürün</span></span>
+      </a>
+    </div>
+  </div>
+  <div class="search-panel" id="SearchPanel" data-search-panel hidden>
+    <div class="container search-panel__inner">
+      <form action="/ara" method="get" role="search" class="search-form">
+        <label class="visually-hidden" for="HeaderSearch">Ara</label>
+        {% include "icons/search.svg" %}
+        <input id="HeaderSearch" class="search-form__input" type="search" name="q" placeholder="Çanta, renk veya model ara" autocomplete="off" spellcheck="false" data-predictive-input>
+        <button type="button" class="header__icon" data-search-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
+      </form>
+      <div class="predictive" data-predictive-results aria-live="polite"></div>
+    </div>
+  </div>
+</header>
+</div>
+
+<div class="drawer drawer--left" id="MenuDrawer" data-drawer="menu" aria-hidden="true">
+  <div class="drawer__overlay" data-drawer-close></div>
+  <div class="drawer__panel" role="dialog" aria-modal="true" aria-label="Menü" tabindex="-1">
+    <div class="drawer__head">
+      <span class="wordmark wordmark--sm">TRENDÇANTANIZ</span>
+      <button type="button" class="header__icon" data-drawer-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
+    </div>
+    <nav class="drawer__body mobile-nav" aria-label="Ana menü">
+      <ul>
+        <li><a href="/yeni-gelenler">Yeni Gelenler</a></li>
+        <li><a href="/cok-satanlar">Çok Satanlar</a></li>
+        <li><a href="/urunler">Tüm Çantalar</a></li>
+        {% if nav_categories %}
+        <li><details open><summary>Kategoriler {% include "icons/plus.svg" %}</summary>
+          <ul class="mobile-nav__sub">{% for c in nav_categories %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}</ul>
+        </details></li>
+        {% endif %}
+      </ul>
+    </nav>
+    <div class="drawer__foot mobile-nav__foot">
+      <a href="/iletisim" class="mobile-nav__util">{% include "icons/chat.svg" %} İletişim</a>
+      {% include "partials/social.html" %}
+    </div>
+  </div>
+</div>
+
+<main id="icerik" class="main" tabindex="-1">
+{% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__top">
+      <div class="footer__brand">
+        <a href="/" class="wordmark wordmark--lg">TRENDÇANTANIZ</a>
+        <p class="footer__tagline">Tarzını yanında taşı.</p>
+        {% include "partials/social.html" %}
+      </div>
+      <nav class="footer__col" aria-label="Alışveriş">
+        <p class="footer__heading">Alışveriş</p>
+        <ul>
+          <li><a href="/urunler">Tüm Çantalar</a></li>
+          <li><a href="/yeni-gelenler">Yeni Gelenler</a></li>
+          <li><a href="/cok-satanlar">Çok Satanlar</a></li>
+          {% for c in nav_categories[:4] %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}
+        </ul>
+      </nav>
+      <nav class="footer__col" aria-label="Bilgi">
+        <p class="footer__heading">Bilgi</p>
+        <ul>
+          {% for slug, (label, _req) in LEGAL_PAGES.items() %}{% if cfg.legal.get(slug) %}<li><a href="/sayfa/{{ slug }}">{{ label }}</a></li>{% endif %}{% endfor %}
+          <li><a href="/iletisim">İletişim</a></li>
+        </ul>
+      </nav>
+      <div class="footer__contact">
+        <p class="footer__heading">Müşteri Hizmetleri</p>
+        {% if cfg.seller.phone %}<p><a href="tel:{{ cfg.seller.phone|replace(' ', '') }}">{{ cfg.seller.phone }}</a></p>{% endif %}
+        {% if cfg.seller.email %}<p><a href="mailto:{{ cfg.seller.email }}">{{ cfg.seller.email }}</a></p>{% endif %}
+        {% if cfg.social.whatsapp %}<p><a href="https://wa.me/{{ cfg.social.whatsapp }}" target="_blank" rel="noopener">WhatsApp destek</a></p>{% endif %}
+        <p class="footer__note">Ödemeler şifreli bağlantı üzerinden alınır. Fiyatlara KDV dahildir.</p>
+      </div>
+    </div>
+    <div class="footer__bottom">
+      <p>&copy; {{ year() }} {{ cfg.seller.title or BRAND }}</p>
+      {% if cfg.seller.mersis %}<p>MERSİS: {{ cfg.seller.mersis }}</p>{% endif %}
+      <p class="footer__pay" aria-label="Para birimi">Tüm fiyatlar Türk Lirası (₺)</p>
+    </div>
+  </div>
+</footer>
+
+{% include "partials/cart_drawer.html" %}
+<div class="toast" data-toast role="status" aria-live="polite" hidden></div>
+
+<script type="application/ld+json">{{ org_jsonld|json }}</script>
+{% block jsonld %}{% endblock %}
+</body>
+</html>

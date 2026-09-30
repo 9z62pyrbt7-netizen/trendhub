@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% import "partials/macros.html" as m %}
+{% block page_class %}collection{% endblock %}
+{% block content %}
+<section class="collection">
+  <header class="collection__hero container">
+    <nav class="breadcrumb" aria-label="Sayfa yolu"><ol><li><a href="/">Ana sayfa</a></li><li aria-current="page">{{ heading }}</li></ol></nav>
+    <h1 class="page-title">{{ heading }}</h1>
+    {% if intro %}<p class="collection__desc">{{ intro }}</p>{% endif %}
+    {% if listing_path == '/ara' %}
+    <form action="/ara" method="get" role="search" class="search-form search-form--page">
+      <label class="visually-hidden" for="SearchPage">Ara</label>{% include "icons/search.svg" %}
+      <input id="SearchPage" class="search-form__input" type="search" name="q" value="{{ request.query_params.get('q', '') }}" placeholder="Çanta, renk veya model ara">
+      <button type="submit" class="btn btn--dark btn--sm">Ara</button>
+    </form>
+    {% endif %}
+  </header>
+  <div class="container">
+    {% if categories|length > 1 and listing_path != '/ara' %}
+    <nav class="chips chips--scroll" aria-label="Kategoriler">
+      <a class="chip{% if listing_path == '/urunler' %} is-active{% endif %}" href="/urunler">Tümü</a>
+      {% for c in categories %}<a class="chip{% if c.slug == active_cat %} is-active{% endif %}" href="/kategori/{{ c.slug }}">{{ c.label }} <span>{{ c.count }}</span></a>{% endfor %}
+    </nav>
+    {% endif %}
+    <form class="toolbar" method="get" action="{{ listing_path }}">
+      {% if listing_path == '/ara' %}<input type="hidden" name="q" value="{{ request.query_params.get('q', '') }}">{% endif %}
+      <p class="toolbar__total">{{ total }} ürün</p>
+      <div class="toolbar__sort">
+        <label for="SortBy">Sırala</label>
+        <div class="select">
+          <select id="SortBy" name="sirala" data-sort>
+            {% for k, label in SORTS.items() %}<option value="{{ k }}"{% if k == sort %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>{% include "icons/chevron-down.svg" %}
+        </div>
+      </div>
+      <noscript><button type="submit" class="btn btn--ghost btn--sm">Uygula</button></noscript>
+    </form>
+    {% if groups %}
+    <ul class="grid" role="list" data-count="{{ groups|length }}">
+      {% for g in groups %}
+      <li class="grid__item" data-reveal style="--i: {{ loop.index0 % 4 }}">{{ m.card(g, '(min-width: 1200px) 25vw, (min-width: 750px) 33vw, 50vw', priority=loop.index <= 2 and page == 1, index=loop.index0 % 4) }}</li>
+      {% endfor %}
+    </ul>
+    {% if pages > 1 %}
+    <nav class="pagination" aria-label="Sayfalar">
+      {% set qs = ('&sirala=' ~ sort) if sort else '' %}
+      {% if page > 1 %}<a class="round-btn" href="{{ listing_path }}?sayfa={{ page - 1 }}{{ qs }}" aria-label="Önceki">{% include "icons/arrow-left.svg" %}</a>{% endif %}
+      <ol>{% for n in range(1, pages + 1) %}<li>{% if n == page %}<span aria-current="page">{{ n }}</span>{% else %}<a href="{{ listing_path }}?sayfa={{ n }}{{ qs }}">{{ n }}</a>{% endif %}</li>{% endfor %}</ol>
+      {% if page < pages %}<a class="round-btn" href="{{ listing_path }}?sayfa={{ page + 1 }}{{ qs }}" aria-label="Sonraki">{% include "icons/arrow-right.svg" %}</a>{% endif %}
+    </nav>
+    {% endif %}
+    {% else %}
+    <div class="empty">
+      <p class="empty__title">{% if listing_path == '/ara' and request.query_params.get('q') %}Aramanızla eşleşen ürün bulunamadı.{% elif listing_path == '/ara' %}Ne aradığınızı yazın.{% else %}Bu bölümde henüz ürün yok.{% endif %}</p>
+      <a class="btn btn--dark" href="/urunler">Tüm çantalar</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% include "partials/trust.html" %}
+{% endblock %}

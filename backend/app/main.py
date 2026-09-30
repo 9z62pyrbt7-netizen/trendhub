@@ -12,7 +12,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import ads, alerts, analytics, auth, catalog, integrations, orders, suppliers, system, transfer
+from .api import (ads, alerts, analytics, auth, catalog, integrations, orders, storefront_admin, suppliers, system,
+                  transfer)
 from .config import get_settings
 from .db import transaction
 from .logging_setup import configure_logging
@@ -87,7 +88,7 @@ def create_app() -> FastAPI:
             "technical": f"Hata referansı: {ref} ({exc.__class__.__name__}). Ayrıntı sunucu kayıtlarında."})
 
     for r in (auth.router, analytics.router, orders.router, catalog.router, suppliers.router,
-              transfer.router, integrations.router, system.router, alerts.router, ads.router):
+              transfer.router, integrations.router, system.router, alerts.router, ads.router, storefront_admin.router):
         app.include_router(r)
     return app
 
