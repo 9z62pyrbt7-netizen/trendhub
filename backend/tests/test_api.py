@@ -194,7 +194,7 @@ def test_finance_reports_and_csv(client, engine):
 def test_system_health_jobs_and_events(client, engine):
     login(client)
     h = client.get("/api/system/health").json()
-    assert h["database"]["migration"] == "0011_ai_learning"
+    assert h["database"]["migration"] == "0012_platform_data"
     assert h["worker_alive"] is False and h["status"] == "degraded"
     assert h["config"]["connector_write_enabled"] is False
     from app.services import jobs

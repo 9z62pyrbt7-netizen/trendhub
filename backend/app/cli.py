@@ -72,7 +72,17 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("reset-password")
     r.add_argument("--username", required=True)
     sub.add_parser("has-admin", help="Aktif yönetici varsa 0, yoksa 3 ile çıkar (deploy betiği için)")
+    t = sub.add_parser("trendyol-smoke", help="Gerçek Trendyol hesabıyla SALT OKUNUR servis testi (kişisel veri yazdırmaz)")
+    t.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
+
+    if a.cmd == "trendyol-smoke":
+        import json as _json
+
+        from .services.platform import smoke
+        rep = smoke.run()
+        print(_json.dumps(rep, ensure_ascii=False, indent=2, default=str) if a.json else smoke.format_table(rep))
+        return 0 if rep.get("configured") else 4
 
     if a.cmd == "healthcheck":
         return healthcheck(a.target)

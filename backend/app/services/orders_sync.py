@@ -31,9 +31,13 @@ class SyncStats:
     unchanged: int = 0
     status_changes: int = 0
     errors: list[str] = field(default_factory=list)
+    # (sipariş id, ORDER_CREATED | ORDER_UPDATED, iç statü) — iç olay modeli için; iş sonucuna yazılmaz
+    changes: list[tuple] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        out = asdict(self)
+        out.pop("changes", None)
+        return out
 
 
 def payload_hash(order: NormalizedOrder) -> str:
@@ -97,6 +101,7 @@ def upsert_order(conn: Connection, store_id: int, order: NormalizedOrder, stats:
         """), {"o": new_id, "to": order.internal_status, "raw": order.marketplace_status})
         stats.created += 1
         order_id = int(new_id)
+        stats.changes.append((order_id, "ORDER_CREATED", order.internal_status))
     else:
         order_id = int(existing["id"])
         if existing["payload_hash"] == h:
@@ -106,7 +111,8 @@ def upsert_order(conn: Connection, store_id: int, order: NormalizedOrder, stats:
         decision = resolve_sync_status(existing["internal_status"], order.internal_status)
         conn.execute(text("""
             UPDATE orders SET status = :raw, internal_status = :internal, order_date = :date,
-                   currency = :cur, customer_name = :cname, customer_city = :ccity,
+                   currency = :cur, customer_name = COALESCE(:cname, customer_name),
+                   customer_city = COALESCE(:ccity, customer_city),
                    review_reason = CASE WHEN :internal = 'needs_review'
                                         THEN COALESCE(:review, review_reason) ELSE review_reason END,
                    payload_hash = :h, last_synced_at = NOW(), updated_at = NOW()
@@ -121,6 +127,7 @@ def upsert_order(conn: Connection, store_id: int, order: NormalizedOrder, stats:
             """), {"o": order_id, "from": existing["internal_status"], "to": decision.status,
                    "raw": order.marketplace_status})
             stats.status_changes += 1
+            stats.changes.append((order_id, "ORDER_UPDATED", decision.status))
         stats.updated += 1
 
     for line in order.lines:

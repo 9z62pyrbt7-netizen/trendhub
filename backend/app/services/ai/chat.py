@@ -146,7 +146,7 @@ def tool_capital(conn: Connection, hypothetical_amount: float | None = None) -> 
     from .capital import position
     p = position(conn)
     out = {k: p[k] for k in ("usable", "justified", "unused", "reserve_required", "liabilities", "pending_payout_not_counted",
-                             "recommendation", "justified_by_category", "efficiency")}
+                             "recommendation", "justified_by_category", "efficiency", "cash_structure")}
     if hypothetical_amount:
         amt = d(hypothetical_amount)
         out["hypothetical"] = {"amount": amt, "justified": min(amt, p["justified"]),
@@ -173,6 +173,23 @@ def tool_decision_quality(conn: Connection, days: int = 30) -> dict:
             "lessons": r["lessons"], "awaiting_measurement": r["awaiting_measurement"], "note": r["note"]}
 
 
+def tool_customer_signals(conn: Connection, days: int = 30) -> dict:
+    """Gerçek müşteri soruları ve iadelerinden sinyaller. Müşteri adı/id içermez; metinler maskelenmiştir."""
+    from ..platform.cx import analyze
+    r = analyze(conn, max(7, min(int(days or 30), 90)))
+    return {k: r[k] for k in ("days", "min_sample", "total_questions", "categories", "total_returns", "info_gaps", "complaints",
+                              "has_data", "note")} | {"products": [
+        {k: p[k] for k in ("name", "questions", "unanswered", "categories", "returns", "units_sold", "return_rate",
+                           "return_rate_status", "return_reasons")} for p in r["products"][:10]]}
+
+
+def tool_data_sources(conn: Connection) -> dict:
+    """Her veri kaynağının bağlantı durumu ve tazeliği (FRESH / STALE / DEGRADED / ERROR)."""
+    from ..platform.sources import data_sources
+    keep = ("code", "label", "kind", "connection", "freshness", "last_successful_sync", "age_hours", "error_count")
+    return {"sources": [{k: x.get(k) for k in keep} for x in data_sources(conn)]}
+
+
 def tool_brief(conn: Connection) -> dict:
     from .ceo import build_brief
     return build_brief(conn)
@@ -197,6 +214,9 @@ TOOLS = {
     "get_pending_approvals": (tool_approvals, "Onay bekleyen, uygulanmayı bekleyen ve bloke edilen öneriler.", {}),
     "get_decision_quality": (tool_decision_quality, "Sahip ve AI kararlarının ölçülmüş sonuçları, tekrarlanan hatalar.",
                              {"days": {"type": "integer"}}),
+    "get_customer_signals": (tool_customer_signals, "Gerçek müşteri soruları (kategori) ve iade sebepleri; ürün sayfası bilgi eksikleri.",
+                             {"days": {"type": "integer"}}),
+    "get_data_sources": (tool_data_sources, "Veri kaynaklarının tazeliği; finans/iade/soru verisi güncel mi.", {}),
 }
 
 
@@ -204,6 +224,17 @@ def call_tool(conn: Connection, name: str, args: dict) -> dict:
     fn, _desc, schema = TOOLS[name]
     clean = {k: v for k, v in (args or {}).items() if k in schema}
     return fn(conn, **clean)
+
+
+def tool_payload_for_llm(conn: Connection, name: str, args: dict) -> str:
+    """LLM'e giden araç çıktısı: JSON → kişisel veri maskesi → PII kontrolü (müşteri adı / telefon / e-posta / IBAN).
+    Araçlar zaten müşteri alanı döndürmez; bu ikinci savunma hattıdır."""
+    from ..platform.pii import assert_no_pii, scrub
+    content = scrub(json.dumps(call_tool(conn, name, args), ensure_ascii=False, default=str))[:30000]
+    names = [r["customer_name"] for r in rows(conn, """SELECT DISTINCT customer_name FROM orders
+                                                         WHERE customer_name IS NOT NULL AND length(customer_name) >= 5
+                                                         ORDER BY customer_name LIMIT 2000""")]
+    return assert_no_pii(content, names)
 
 
 # ------------------------------------------------------------------ kural motoru
@@ -231,25 +262,50 @@ SOURCES = {
     "get_ads_analysis": "ad_spend + ad_performance + ürün marjları",
     "get_ad_budget_plan": "Reklam ajanı kararları + eşikler",
     "get_inventory_risks": "Ürün stoğu, tedarikçi stoğu, tüm kanal satışları",
-    "get_capital_position": "Elle girilen kasa/borç hesapları + açık öneriler",
+    "get_capital_position": "Kasa/borç: elle girilen · hakediş/alacak: Trendyol Finance (cari hesap) · açık öneriler",
     "get_pending_approvals": "ai_proposals",
     "get_decision_quality": "Karar günlüğü + ölçülmüş sonuçlar (ai_decision_outcomes)",
     "get_daily_brief": "CEO günlük özeti",
+    "get_customer_signals": "Trendyol Soru-Cevap + Trendyol İadeler (gerçek kayıtlar)",
+    "get_data_sources": "Kaynak tazeliği (sync_state)",
 }
 
 
-def _today_answer(t: dict) -> str:
+def provenance_lines(conn: Connection, start, end) -> list[str]:
+    """Net kârın kaynağı: hangi bileşen gerçek pazaryeri verisi, hangisi tahmin."""
+    from ..platform.finance import profit_provenance
+    pv = profit_provenance(conn, start, end)
+    if not pv["items"]:
+        return []
+    comm = ("Trendyol Finance (gerçek)" if pv["estimated_commission_items"] == 0 else
+            f"Trendyol Finance {pv['actual_commission_items']}/{pv['items']} kalem gerçek, kalanı TAHMİN (oran)"
+            if pv["actual_commission_items"] else "TAHMİN (komisyon oranı; gerçek finans kaydı henüz yok)")
+    ship = (f"Trendyol kargo faturası ({pv['actual_shipping_orders']}/{pv['orders']} sipariş gerçek)" if pv["actual_shipping_orders"]
+            else "TAHMİN (varsayılan kargo/desi)")
+    return ["Kaynak:", "• satış: Trendyol Orders", f"• komisyon: {comm}", f"• kargo: {ship}",
+            "• ürün maliyeti: tedarikçi / yerel maliyet kaydı", "• reklam: elle girilen reklam verisi (Trendyol reklam API'si bağlı değil)"]
+
+
+def _today_answer(t: dict, conn: Connection | None = None) -> str:
     c, avg = t["today"], t["daily_average_7d"]
     if not c["orders"]:
         return f"{NO_DATA}: bugün henüz kayıtlı sipariş yok (son senkron verisine göre)."
-    lines = [f"Bugün şu ana kadar {c['orders']} sipariş; tahmini net kâr {_money(c['net_profit'])} "
+    prov = []
+    label = "tahmini net kâr"
+    if conn is not None:
+        w = Window(1, end_date=today())
+        prov = provenance_lines(conn, w.start, w.end)
+        from ..platform.finance import profit_provenance
+        st = profit_provenance(conn, w.start, w.end)["status"]
+        label = {"ACTUAL": "gerçekleşen net kâr", "PARTIAL": "net kâr (kısmen tahmini)"}.get(st, "tahmini net kâr")
+    lines = [f"Bugün şu ana kadar {c['orders']} sipariş; {label} {_money(c['net_profit'])} "
              f"(net satış {_money(c['net_sales'])}, net marj {_pct(c['net_margin'])}). Son 7 günün günlük ortalaması {_money(avg['net_profit'])}."]
     if c["missing_cost_orders"]:
         lines.append(f"Uyarı: {c['missing_cost_orders']} siparişte ürün maliyeti eksik; kâr olduğundan yüksek görünür.")
     for q in t["data_quality"]:
-        if q["code"] == "orders_stale":
+        if q["code"] in ("orders_stale", "finance_stale"):
             lines.append("Uyarı: " + q["message"])
-    return "\n".join(lines)
+    return "\n".join(lines + prov)
 
 
 def _why_today(t: dict) -> str:
@@ -293,7 +349,7 @@ def rules_answer(conn: Connection, question: str, last_tools: list[str] | None =
         return "Önceki eş döneme göre kârı aşağı çeken kalemler: " + ", ".join(
             f"{x['component']} ({_money(x['profit_effect'])})" for x in neg) + ".", used
     if "bugün" in q and re.search(r"k[âa]r|kazan|ne kadar", q):
-        return _today_answer(use("get_today_summary")), used
+        return _today_answer(use("get_today_summary"), conn), used
     if re.search(r"en kötü|en zayıf|en çok zarar", q):
         p = use("get_products", limit=50)
         judged = [x for x in p["products"] if x["class"] != "NO_DATA"]
@@ -312,8 +368,37 @@ def rules_answer(conn: Connection, question: str, last_tools: list[str] | None =
             lines.append(c["hypothetical"]["message"])
         if c["justified_by_category"]:
             lines.append("Gerekçelendirilmiş kullanım: " + ", ".join(f"{x['label']} {_money(x['amount'])}" for x in c["justified_by_category"]) + ".")
-        if c["pending_payout_not_counted"]:
-            lines.append(f"Bekleyen hakediş {_money(c['pending_payout_not_counted'])} henüz kasada olmadığı için kullanılabilir sayılmadı.")
+        cs = c["cash_structure"]
+        pend = cs["pending_marketplace_payout"]
+        if pend["amount"]:
+            src = "Trendyol cari hesap ekstresi" if pend["kind"] == "ACTUAL" else "elle girilen"
+            lines.append(f"Bekleyen hakediş {_money(pend['amount'])} ({src}) henüz kasada olmadığı için harcanabilir sayılmadı.")
+        if cs["marketplace_receivable"]["amount"]:
+            lines.append(f"Vadesi gelmemiş pazaryeri alacağı {_money(cs['marketplace_receivable']['amount'])} de harcanabilir değil.")
+        return "\n".join(lines), used
+    if any(w in q for w in ("hakediş", "hakedis", "ödeme ne zaman", "trendyol ödeme")):
+        c = use("get_capital_position")
+        cs = c["cash_structure"]
+        pend = cs["pending_marketplace_payout"]
+        if pend["kind"] != "ACTUAL":
+            return (f"{NO_DATA}: Trendyol finans (cari hesap) verisi henüz alınmadı"
+                    + (f"; elle girilen bekleyen hakediş {_money(pend['amount'])}." if pend["amount"] else ".")), used
+        nxt = f" Sonraki ödeme tarihi: {pend['next_payment_date']:%d.%m.%Y}." if pend.get("next_payment_date") else ""
+        warn = "" if pend.get("freshness") == "FRESH" else f" Uyarı: finans verisi {pend.get('freshness')}."
+        return (f"Trendyol'da ödenmemiş hakediş: vadesi yakın {_money(pend['amount'])}, vadesi gelmemiş {_money(cs['marketplace_receivable']['amount'])}."
+                f"{nxt} Bu tutarlar kasaya girene kadar harcanabilir sermaye sayılmaz.{warn}\nKaynak: Trendyol Finance (cari hesap ekstresi)."), used
+    if any(w in q for w in ("müşteri", "soru", "iade", "şikayet", "şikâyet")):
+        r = use("get_customer_signals", days=30)
+        if not r["has_data"]:
+            return f"{NO_DATA}: son 30 günde kayıtlı müşteri sorusu veya iade yok (Trendyol soru/iade senkronu henüz veri getirmedi).", used
+        lines = [f"Son {r['days']} günde {r['total_questions']} müşteri sorusu, {r['total_returns']} iade kalemi."]
+        if r["categories"]:
+            lines.append("Soru konuları: " + ", ".join(
+                f"{x['label']} {x['count']}" + (f" (%{x['share'] * 100:.0f})" if x["share"] is not None else "") for x in r["categories"][:5])
+                + ("" if any(x["share"] is not None for x in r["categories"]) else f" — yüzde için örnek yetersiz (en az {r['min_sample']})") + ".")
+        lines += [f"• {g['text']}" for g in r["info_gaps"][:3]]
+        lines += [f"• İade: {c['name']} — {c['count']} kez '{c['reason']}'" for c in r["complaints"][:3]]
+        lines.append("Cevaplar otomatik gönderilmez; öneriler Müşteri deneyimi ekranında.")
         return "\n".join(lines), used
     if "bütçe" in q or ("reklam" in q and amount):
         if amount:
@@ -366,7 +451,8 @@ def rules_answer(conn: Connection, question: str, last_tools: list[str] | None =
         bad = [x for x in r["worst_products"] if x["profit_change"] < 0][:3]
         if bad:
             lines.append("En çok kâr kaybeden ürünler: " + ", ".join(f"{x['name']} ({_money(x['profit_change'])})" for x in bad) + ".")
-        return "\n".join(lines), used
+        w = Window(int(r["window_days"]), end_date=today() - timedelta(days=1))
+        return "\n".join(lines + provenance_lines(conn, w.start, w.end)), used
     if "stok" in q:
         r = use("get_inventory_risks")
         if not r["products"]:
@@ -412,7 +498,10 @@ Tek hedefin işletmenin sürdürülebilir NET KÂRINI artırmak; ciroyu tek baş
 
 Kurallar:
 - Her rakamı araçlardan al. Araçta olmayan veriyi tahmin etme, uydurma; "Bunu söylemek için yeterli verim yok" de ve hangi verinin eksik olduğunu söyle.
-- Finans rakamları tahminidir (hakediş verisi bağlı değil); bunu gerektiğinde belirt. Kâr ile nakit aynı şey değildir.
+- Kâr ile nakit aynı şey değildir. Bekleyen Trendyol hakedişi ve alacak harcanabilir sermaye DEĞİLDİR.
+- Rakamın gerçek mi tahmini mi olduğunu araç çıktısından (provenance / kind: ACTUAL / ESTIMATED / MANUAL) söyle; tahmini kârı asla gerçekleşmiş kâr gibi anlatma.
+- Bir veri kaynağı STALE / ERROR ise o veriye dayanarak para harcamayı önerme ve bunu açıkça söyle.
+- Müşteri kişisel verisi (ad, telefon, adres) sende yok ve istenmez; müşteriye cevap gönderemezsin, yalnızca öneri yazabilirsin.
 - Reklamda ROAS tek başına karar ölçütü değildir; reklam sonrası net kâra ve net marja bak.
 - Mevcut sermayenin tamamını kullanmayı önermek zorunda değilsin; kanıt yoksa "şu anda ek sermaye kullanmayı önermiyorum" de.
 - İşletme sahibini memnun etmeye çalışma. Kanıt sahibin tercihinin aleyhineyse bunu açıkça ve saygılı biçimde söyle.
@@ -459,7 +548,7 @@ def claude_answer(conn: Connection, question: str, history: list[dict]) -> tuple
             try:
                 if b.name not in TOOLS:
                     raise KeyError(b.name)
-                content = json.dumps(call_tool(conn, b.name, dict(b.input or {})), ensure_ascii=False, default=str)[:30000]
+                content = tool_payload_for_llm(conn, b.name, dict(b.input or {}))
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": content})
             except Exception as exc:  # noqa: BLE001
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": f"Hata: {exc}", "is_error": True})

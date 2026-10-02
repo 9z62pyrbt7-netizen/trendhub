@@ -2384,7 +2384,8 @@ async function sfSettings(box) {
 
 // ---- AI Control Center (öneri + onay; V1'de hiçbir platform aksiyonu otomatik uygulanmaz)
 const AI_TABS = [['brief', 'Özet'], ['chat', 'CEO ile Konuş'], ['approvals', 'Onaylar'], ['profit', 'Kâr Merkezi'], ['ads', 'Reklam'],
-  ['inventory', 'Stok'], ['capital', 'Sermaye'], ['journal', 'Karar Günlüğü'], ['activity', 'Ajan Hareketleri'], ['risk', 'Risk Merkezi'],
+  ['inventory', 'Stok'], ['capital', 'Sermaye'], ['finance', 'Finans / Nakit'], ['cx', 'Müşteri Deneyimi'], ['sources', 'Veri Kaynakları'],
+  ['journal', 'Karar Günlüğü'], ['activity', 'Ajan Hareketleri'], ['risk', 'Risk Merkezi'],
   ['agents', 'Ajanlar'], ['settings', 'Ayarlar']];
 const AI_HEALTH = { RUNNING: ['Çalışıyor', 'tone-info'], IDLE: ['Hazır', 'tone-good'], DEGRADED: ['Kısıtlı veri', 'tone-warn'], ERROR: ['Hata', 'tone-bad'],
   STOPPED: ['Kapalı', ''], RUNNING_READ_ONLY: ['Salt analiz (acil durdurma)', 'tone-warn'], UNAVAILABLE: ['Veri kaynağı yok', ''] };
@@ -2432,6 +2433,7 @@ PAGES.ai = {
     });
     const box = $('#ai-body');
     const fn = { brief: aiBrief, chat: aiChat, approvals: aiApprovals, profit: aiProfit, ads: aiAds, inventory: aiInventory, capital: aiCapital,
+      finance: aiFinance, cx: aiCx, sources: aiSources,
       journal: aiJournal, activity: aiActivity, risk: aiRisk, agents: aiAgents, settings: aiSettings }[tab] || aiBrief;
     return fn(box, ov);
   },
@@ -2444,7 +2446,8 @@ async function aiBrief(box, ov) {
   box.innerHTML = renderVal(html`
     <div class="grid grid-4 ai-kpis">
       ${kpi('Net kâr (7 gün)', money0(k.net_profit_7d), html`Dün ${money0(k.net_profit_yesterday)} · marj ${pct(k.net_margin_7d)}`, signClass(k.net_profit_7d), TAHMINI)}
-      ${kpi('Kullanılabilir nakit', k.cash_usable === null ? '—' : money0(k.cash_usable), k.cash_usable === null ? html`<a href="#/ai?tab=capital">Kasa bilgisi gir →</a>` : 'Borç, rezerv ve hakediş hariç')}
+      ${kpi('Kullanılabilir nakit', k.cash_usable === null ? '—' : money0(k.cash_usable), k.cash_usable === null ? html`<a href="#/ai?tab=capital">Kasa bilgisi gir →</a>`
+        : (Number(k.pending_payout) ? html`Bekleyen hakediş ${money0(k.pending_payout)} <b>dahil değil</b>` : 'Borç, rezerv ve hakediş hariç'))}
       ${kpi('Kullanılan sermaye', money0(k.capital_used), `Bekleyen öneri: ${money0(k.capital_pending)}`)}
       ${kpi('Kullanılmayan sermaye', k.capital_unused === null ? '—' : money0(k.capital_unused), 'Kanıt yoksa kasada kalır')}
     </div>
@@ -2622,6 +2625,97 @@ async function aiCapital(box) {
     if (!confirm('Hesap kaydı silinsin mi?')) return;
     try { await api(`/api/ai/capital/accounts/${b.dataset.del}`, { method: 'DELETE' }); aiCapital(box); } catch (e) { fail(e); }
   }));
+}
+
+const FRESH_TONE = { FRESH: ['Güncel', 'tone-good'], STALE: ['Bayat', 'tone-bad'], DEGRADED: ['Kısıtlı (son deneme hatalı)', 'tone-warn'],
+  ERROR: ['Hata', 'tone-bad'], NEVER: ['Veri yok', ''] };
+const CONN_TR = { CONNECTED: 'Bağlı', PERMISSION_DENIED: 'Yetki yok', NO_DATA: 'Bağlı · veri yok', UNSUPPORTED: 'Desteklenmiyor', ERROR: 'Hata',
+  NOT_CONFIGURED: 'Bağlı değil', DISABLED: 'Kapalı (TRENDYOL_EXTENDED_READ)', NEVER: 'Henüz çalışmadı', MANUAL: 'Elle', MISSING: 'Girilmedi',
+  LOCAL: 'Yerel', RECEIVING: 'Olay alınıyor', NO_EVENTS: 'Olay yok' };
+const freshBadge = (f) => html`<span class="badge ${(FRESH_TONE[f] || ['', ''])[1]}">${(FRESH_TONE[f] || [f])[0]}</span>`;
+const KIND_TONE = { ACTUAL: ['Gerçek', 'tone-good'], MANUAL: ['Elle', 'tone-info'], ESTIMATED: ['Tahmin', 'tone-warn'], UNKNOWN: ['Bilinmiyor', ''],
+  PARTIAL: ['Kısmen gerçek', 'tone-warn'] };
+const kindBadge = (k) => html`<span class="badge ${(KIND_TONE[k] || ['', ''])[1]}">${(KIND_TONE[k] || [k])[0]}</span>`;
+
+async function aiFinance(box) {
+  const f = await api('/api/ai/finance');
+  const cs = f.cash_structure;
+  const pv = f.provenance;
+  const line = (label, v, kind, src) => html`<tr><td>${label}</td><td class="r num">${v === null || v === undefined ? '—' : money(v)}</td><td>${kind ? kindBadge(kind) : ''}</td><td class="small muted">${src || ''}</td></tr>`;
+  box.innerHTML = renderVal(html`
+    ${!f.status.connected ? html`<div class="notice warn" style="margin-bottom:16px">Trendyol finans (cari hesap) verisi henüz alınmadı. Bekleyen hakediş elle girilen değere dayanıyor; komisyon ve kargo TAHMİN.
+      Canlıda <code>python -m app.cli trendyol-smoke</code> başarılı olunca <code>TRENDYOL_EXTENDED_READ=true</code> ile açılır.</div>`
+      : html`<div class="notice ${f.status.freshness === 'FRESH' ? 'info' : 'bad'}" style="margin-bottom:16px">Finans verisi: ${freshBadge(f.status.freshness)}
+        son başarılı senkron ${f.status.age_hours ?? '—'} saat önce (sınır ${f.status.stale_hours} saat). ${f.status.freshness === 'FRESH' ? '' : 'Bu durumda CEO ek harcama önermez.'}</div>`}
+    <div class="grid grid-4">
+      ${kpi('Harcanabilir sermaye', cs.deployable_capital.amount === null ? '—' : money0(cs.deployable_capital.amount), 'Yalnızca kasadan')}
+      ${kpi('Bekleyen hakediş', money0(cs.pending_marketplace_payout.amount), cs.pending_marketplace_payout.next_payment_date ? `Sonraki ödeme ${date(cs.pending_marketplace_payout.next_payment_date)}` : 'Harcanabilir DEĞİL')}
+      ${kpi('Pazaryeri alacağı', cs.marketplace_receivable.amount === null ? '—' : money0(cs.marketplace_receivable.amount), 'Vadesi gelmemiş')}
+      ${kpi('Toplam para', cs.total_money.amount === null ? '—' : money0(cs.total_money.amount), 'Toplam para ≠ harcanabilir sermaye')}
+    </div>
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Nakit yapısı</h3><div class="table-wrap mt"><table><tbody>
+        ${line('Kullanılabilir nakit (kasa/banka)', cs.available_cash.amount, cs.available_cash.kind, cs.available_cash.source)}
+        ${line('Bekleyen pazaryeri hakedişi', cs.pending_marketplace_payout.amount, cs.pending_marketplace_payout.kind, cs.pending_marketplace_payout.source)}
+        ${line('Pazaryeri alacağı', cs.marketplace_receivable.amount, cs.marketplace_receivable.kind, cs.marketplace_receivable.source)}
+        ${line('Bilinen borçlar', cs.known_liabilities.amount, 'MANUAL', `Reklam taahhüdü ${money(cs.known_liabilities.advertising_commitments)}`)}
+        ${line('Ayrılmış sermaye + rezerv', cs.reserved_capital.amount, null, `Ayrılmış ${money(cs.reserved_capital.reserved)} · rezerv ${money(cs.reserved_capital.cash_reserve)}`)}
+        <tr><td><b>Harcanabilir sermaye</b></td><td class="r num"><b>${cs.deployable_capital.amount === null ? '—' : money(cs.deployable_capital.amount)}</b></td><td></td><td class="small muted">${cs.deployable_capital.rule}</td></tr>
+      </tbody></table></div></div>
+      <div class="card"><h3>Kârın kaynağı (${f.window.days} gün)</h3>
+        <p class="mt">${kindBadge(pv.status)} ${pv.items ? html`${num(pv.actual_commission_items)}/${num(pv.items)} kalemde komisyon <b>gerçek Trendyol kesintisi</b>; ${num(pv.estimated_commission_items)} kalem oranla tahmin.` : html`<span class="muted">Dönemde sipariş yok.</span>`}</p>
+        <dl class="kv small mt"><dt>Gerçek komisyon</dt><dd>${money(pv.actual_commission)}</dd><dt>Tahmini komisyon</dt><dd>${money(pv.estimated_commission)}</dd>
+          <dt>Gerçek kargo (kargo faturası)</dt><dd>${num(pv.actual_shipping_orders)}/${num(pv.orders)} sipariş</dd><dt>Tamamen gerçek finanslı sipariş</dt><dd>${num(pv.fully_actual_orders)}</dd></dl>
+        ${f.payout.reconciliation ? html`<p class="small mt">Mutabakat (son ödeme ${f.payout.reconciliation.payment_order_id}): ödenen ${money(f.payout.reconciliation.paid)}, defter ${money(f.payout.reconciliation.ledger_net)},
+          fark <b class="${Math.abs(Number(f.payout.reconciliation.difference)) > 1 ? 'neg' : 'pos'}">${money(f.payout.reconciliation.difference)}</b></p>` : ''}
+        ${f.sign_check.checked ? html`<p class="small muted">İşaret kontrolü: ${num(f.sign_check.checked)} kayıtta net tutar ↔ sellerRevenue, ${num(f.sign_check.mismatch)} uyumsuz.</p>` : ''}
+        ${f.payout.overdue_unverified ? html`<p class="small warn-text">${num(f.payout.overdue_unverified)} kaydın vadesi 14 günden fazla geçmiş ama ödeme talimatı görünmüyor; bekleyen hakedişe dahil edilmedi.</p>` : ''}</div>
+    </div>
+    <div class="card mt"><div class="card-head"><div><h2>Trendyol cari hesap kayıtları</h2><p>Kâr tarafına yalnızca eşleşen satış/iade/kargo kayıtları aktarılır; diğerleri nakit tarafındadır.</p></div></div>
+      ${f.by_type.length ? html`<div class="table-wrap"><table><thead><tr><th>Kaynak</th><th>Tür</th><th class="r">Kayıt</th><th class="r">Alacak</th><th class="r">Borç</th><th class="r">Komisyon</th><th class="r">Ödenmemiş</th><th class="r">Kâra aktarılan</th></tr></thead><tbody>
+        ${f.by_type.map((x) => html`<tr><td>${x.source}</td><td>${x.transaction_type}</td><td class="r num">${num(x.n)}</td><td class="r num">${money(x.credit)}</td><td class="r num">${money(x.debt)}</td>
+          <td class="r num">${x.commission === null ? '—' : money(x.commission)}</td><td class="r num">${num(x.unpaid)}</td><td class="r num">${num(x.applied)}</td></tr>`)}</tbody></table></div>`
+        : empty('Kayıt yok', 'Trendyol finans senkronu çalıştığında cari hesap kayıtları burada görünür.')}</div>`);
+}
+
+async function aiCx(box) {
+  const d = await api('/api/ai/cx');
+  box.innerHTML = renderVal(html`
+    <div class="notice info" style="margin-bottom:16px">${d.note} Yüzde yalnızca ürün başına en az ${d.min_sample} kayıt varsa gösterilir; altında <b>yetersiz örnek</b> yazar.</div>
+    ${!d.has_data ? empty('Henüz müşteri sinyali yok', 'Trendyol soru ve iade senkronu veri getirdiğinde gerçek sorular ve iade sebepleri burada analiz edilir.') : html`
+    <div class="grid grid-3">${kpi(`Soru (${d.days} gün)`, num(d.total_questions), d.categories.length ? `En çok: ${d.categories[0].label}` : '')}
+      ${kpi('İade kalemi', num(d.total_returns), d.complaints.length ? `Şikâyet: ${d.complaints[0].reason}` : '')}
+      ${kpi('Cevapsız soru', num(d.unanswered.length), 'Cevap otomatik gönderilmez')}</div>
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Ürün sayfası bilgi eksikleri</h3>${d.info_gaps.length ? html`<ul class="small mt">${d.info_gaps.map((g) => html`<li>${g.text}</li>`)}</ul>` : html`<p class="muted small mt">Tekrarlayan bilgi sorusu yok.</p>`}</div>
+      <div class="card"><h3>İade sebepleri / şikâyetler</h3>${d.complaints.length ? html`<ul class="small mt">${d.complaints.map((c) => html`<li><b>${c.name}</b>: ${c.count} × ${c.reason}</li>`)}</ul>` : html`<p class="muted small mt">Şikâyet niteliğinde iade sebebi yok.</p>`}</div>
+    </div>
+    <div class="card mt"><h3>Ürün bazında</h3><div class="table-wrap mt"><table><thead><tr><th>Ürün</th><th class="r">Soru</th><th>Konular</th><th class="r">İade</th><th>İade oranı</th></tr></thead><tbody>
+      ${d.products.map((p) => html`<tr><td>${p.name || '—'}</td><td class="r num">${num(p.questions)}</td>
+        <td class="small">${p.categories.map((c) => html`${c.label} ${c.count}${c.share !== null ? html` (${pct(c.share)})` : ''}; `)}${p.categories.length && p.categories.every((c) => c.share === null) ? html`<span class="muted">yetersiz örnek</span>` : ''}</td>
+        <td class="r num">${num(p.returns)}</td><td>${p.return_rate === null ? html`<span class="muted small">${p.returns ? 'yetersiz örnek' : '—'}</span>` : pct(p.return_rate)}</td></tr>`)}</tbody></table></div></div>
+    <div class="card mt"><div class="card-head"><div><h2>Cevapsız sorular ve öneri</h2><p>AI yalnızca öneri yazar; gönderim Trendyol satıcı panelinden sahibin onayıyla yapılır.</p></div></div>
+      ${d.unanswered.length ? html`<div class="table-wrap"><table><thead><tr><th>Soru</th><th>Ürün</th><th>Önerilen cevap (taslak)</th></tr></thead><tbody>
+        ${d.unanswered.map((x) => html`<tr><td>${x.question_text}<span class="muted small" style="display:block">${dateTime(x.asked_at)}</span></td><td class="small">${x.product_name || '—'}</td><td class="small">${x.suggested_answer || html`<span class="muted">—</span>`}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small">Cevapsız soru yok.</p>`}</div>`}`);
+}
+
+async function aiSources(box) {
+  const d = await api('/api/ai/data-sources');
+  box.innerHTML = renderVal(html`
+    <div class="card"><div class="card-head"><div><h2>Veri kaynakları ve tazelik</h2><p>CEO, finans verisi bayatsa (STALE/ERROR) para harcayan öneri yapmaz. Her metriğin kaynağı aşağıdadır.</p></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Kaynak</th><th>Bağlantı</th><th>Tazelik</th><th>Son başarılı</th><th>Son deneme</th><th class="r">Hata</th><th class="r">Kayıt</th></tr></thead><tbody>
+        ${d.sources.map((x) => html`<tr><td><b>${x.label}</b>${x.last_error ? html`<span class="small neg" style="display:block">${x.last_error}</span>` : ''}${x.note ? html`<span class="small muted" style="display:block">${x.note}</span>` : ''}</td>
+          <td>${CONN_TR[x.connection] || x.connection}</td><td>${freshBadge(x.freshness)}</td>
+          <td class="small">${x.last_successful_sync ? (String(x.last_successful_sync).length > 10 ? dateTime(x.last_successful_sync) : date(x.last_successful_sync)) : '—'}</td>
+          <td class="small">${x.last_attempt ? dateTime(x.last_attempt) : '—'}</td><td class="r num">${num(x.error_count || 0)}</td><td class="r num">${x.record_count === null || x.record_count === undefined ? '—' : num(x.record_count)}</td></tr>`)}
+      </tbody></table></div></div>
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Metrik kaynakları</h3><div class="table-wrap mt"><table><tbody>${d.metric_sources.map((m) => html`<tr><td>${m.metric}</td><td class="small">${m.source}</td></tr>`)}</tbody></table></div></div>
+      <div class="card"><h3>İç olaylar (webhook + polling)</h3><dl class="kv small mt"><dt>Bekleyen</dt><dd>${num(d.events.pending)}</dd><dt>Hatalı (tekrar denenecek)</dt><dd>${num(d.events.failed)}</dd>
+        <dt>Son 24 saatte işlenen</dt><dd>${num(d.events.done_24h)}</dd><dt>Son 24 saatte webhook</dt><dd>${num(d.events.webhook_24h)}</dd></dl>
+        ${d.recent_events.length ? html`<ul class="small mt">${d.recent_events.slice(0, 8).map((e) => html`<li>${dateTime(e.received_at)} · ${e.source} · <b>${e.event_type}</b> · ${e.status}</li>`)}</ul>` : html`<p class="muted small">Henüz olay yok.</p>`}
+        <p class="small muted">Trendyol webhook'u yalnızca sipariş paketi statülerini taşır; iade, finans ve soru olayları polling ile üretilir. Her olayda CEO çalıştırılmaz.</p></div>
+    </div>`);
 }
 
 async function aiJournal(box, ov, page = 1) {

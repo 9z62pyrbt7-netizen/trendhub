@@ -52,6 +52,10 @@ CAP_PRODUCTS_READ = "products.read"
 CAP_STOCK_WRITE = "stock.write"
 CAP_PRICE_WRITE = "price.write"
 CAP_SETTLEMENTS_READ = "settlements.read"
+CAP_RETURNS_READ = "returns.read"
+CAP_QUESTIONS_READ = "questions.read"
+CAP_SELLER_READ = "seller.read"
+CAP_WEBHOOKS_READ = "webhooks.read"
 
 
 @dataclass

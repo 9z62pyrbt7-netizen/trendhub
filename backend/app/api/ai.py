@@ -90,6 +90,8 @@ def kpis(conn: Connection, counts: dict) -> dict:
             "cash_usable": pos["usable"], "cash_total": pos["totals"]["cash"] if pos["usable"] is not None else None,
             "capital_used": used, "capital_pending": max(pos["justified"] - used, 0) if pos["justified"] is not None else 0,
             "capital_unused": pos["unused"], "ad_spend_today": ad_today,
+            "pending_payout": pos["cash_structure"]["pending_marketplace_payout"]["amount"],
+            "pending_payout_kind": pos["cash_structure"]["pending_marketplace_payout"]["kind"],
             "pending_proposals": counts["pending"], "to_apply": counts["to_apply"],
             "risk_alerts": int(risk_24h) + len(dq) + int(counts["blocked"] or 0), "data_warnings": [q["message"] for q in dq]}
 
@@ -295,6 +297,53 @@ def inventory(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_c
     from ..services.ai.data import inventory_status
     return {"model": config.inventory_model(conn), "models": config.INVENTORY_MODELS, "items": inventory_status(conn),
             "stockout_days": thresholds(conn)["stockout_days"]}
+
+
+# ------------------------------------------------------------------ gerçek pazaryeri verisi (salt okunur)
+@router.get("/finance")
+def get_finance(days: int = Query(30, ge=1, le=365), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Finans / Nakit: bekleyen hakediş, alacak, son ödemeler, mutabakat; kârın gerçek/tahmin dağılımı."""
+    from ..services.platform import finance as pf
+    from ..services.platform.sources import finance_status
+    w = Window(days)
+    fs = finance_status(conn)
+    by_type = rows(conn, """SELECT source, transaction_type, COUNT(*) AS n, SUM(debt) AS debt, SUM(credit) AS credit,
+                                   SUM(commission_amount) AS commission, COUNT(*) FILTER (WHERE payment_order_id IS NULL) AS unpaid,
+                                   COUNT(*) FILTER (WHERE applied_at IS NOT NULL) AS applied
+                              FROM marketplace_finance_entries WHERE transaction_date >= :s GROUP BY 1, 2 ORDER BY 1, 3 DESC""",
+                     s=w.start)
+    recent = rows(conn, """SELECT id, source, transaction_type, transaction_date, order_number, barcode, debt, credit, commission_amount,
+                                  seller_revenue, payment_order_id, payment_date, applied_at
+                             FROM marketplace_finance_entries ORDER BY transaction_date DESC NULLS LAST, id DESC LIMIT 30""")
+    pos = capital.position(conn)
+    return {"status": {k: fs[k] for k in ("freshness", "age_hours", "stale_hours", "connected")},
+            "payout": pf.payout_summary(conn), "sign_check": pf.seller_revenue_check(conn),
+            "provenance": pf.profit_provenance(conn, w.start, w.end), "cash_structure": pos["cash_structure"],
+            "usable": pos["usable"], "by_type": by_type, "recent": recent, "window": w.as_dict()}
+
+
+@router.get("/cx")
+def get_cx(days: int = Query(30, ge=7, le=90), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Müşteri deneyimi: gerçek soru/iade kayıtlarından. Cevaplar otomatik GÖNDERİLMEZ."""
+    from ..services.platform import cx
+    return cx.analyze(conn, days)
+
+
+@router.get("/data-sources")
+def get_data_sources(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    from ..services.platform import events
+    from ..services.platform.sources import data_sources
+    return {"sources": data_sources(conn), "events": events.stats(conn), "recent_events": events.recent(conn, 30),
+            "metric_sources": [
+                {"metric": "Sipariş cirosu", "source": "Trendyol Orders (getShipmentPackages)", "kind": "ACTUAL"},
+                {"metric": "Komisyon", "source": "Trendyol Finance (settlements) — yoksa ayardaki oranla TAHMİN", "kind": "ACTUAL/ESTIMATED"},
+                {"metric": "Kargo", "source": "Trendyol kargo faturası kalemleri — yoksa varsayılan TAHMİN", "kind": "ACTUAL/ESTIMATED"},
+                {"metric": "İade", "source": "Trendyol İadeler (getClaims) + Finance Return kaydı", "kind": "ACTUAL"},
+                {"metric": "Ürün maliyeti", "source": "Tedarikçi / yerel maliyet kaydı", "kind": "LOCAL"},
+                {"metric": "Reklam harcaması", "source": "Elle / CSV (Trendyol reklam API'si bağlı değil)", "kind": "MANUAL"},
+                {"metric": "Kullanılabilir nakit", "source": "Elle girilen kasa (banka entegrasyonu yok)", "kind": "MANUAL"},
+                {"metric": "Bekleyen hakediş", "source": "Trendyol Finance (cari hesap ekstresi)", "kind": "ACTUAL"},
+            ]}
 
 
 # ------------------------------------------------------------------ sermaye

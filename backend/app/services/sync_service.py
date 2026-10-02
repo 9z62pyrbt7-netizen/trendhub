@@ -32,6 +32,8 @@ DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
 
+from .platform import sync as platform_sync  # noqa: E402
+
 JOB_LABELS_TR = {
     ORDERS_SYNC: "Sipariş senkronizasyonu",
     ORDERS_DEEP_SYNC: "Derin sipariş senkronizasyonu (30 gün)",
@@ -43,6 +45,7 @@ JOB_LABELS_TR = {
     STOREFRONT_MAINTENANCE: "Web mağazası bakımı (ödeme beklemeleri, sepetler, kargo bildirimi, tedarikçi taslakları, e-fatura)",
     STOREFRONT_NOTIFY: "Web siparişi bildirimleri (e-posta/SMS)",
     AI_CYCLE: "AI Control Center döngüsü (analiz + öneri; hiçbir aksiyon uygulamaz)",
+    **platform_sync.JOB_LABELS_TR,
 }
 
 
@@ -88,12 +91,24 @@ def run_orders_sync(engine: Engine, marketplace: str, payload: dict, settings=No
         if watermark is not None:
             since = max(since, watermark - timedelta(hours=1))
 
+    from .platform import sources
+    with engine.begin() as conn:
+        store_id = ensure_store(conn, marketplace, connector.store_external_id(), connector.name)
+        sources.mark_attempt(conn, store_id, "orders")
     # Ağ çağrısı transaction DIŞINDA yapılır (uzun süre kilit tutmamak için).
-    orders = connector.fetch_orders(since, until)
+    try:
+        orders = connector.fetch_orders(since, until)
+    except Exception as exc:
+        with engine.begin() as conn:
+            sources.mark_failure(conn, store_id, "orders", exc)
+        raise
 
     with engine.begin() as conn:
         store_id = ensure_store(conn, marketplace, connector.store_external_id(), connector.name)
         stats = upsert_orders(conn, store_id, orders)
+        latest = max((o.last_modified or o.order_date for o in orders), default=None)
+        sources.mark_success(conn, store_id, "orders", count=len(orders), latest=latest)
+        _emit_order_events(conn, marketplace, stats)
         conn.execute(text("""
             INSERT INTO sync_state(store_id, resource, synced_until, updated_at)
             VALUES (:s, 'orders', :u, NOW())
@@ -109,6 +124,15 @@ def run_orders_sync(engine: Engine, marketplace: str, payload: dict, settings=No
             resolve_fingerprint(conn, f"sync-errors:{marketplace}")
             resolve_fingerprint(conn, f"job:{ORDERS_SYNC}:{marketplace}")
     return {"window": [since.isoformat(), until.isoformat()], **stats.as_dict()}
+
+
+def _emit_order_events(conn, marketplace: str, stats) -> None:
+    """Polling ile bulunan yeni sipariş / statü değişimi → iç olay modeli (webhook ile aynı tipler)."""
+    from .platform import events
+    for oid, kind, status in stats.changes:
+        events.emit(conn, source="polling", marketplace=marketplace, event_type=kind,
+                    dedupe_key=f"poll:{marketplace}:order:{oid}:{kind}:{status}", entity_type="order", entity_ref=str(oid),
+                    payload={"order_id": oid, "status": status})
 
 
 def run_listings_sync(engine: Engine, marketplace: str, settings=None) -> dict:
@@ -167,6 +191,11 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
         return order_notifications.deliver_pending(engine.begin)
     if t in (ORDERS_SYNC, ORDERS_DEEP_SYNC, LISTINGS_SYNC, SUPPLIER_SYNC):
         return _scan_after(engine, _execute_sync(engine, job, payload, settings))
+    if t == platform_sync.EVENTS_PROCESS:
+        from .platform import events
+        return events.process_pending(engine)
+    if t in platform_sync.RESOURCE:
+        return platform_sync.run(engine, t, settings)
     if t == INTEGRATION_CHECK:
         return run_integration_check(engine, job["marketplace"], settings)
     if t == "listing.publish":
@@ -195,6 +224,7 @@ def schedule_plan(interval_minutes: int) -> list[tuple[str, str, int]]:
         (ORDERS_DEEP_SYNC, CAP_ORDERS_READ, 24 * 60),   # geç gelen iade/teslim statüleri için
         (LISTINGS_SYNC, CAP_PRODUCTS_READ, 6 * 60),
         (INTEGRATION_CHECK, CAP_ORDERS_READ, 60),
+        *platform_sync.SCHEDULE,    # genişletilmiş salt okunur veri (yalnızca yeteneği olan connector'larda)
     ]
 
 
@@ -269,6 +299,16 @@ def schedule_storefront_maintenance(conn) -> int | None:
     if recent:
         return None
     return jobs.enqueue(conn, STOREFRONT_MAINTENANCE, payload={}, idempotency_key=STOREFRONT_MAINTENANCE, max_attempts=2)
+
+
+def schedule_event_processing(conn) -> int | None:
+    """Bekleyen (webhook/polling) platform olayı varsa işleme işini kuyruğa ekler."""
+    pending = conn.execute(text("""SELECT 1 FROM platform_events WHERE status IN ('pending', 'failed') AND attempts < 8
+                                     AND next_attempt_at <= NOW() LIMIT 1""")).first()
+    if not pending:
+        return None
+    return jobs.enqueue(conn, platform_sync.EVENTS_PROCESS, payload={}, idempotency_key=platform_sync.EVENTS_PROCESS,
+                        max_attempts=3)
 
 
 def schedule_ai_cycle(conn) -> int | None:

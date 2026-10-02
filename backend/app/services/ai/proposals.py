@@ -139,6 +139,18 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
         if stale_orders:
             checks.append(_check("stale_orders", "block", stale_orders[0]["message"] + " Para harcayan öneri bayat veriyle onaylanmaz."))
     cap = d(p.get("required_capital"))
+    if action in ("ads.increase_budget", "inventory.restock") or cap > 0:
+        from ..platform.sources import finance_status
+        fs = finance_status(conn)
+        # Trendyol finans verisi bir kez alınmışsa güncelliği zorunludur; bayatsa para harcayan öneri onaylanmaz.
+        if fs["connected"] and fs["freshness"] in ("STALE", "ERROR"):
+            checks.append(_check("finance_stale", "block",
+                                 f"Finans verisi güncel olmadığı için ek reklam bütçesi / harcama önermiyorum "
+                                 f"(son başarılı Trendyol finans senkronu {fs['age_hours']} saat önce; sınır {fs['stale_hours']} saat).",
+                                 age_hours=fs["age_hours"]))
+        elif fs["connected"] and fs["freshness"] == "DEGRADED":
+            checks.append(_check("finance_degraded", "warning",
+                                 "Son Trendyol finans senkronu hata verdi; nakit/hakediş bir önceki başarılı veriye dayanıyor."))
     if cap > 0:
         from .capital import position
         pos = position(conn, exclude_proposal=p.get("id"))

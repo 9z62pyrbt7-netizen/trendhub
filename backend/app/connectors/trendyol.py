@@ -37,7 +37,8 @@ from decimal import Decimal
 import httpx
 
 from ..domain import order_status as S
-from .base import (CAP_ORDERS_READ, CAP_PRODUCTS_READ, ConnectionCheck, ConnectorError, CredentialField,
+from .base import (CAP_ORDERS_READ, CAP_PRODUCTS_READ, CAP_QUESTIONS_READ, CAP_RETURNS_READ, CAP_SELLER_READ,
+                   CAP_SETTLEMENTS_READ, CAP_WEBHOOKS_READ, ConnectionCheck, ConnectorError, CredentialField,
                    MarketplaceConnector, NormalizedLine, NormalizedListing, NormalizedOrder,
                    NormalizedShipment)
 from .http import RateLimiter, ResilientClient
@@ -61,6 +62,23 @@ MAX_WINDOW = timedelta(days=14)   # sorgu penceresi; tek sorgu 10.000 kayıt sı
 MAX_LOOKBACK = timedelta(days=30)  # servis en fazla 1 ay geriye izin verir
 ORDER_DATE_OFFSET = timedelta(hours=3)  # orderDate GMT+3 olarak gönderilir
 PAGE_SIZE = 200
+# Cari hesap ekstresi (settlements / otherfinancials): startDate–endDate en fazla 15 gün; size 500 veya 1000;
+# 100 istek/dk. paymentOrderId ödeme yapıldıktan sonra oluşur (ödeme talimatı her çarşamba).
+FINANCE_WINDOW = timedelta(days=15)
+FINANCE_PAGE_SIZE = 500
+SETTLEMENT_TYPES = ("Sale", "Return", "Discount", "DiscountCancel", "Coupon", "CouponCancel", "ProvisionPositive",
+                    "ProvisionNegative", "ManualRefund", "ManualRefundCancel", "TyDiscount", "TyDiscountCancel", "TyCoupon",
+                    "TyCouponCancel", "SellerRevenuePositive", "SellerRevenueNegative", "CommissionPositive",
+                    "CommissionNegative", "SellerRevenuePositiveCancel", "SellerRevenueNegativeCancel",
+                    "CommissionPositiveCancel", "CommissionNegativeCancel", "DeliveryFee", "DeliveryFeeCancel", "PayByLink")
+OTHER_FINANCIAL_TYPES = ("PaymentOrder", "DeductionInvoices", "CreditNote", "CommissionInvoice")
+# getClaims: startDate/endDate iade paketinin lastModifiedDate'ine göre çalışır; 1000 istek/dk.
+CLAIMS_WINDOW = timedelta(days=14)
+CLAIMS_PAGE_SIZE = 200
+# Soru filtreleme: tarih verilirse aralık en fazla 2 hafta; sayfa en fazla 50.
+QUESTIONS_WINDOW = timedelta(days=14)
+QUESTIONS_PAGE_SIZE = 50
+MAX_PAGES = 200              # her pencere için güvenlik sınırı
 PRODUCT_PAGE_SIZE = 100
 MAX_PRODUCT_PAGES = 500      # güvenlik sınırı: en fazla 50.000 ilan
 
@@ -130,9 +148,14 @@ class TrendyolConnector(MarketplaceConnector):
         self._sleep = sleep
         self._client: ResilientClient | None = None
         self._orders_version = "v2"
+        caps = {CAP_ORDERS_READ}
         # İlan okuma yalnızca açıkça etkinleştirilirse (V2 şeması doğrulanmadı)
         if getattr(settings, "trendyol_listings_enabled", False):
-            self.capabilities = frozenset({CAP_ORDERS_READ, CAP_PRODUCTS_READ})
+            caps.add(CAP_PRODUCTS_READ)
+        # Genişletilmiş salt okunur veri (finans, iade, soru, satıcı, webhook listesi)
+        if getattr(settings, "trendyol_extended_read", False):
+            caps |= {CAP_SETTLEMENTS_READ, CAP_RETURNS_READ, CAP_QUESTIONS_READ, CAP_SELLER_READ, CAP_WEBHOOKS_READ}
+        self.capabilities = frozenset(caps)
         self.implementation_note = (
             "Salt okunur sipariş senkronu (Order V2 alan adlarıyla). Canlı hesapla henüz doğrulanmadı. "
             "İlan senkronu: " + ("AÇIK (doğrulanmamış V1 servisi)" if CAP_PRODUCTS_READ in self.capabilities
@@ -222,6 +245,97 @@ class TrendyolConnector(MarketplaceConnector):
         if not isinstance(data, dict) or "content" not in data:
             return ConnectionCheck(False, "Beklenmeyen yanıt formatı")
         return ConnectionCheck(True, "Bağlantı başarılı (salt okunur)")
+
+    # -- genişletilmiş salt okunur servisler (ham kayıt döner; eşleme services/platform içinde) ---------------
+    def _seller_path(self, prefix: str, suffix: str) -> str:
+        return f"/integration/{prefix}/sellers/{self.store_external_id()}/{suffix}"
+
+    def _paged(self, path: str, params: dict, *, page_size: int, content_key: str = "content",
+               headers: dict | None = None, max_pages: int = MAX_PAGES) -> list[dict]:
+        out: list[dict] = []
+        page = 0
+        while True:
+            data = self.client.get_json(path, params={**params, "page": page, "size": page_size}, headers=headers)
+            if isinstance(data, list):           # bazı servisler doğrudan dizi döner
+                out.extend(data)
+                break
+            if not isinstance(data, dict) or content_key not in data:
+                raise ConnectorError(f"Trendyol yanıtı beklenen formatta değil ({content_key} alanı yok): {path}")
+            out.extend(data.get(content_key) or [])
+            page += 1
+            total_pages = int(data.get("totalPages") or 0)
+            if page >= total_pages or page >= max_pages:
+                break
+        return out
+
+    @staticmethod
+    def _windows(since: datetime, until: datetime, width: timedelta):
+        start = since
+        while start < until:
+            end = min(start + width, until)
+            yield start, end
+            start = end
+
+    @staticmethod
+    def _ms(dt: datetime) -> int:
+        return int(dt.timestamp() * 1000)
+
+    def fetch_settlements(self, since: datetime, until: datetime, types=SETTLEMENT_TYPES) -> list[dict]:
+        """Cari hesap ekstresi — settlements (satış, iade, indirim, kupon, komisyon, ...). Her kayıt `_type` taşır."""
+        return self._finance("settlements", since, until, types)
+
+    def fetch_other_financials(self, since: datetime, until: datetime, types=OTHER_FINANCIAL_TYPES) -> list[dict]:
+        """Cari hesap ekstresi — otherfinancials (ödeme talimatı, kesinti faturası, ...)."""
+        return self._finance("otherfinancials", since, until, types)
+
+    def _finance(self, kind: str, since: datetime, until: datetime, types) -> list[dict]:
+        path = self._seller_path("finance/che", kind)
+        out: list[dict] = []
+        for start, end in self._windows(since, until, FINANCE_WINDOW):
+            for t in types:
+                for r in self._paged(path, {"startDate": self._ms(start), "endDate": self._ms(end), "transactionType": t},
+                                     page_size=FINANCE_PAGE_SIZE):
+                    out.append({**r, "_type": r.get("transactionType") or t})
+        return out
+
+    def fetch_cargo_invoice_items(self, invoice_serial: str) -> list[dict]:
+        """Kargo faturası detayları (DeductionInvoices kaydındaki fatura seri numarasıyla)."""
+        return self._paged(self._seller_path("finance/che", f"cargo-invoice/{invoice_serial}/items"), {},
+                           page_size=FINANCE_PAGE_SIZE)
+
+    def fetch_claims(self, since: datetime, until: datetime) -> list[dict]:
+        """İadesi oluşturulan siparişler (getClaims). Tarihler iade paketinin lastModifiedDate'ine göre."""
+        path = self._seller_path("order", "claims")
+        out: list[dict] = []
+        for start, end in self._windows(max(since, until - MAX_LOOKBACK), until, CLAIMS_WINDOW):
+            out.extend(self._paged(path, {"startDate": self._ms(start), "endDate": self._ms(end)}, page_size=CLAIMS_PAGE_SIZE))
+        return out
+
+    def fetch_questions(self, since: datetime, until: datetime) -> list[dict]:
+        """Müşteri soruları filtreleme servisi (salt okunur; cevaplama servisi ÇAĞRILMAZ)."""
+        path = self._seller_path("qna", "questions/filter")
+        out: list[dict] = []
+        for start, end in self._windows(since, until, QUESTIONS_WINDOW):
+            out.extend(self._paged(path, {"supplierId": self.store_external_id(), "startDate": self._ms(start),
+                                          "endDate": self._ms(end)}, page_size=QUESTIONS_PAGE_SIZE))
+        return out
+
+    def fetch_seller_addresses(self) -> dict:
+        """Satıcı adres bilgileri (getSuppliersAddresses): GET /integration/sellers/{sellerId}/addresses."""
+        return self.client.get_json(f"/integration/sellers/{self.store_external_id()}/addresses")
+
+    def fetch_webhooks(self) -> list[dict]:
+        """Tanımlı webhook'lar (yalnızca listeleme; oluşturma/güncelleme YAPILMAZ)."""
+        data = self.client.get_json(self._seller_path("webhook", "webhooks"))
+        if isinstance(data, dict):
+            data = data.get("content") or data.get("webhooks") or []
+        return data if isinstance(data, list) else []
+
+    def fetch_products_v2(self, max_pages: int = 1, page_size: int = 50) -> list[dict]:
+        """Ürün filtreleme — onaylı ürün V2 (storeFrontCode başlığıyla). Varsayılan: yalnızca ilk sayfa (doğrulama)."""
+        return self._paged(self._seller_path("product", "products/approved"), {}, page_size=page_size,
+                           headers={"storeFrontCode": self.settings.trendyol_storefront_code or "TR"},
+                           max_pages=max_pages)
 
     def fetch_orders(self, since: datetime, until: datetime) -> list[NormalizedOrder]:
         return self.normalize(self._fetch_packages(since, until))

@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     trendyol_rate_per_minute: int = 60
     # Ürün V1 servisi kapatılıyor, V2 şeması doğrulanmadı: varsayılan KAPALI.
     trendyol_listings_enabled: bool = False
+    # Genişletilmiş SALT OKUNUR veri: cari hesap (finans), iadeler, müşteri soruları, satıcı adresleri, webhook listesi.
+    # Varsayılan KAPALI: canlı hesapta `python -m app.cli trendyol-smoke` başarılı olduktan sonra true yapılır.
+    trendyol_extended_read: bool = False
+    # Ürün V2 filtre servisleri "storeFrontCode" başlığı ister (resmî dokümantasyon). Değer canlı hesapla doğrulanmalı.
+    trendyol_storefront_code: str = "TR"
+    # Trendyol'un BİZİM webhook adresimize gönderirken kullanacağı kimlik bilgileri (yalnızca .env'de).
+    # API_KEY yöntemi: Trendyol "x-api-key" başlığı gönderir. BASIC yöntemi: kullanıcı adı + parola.
+    # İkisi de boşsa webhook uç noktası her isteği reddeder (kapalı).
+    trendyol_webhook_api_key: str = ""
+    trendyol_webhook_username: str = ""
+    trendyol_webhook_password: str = ""
 
     # Hepsiburada
     hepsiburada_merchant_id: str = ""

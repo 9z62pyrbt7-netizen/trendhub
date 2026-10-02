@@ -28,6 +28,12 @@ DEFAULT_THRESHOLDS: dict = {
     "reserve_months_opex": 1,       # nakit rezervi: aylık sabit gider × N
     "data_stale_hours": 24,         # sipariş senkronu bu kadar eskiyse veri bayat
     "ads_data_stale_days": 3,
+    "finance_stale_hours": 36,      # pazaryeri finans (cari hesap) verisi bu kadar eskiyse para harcayan öneri onaylanmaz
+    "returns_stale_hours": 12,
+    "questions_stale_hours": 12,
+    "cash_stale_days": 7,           # elle girilen kasa bilgisi bu kadar gün güncellenmediyse uyarı
+    "payout_window_days": 7,        # vadesi bu kadar gün içinde olan ödenmemiş hakediş = "bekleyen ödeme"
+    "cx_min_sample": 10,            # ürün başına yüzde hesaplamak için en az soru/iade sayısı
 }
 INVENTORY_MODELS = {"dropship": "Dropshipping (stok tedarikçide; stok sermayesi gerekmez)",
                     "own_stock": "Kendi stoğu (stok sermaye bağlar)"}

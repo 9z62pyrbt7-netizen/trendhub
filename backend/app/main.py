@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .api import (ads, ai, alerts, analytics, auth, catalog, integrations, orders, storefront_admin, suppliers, system,
-                  transfer)
+                  transfer, webhooks)
 from .config import get_settings
 from .db import transaction
 from .logging_setup import configure_logging
@@ -58,7 +58,9 @@ def create_app() -> FastAPI:
     async def csrf_guard(request: Request, call_next):
         # Çerezle kimliği doğrulanan değiştirici isteklerde özel başlık zorunlu:
         # başka bir siteden gelen form/istek bu başlığı ekleyemez.
+        # /api/webhooks/* çerezle değil kendi kimlik bilgisiyle (x-api-key / Basic) doğrulanır.
         if (request.method in MUTATING and request.url.path.startswith("/api/")
+                and not request.url.path.startswith("/api/webhooks/")
                 and not request.headers.get("Authorization", "").lower().startswith("bearer ")
                 and request.headers.get(CSRF_HEADER) != CSRF_VALUE):
             return JSONResponse({"detail": "CSRF doğrulaması başarısız"}, status_code=403)
@@ -88,7 +90,8 @@ def create_app() -> FastAPI:
             "technical": f"Hata referansı: {ref} ({exc.__class__.__name__}). Ayrıntı sunucu kayıtlarında."})
 
     for r in (auth.router, analytics.router, orders.router, catalog.router, suppliers.router,
-              transfer.router, integrations.router, system.router, alerts.router, ads.router, storefront_admin.router, ai.router):
+              transfer.router, integrations.router, system.router, alerts.router, ads.router, storefront_admin.router, ai.router,
+              webhooks.router):
         app.include_router(r)
     return app
 

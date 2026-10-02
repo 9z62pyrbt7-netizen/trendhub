@@ -89,10 +89,19 @@ def build_brief(conn: Connection) -> dict:
     if y["orders"] or prev["orders"]:
         diff = d(y["net_profit"]) - avg_profit
         trend = ("ortalamanın üstünde" if diff > 0 else "ortalamanın altında") if prev["orders"] else ""
+        from ..platform.finance import profit_provenance
+        yw = Window(1, end_date=t - timedelta(days=1))
+        pv = profit_provenance(conn, yw.start, yw.end)
+        label = {"ACTUAL": "gerçekleşen net kâr", "PARTIAL": "net kâr (kısmen gerçek, kısmen tahmini)",
+                 "ESTIMATED": "tahmini net kâr"}[pv["status"]]
+        basis = (f" Komisyonun {pv['actual_commission_items']}/{pv['items']} kalemi gerçek Trendyol kesintisi, kalanı tahmin."
+                 if pv["status"] == "PARTIAL" else " Komisyon/kargo gerçek Trendyol finans kaydı değil, tahmin." if pv["status"] == "ESTIMATED" else "")
         items.append({"priority": 80 if diff < 0 else 60, "kind": "yesterday", "level": "warning" if d(y["net_profit"]) < 0 else "info",
-                      "text": f"Dün {y['orders']} sipariş geldi; tahmini net kâr {_money(y['net_profit'])} "
-                              f"(son 7 gün günlük ortalaması {_money(finance_view.q2(avg_profit))}{', ' + trend if trend else ''}).",
-                      "source": "Finans (dashboard ile aynı formül)", "link": "#/finance"})
+                      "text": f"Dün {y['orders']} sipariş geldi; {label} {_money(y['net_profit'])} "
+                              f"(son 7 gün günlük ortalaması {_money(finance_view.q2(avg_profit))}{', ' + trend if trend else ''}).{basis}",
+                      "source": "Satış: Trendyol Orders · komisyon: " + ("Trendyol Finance" if pv["status"] != "ESTIMATED" else "tahmin (oran)")
+                                + " · maliyet: yerel maliyet kaydı · reklam: elle girilen reklam verisi", "link": "#/finance",
+                      "provenance": pv})
     else:
         items.append({"priority": 50, "kind": "yesterday", "level": "info", "text": "Dün ve önceki 7 günde sipariş kaydı yok.",
                       "source": "Siparişler", "link": "#/orders"})
@@ -112,8 +121,8 @@ def build_brief(conn: Connection) -> dict:
     risky = [i for i in inventory_status(conn) if i["stockout_risk"]]
     if risky:
         top = risky[0]
-        txt = (f"{top['name']} yaklaşık {top['days_of_inventory']} günlük stoğa düştü" if top["days_of_inventory"] is not None
-               else f"{top['name']} stokta yok ama satılıyordu")
+        txt = (f"{top['name']} yaklaşık {top['days_of_inventory']} günlük stoğa düştü" if top["days_of_inventory"] and top["available"] > 0
+               else f"{top['name']} satılabilir stokta yok ama satılıyordu")
         items.append({"priority": 75, "kind": "stock", "level": "warning",
                       "text": txt + (f"; toplam {len(risky)} üründe tükenme riski." if len(risky) > 1 else "."),
                       "source": "Stok ajanı", "link": "#/ai?tab=inventory"})
@@ -140,6 +149,28 @@ def build_brief(conn: Connection) -> dict:
                       "text": f"Son 30 günde {len(loss_products)} ürün zarar ettirdi (toplam {_money(tot)}).",
                       "source": "Ürün & Kâr ajanı", "link": "#/ai?tab=profit"})
     pos = position(conn)
+    cs = pos["cash_structure"]
+    pend = cs["pending_marketplace_payout"]
+    if pend["kind"] == "ACTUAL" and (d(pend["amount"]) or d(cs["marketplace_receivable"]["amount"])):
+        cash_txt = (f"Kasada {_money(cs['available_cash']['amount'])}" if cs["available_cash"]["amount"] is not None
+                    else "Kasa bilgisi girilmedi")
+        nxt = f" (sonraki ödeme {pend['next_payment_date']:%d.%m.%Y})" if pend.get("next_payment_date") else ""
+        items.append({"priority": 78, "kind": "cash", "level": "info",
+                      "text": f"{cash_txt}; Trendyol'da bekleyen hakediş {_money(pend['amount'])}{nxt}, vadesi gelmemiş alacak "
+                              f"{_money(cs['marketplace_receivable']['amount'])}. Bekleyen hakediş harcanabilir sermaye sayılmaz; "
+                              f"harcanabilir: {_money(pos['usable']) if pos['usable'] is not None else 'hesaplanamıyor'}.",
+                      "source": "Kasa: elle · hakediş: Trendyol Finance (cari hesap)", "link": "#/ai?tab=finance"})
+    from ..platform import cx as cx_mod
+    sig = cx_mod.analyze(conn, 30)
+    if sig["info_gaps"]:
+        g = sig["info_gaps"][0]
+        items.append({"priority": 50, "kind": "cx_gap", "level": "info", "text": g["text"],
+                      "source": "Trendyol Soru-Cevap (gerçek sorular)", "link": "#/ai?tab=cx"})
+    if sig["complaints"]:
+        c0 = sig["complaints"][0]
+        items.append({"priority": 52, "kind": "cx_returns", "level": "warning",
+                      "text": f"{c0['name']}: son 30 günde {c0['count']} iade '{c0['reason']}' sebebiyle.",
+                      "source": "Trendyol İadeler (gerçek iade sebepleri)", "link": "#/ai?tab=cx"})
     if pos["usable"] is not None and pos["justified"] == 0 and pos["usable"] > 0:
         items.append({"priority": 30, "kind": "capital", "level": "info", "text": pos["recommendation"],
                       "source": "Sermaye motoru", "link": "#/ai?tab=capital"})
@@ -157,8 +188,16 @@ def build_brief(conn: Connection) -> dict:
         items.append({"priority": 100, "kind": "emergency", "level": "critical",
                       "text": "ACİL DURDURMA AKTİF: hiçbir yazma işlemi yapılmıyor; analiz devam ediyor.", "source": "Risk motoru",
                       "link": "#/ai"})
-    items.sort(key=lambda x: -x["priority"])
+    items.sort(key=lambda x: (BRIEF_RANK.get(x["kind"], 9), -x["priority"]))
     return {"date": t, "items": items[:7], "data_quality": quality}
+
+
+# Brief sırası: (0) sistem durumu: acil durdurma / ajan hatası — her şeyin üstünde, çünkü diğer maddelerin
+# güvenilirliğini etkiler; sonra sahibin istediği öncelik: 1 net kâr, 2 nakit/hakediş, 3 kritik risk (veri tazeliği),
+# 4 zarar eden ürünler, 5 reklam, 6 iade/müşteri, 7 stok, 8 fırsatlar/onaylar.
+BRIEF_RANK = {"emergency": 0, "agent_error": 0, "yesterday": 1, "cash": 2, "data_quality": 3, "loss_products": 4,
+              "ads_loss": 5, "ads_nodata": 5, "cx_returns": 6, "cx_gap": 6, "stock": 7, "approvals": 8, "to_apply": 8,
+              "tasks": 8, "capital": 8}
 
 
 def store_brief(conn: Connection, brief: dict) -> None:

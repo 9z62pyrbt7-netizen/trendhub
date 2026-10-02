@@ -7,7 +7,14 @@
     kullanılmayan      = kullanılabilir − gerekçelendirilmiş
 
 Sermaye kategorileri sabit yüzdelerle değil, yalnızca önerilerden (kanıttan) oluşur. Fırsat yoksa sermaye kullanılmaz.
-Kasa bilgileri elle girilir (banka / pazaryeri hakediş API'si bağlı değil).
+
+Nakit yapısı (TOPLAM PARA ≠ HARCANABİLİR SERMAYE):
+    AVAILABLE CASH              kasa/banka — elle girilir (banka entegrasyonu yok)
+    PENDING MARKETPLACE PAYOUT  vadesi yakın, ödenmemiş hakediş — Trendyol cari hesap ekstresi (bağlı değilse elle girilen)
+    MARKETPLACE RECEIVABLE      vadesi gelmemiş pazaryeri alacağı — Trendyol cari hesap ekstresi
+    KNOWN LIABILITIES           tedarikçi / reklam / işletme borçları — elle
+    RESERVED CAPITAL            ayrılmış tutar + nakit rezervi
+    DEPLOYABLE CAPITAL          = kullanılabilir (yalnızca kasadan; hakediş ve alacak ASLA dahil edilmez)
 """
 from __future__ import annotations
 
@@ -54,15 +61,58 @@ def position(conn: Connection, exclude_proposal: int | None = None) -> dict:
            "justified_by_category": [{**r, "label": CATEGORY_TR.get(r["category"], r["category"])} for r in justified_rows],
            "unused": finance_view.q2(unused) if unused is not None else None,
            "pending_payout_not_counted": finance_view.q2(sums["pending_payout"])}
+    out["cash_structure"] = cash_structure(conn, out, sums, acc)
+    out["pending_payout_not_counted"] = out["cash_structure"]["pending_marketplace_payout"]["amount"]
     out["efficiency"] = efficiency(conn)
     out["recommendation"] = _recommendation(out)
     return out
+
+
+def cash_structure(conn: Connection, p: dict, sums: dict, acc: list[dict]) -> dict:
+    """Her kalemin tutarı ve KAYNAĞI. Hakediş/alacak bilgi amaçlıdır; harcanabilir sermayeye girmez."""
+    from ..platform.finance import payout_summary
+    from ..platform.sources import finance_status
+    ps = payout_summary(conn)
+    fs = finance_status(conn)
+    cash_at = max((a["as_of"] for a in acc if a["kind"] == "cash"), default=None)
+    if ps["connected"]:
+        pending = {"amount": finance_view.q2(ps["pending_payout"]), "source": ps["source"], "kind": "ACTUAL",
+                   "next_payment_date": ps["next_payment_date"], "freshness": fs["freshness"]}
+        receivable = {"amount": finance_view.q2(ps["receivable"]), "source": ps["source"], "kind": "ACTUAL",
+                      "freshness": fs["freshness"]}
+    else:
+        pending = {"amount": finance_view.q2(sums["pending_payout"]), "kind": "MANUAL",
+                   "source": "Elle girilen bekleyen hakediş (Trendyol finans verisi henüz yok)"}
+        receivable = {"amount": None, "kind": "UNKNOWN", "source": "Trendyol finans verisi yok"}
+    reserved = finance_view.q2(sums["reserved"] + p["reserve_required"])
+    total_money = None
+    if p["free_cash"] is not None:
+        total_money = finance_view.q2(sums["cash"] + d(pending["amount"]) + d(receivable["amount"]))
+    return {
+        "available_cash": {"amount": finance_view.q2(sums["cash"]) if any(a["kind"] == "cash" for a in acc) else None,
+                           "source": "Elle girilen kasa/banka (banka entegrasyonu yok)", "kind": "MANUAL", "as_of": cash_at},
+        "pending_marketplace_payout": pending,
+        "marketplace_receivable": receivable,
+        "known_liabilities": {"amount": p["liabilities"], "source": "Elle girilen borçlar (tedarikçi, reklam, işletme)",
+                              "advertising_commitments": finance_view.q2(sums["ad_liability"])},
+        "reserved_capital": {"amount": reserved, "reserved": finance_view.q2(sums["reserved"]),
+                             "cash_reserve": p["reserve_required"]},
+        "deployable_capital": {"amount": p["usable"], "rule": "Yalnızca kasadaki nakit − borçlar − ayrılmış − rezerv "
+                               "(üst limit: sisteme ayrılan sermaye). Bekleyen hakediş ve alacak dahil DEĞİL."},
+        "total_money": {"amount": total_money, "note": "Kasa + bekleyen hakediş + alacak. Harcanabilir sermaye DEĞİLDİR."},
+        "payout_reconciliation": ps["reconciliation"], "overdue_unverified": ps["overdue_unverified"],
+    }
 
 
 def _recommendation(p: dict) -> str:
     if p["usable"] is None:
         return ("Kasa bilgisi girilmedi; kullanılabilir sermaye hesaplanamaz. Kasadaki nakdi, borçları ve bekleyen "
                 "hakedişi girin (bekleyen hakediş kullanılabilir sayılmaz).")
+    cs = p.get("cash_structure") or {}
+    pend = d((cs.get("pending_marketplace_payout") or {}).get("amount"))
+    if p["usable"] <= 0 and pend > 0:
+        return (f"Kasada harcanabilir sermaye yok. Trendyol'da {tl(pend)} bekleyen hakediş var ama henüz kasada olmadığı "
+                "için harcanabilir sayılmaz. Yeni harcama önermiyorum.")
     if p["usable"] <= 0:
         return ("Borçlar, ayrılmış tutar ve nakit rezervi düşüldükten sonra kullanılabilir sermaye yok. "
                 "Yeni harcama önermiyorum.")

@@ -248,6 +248,16 @@ def data_quality(conn: Connection) -> list[dict]:
     elif r["last_ad_perf"] and r["last_ad_perf"] < (now.date() - timedelta(days=th["ads_data_stale_days"])):
         out.append({"code": "ads_stale", "severity": "warning",
                     "message": f"Son reklam performans verisi {r['last_ad_perf'].isoformat()} tarihli; reklam kararları bayat veriye dayanır."})
+    from ..platform.sources import data_sources
+    for src in data_sources(conn):
+        if src["code"] in ("trendyol.finance", "trendyol.returns", "trendyol.questions") and src["freshness"] in ("STALE", "ERROR", "DEGRADED"):
+            word = {"STALE": "güncel değil", "ERROR": "alınamıyor", "DEGRADED": "son denemede hata verdi"}[src["freshness"]]
+            out.append({"code": src["code"].split(".")[1] + "_stale", "severity": "warning",
+                        "message": f"{src['label']} {word}" + (f" (son başarılı: {src['age_hours']} saat önce)" if src.get("age_hours") is not None else "")
+                                   + (f" — {src['connection']}" if src["connection"] in ("PERMISSION_DENIED", "UNSUPPORTED") else "") + "."})
+        if src["code"] == "cash.manual" and src["freshness"] == "STALE":
+            out.append({"code": "cash_stale", "severity": "warning",
+                        "message": f"Kasa bilgisi {th['cash_stale_days']} günden uzun süredir güncellenmedi; kullanılabilir sermaye eski veriye dayanıyor."})
     return out
 
 
