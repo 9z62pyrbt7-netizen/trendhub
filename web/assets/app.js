@@ -78,6 +78,7 @@ async function api(path, { method = 'GET', body, query, rawBody } = {}) {
   if (!res.ok) {
     let msg = typeof data === 'object' && data ? data.detail : data;
     if (Array.isArray(msg)) msg = msg.map((d) => `${(d.loc || []).slice(1).join('.')}: ${d.msg}`).join('; ');
+    else if (msg && typeof msg === 'object') msg = msg.message || null;
     const friendly = { 403: 'Bu işlem için yetkiniz yok.', 404: 'Kayıt bulunamadı.', 413: 'Dosya çok büyük.', 429: 'Çok fazla deneme. Biraz bekleyip tekrar deneyin.', 502: 'Sunucuya şu an ulaşılamıyor.', 503: 'Servis geçici olarak kullanılamıyor.', 504: 'Sunucu zamanında yanıt vermedi.' };
     if (typeof msg === 'string' && /^\s*</.test(msg)) msg = null;   // HTML hata sayfası kullanıcıya gösterilmez
     const technical = (typeof data === 'object' && data && data.technical) || (msg ? null : `HTTP ${res.status}`);
@@ -2439,8 +2440,20 @@ PAGES.ai = {
 async function aiBrief(box, ov) {
   const sc = await api('/api/ai/scorecard').catch(() => null);
   const row2 = (label, k, f) => html`<tr><td>${label}</td><td class="r num">${sc.before ? f(sc.before[k]) : '—'}</td><td class="r num">${sc.after ? f(sc.after[k]) : '—'}</td></tr>`;
+  const k = ov.kpis;
   box.innerHTML = renderVal(html`
-    <div class="card"><div class="card-head"><div><h2>Bugün bilmen gerekenler</h2><p>CEO yüzlerce metriği dökmez; en önemli konuları önem sırasıyla gösterir.${ov.brief.live ? ' (canlı hesaplandı)' : ''}</p></div></div>
+    <div class="grid grid-4 ai-kpis">
+      ${kpi('Net kâr (7 gün)', money0(k.net_profit_7d), html`Dün ${money0(k.net_profit_yesterday)} · marj ${pct(k.net_margin_7d)}`, signClass(k.net_profit_7d), TAHMINI)}
+      ${kpi('Kullanılabilir nakit', k.cash_usable === null ? '—' : money0(k.cash_usable), k.cash_usable === null ? html`<a href="#/ai?tab=capital">Kasa bilgisi gir →</a>` : 'Borç, rezerv ve hakediş hariç')}
+      ${kpi('Kullanılan sermaye', money0(k.capital_used), `Bekleyen öneri: ${money0(k.capital_pending)}`)}
+      ${kpi('Kullanılmayan sermaye', k.capital_unused === null ? '—' : money0(k.capital_unused), 'Kanıt yoksa kasada kalır')}
+    </div>
+    <div class="grid grid-3 mt ai-kpis">
+      ${kpi('Bugünün reklam harcaması', money0(k.ad_spend_today), 'Kayıtlı harcama')}
+      ${kpi('CEO\'nun bekleyen önerileri', num(k.pending_proposals), k.to_apply ? `${k.to_apply} onaylı öneri uygulanmayı bekliyor` : html`<a href="#/ai?tab=approvals">Onaylara git →</a>`, k.pending_proposals ? 'warn-text' : '')}
+      ${kpi('Risk uyarıları', num(k.risk_alerts), k.data_warnings.length ? k.data_warnings[0] : 'Son 24 saat + veri kalitesi + bloke', k.risk_alerts ? 'neg' : '')}
+    </div>
+    <div class="card mt"><div class="card-head"><div><h2>Bugün bilmen gerekenler</h2><p>CEO yüzlerce metriği dökmez; en önemli konuları önem sırasıyla gösterir.${ov.brief.live ? ' (canlı hesaplandı)' : ''}</p></div></div>
       ${briefList(ov.brief.items)}</div>
     <div class="grid grid-2 mt">
       <div class="card"><h3>Ajan durumu</h3><div class="table-wrap mt"><table><tbody>
@@ -2462,7 +2475,7 @@ async function aiBrief(box, ov) {
 async function aiChat(box) {
   const draw = () => {
     const log = $('#chat-log');
-    log.innerHTML = renderVal(aiState.msgs.length ? html`${aiState.msgs.map((m) => html`<div class="chat-msg ${m.role}">${m.content}${m.role === 'assistant' && m.engine ? html`<span class="meta">${m.engine === 'claude' ? 'Claude' : 'Kural motoru'}${m.tools_used && m.tools_used.length ? ` · veri: ${m.tools_used.join(', ')}` : ''}</span>` : ''}</div>`)}`
+    log.innerHTML = renderVal(aiState.msgs.length ? html`${aiState.msgs.map((m) => html`<div class="chat-msg ${m.role}">${m.content}${m.role === 'assistant' && m.engine ? html`<span class="meta">${m.engine === 'claude' ? 'Claude' : 'Kural motoru'}${m.fallback_reason ? ` (${m.fallback_reason})` : ''}${m.sources && m.sources.length ? ` · kaynak: ${m.sources.join('; ')}` : ''}</span>` : ''}</div>`)}`
       : html`<p class="muted small">CEO yalnızca sistemdeki gerçek veriye dayanarak cevap verir; veri yoksa "yok" der. Hiçbir işlemi kendisi uygulamaz.</p>`);
     log.scrollTop = log.scrollHeight;
   };
@@ -2481,7 +2494,7 @@ async function aiChat(box) {
     try {
       const r = await api('/api/ai/chat', { method: 'POST', body: { message: q, conversation_id: aiState.conv } });
       aiState.conv = r.conversation_id;
-      aiState.msgs[aiState.msgs.length - 1] = { role: 'assistant', content: r.answer, engine: r.engine, tools_used: r.tools_used };
+      aiState.msgs[aiState.msgs.length - 1] = { role: 'assistant', content: r.answer, engine: r.engine, tools_used: r.tools_used, sources: r.sources, fallback_reason: r.fallback_reason };
     } catch (e) { aiState.msgs[aiState.msgs.length - 1] = { role: 'assistant', content: `Hata: ${e.message}` }; }
     draw();
   };
@@ -2502,13 +2515,14 @@ async function aiApprovals(box, ov, page = 1, status = 'open') {
         ${p.requires_approval ? '' : html`<span class="badge plain">Görev</span>`}<span class="muted small">${p.agent_name} · ${dateTime(p.created_at)}${p.confidence !== null ? ` · güven ${pct(p.confidence)}` : ''}</span></div>
       <div>${p.reason}</div>
       ${Number(p.required_capital) ? html`<div class="small">Gereken sermaye: <b>${money(p.required_capital)}</b> (${p.capital_category || '—'})</div>` : ''}
-      ${p.ceo_note ? html`<div class="ceo"><b>CEO:</b> ${p.ceo_note}</div>` : ''}
+      ${p.ceo_note ? html`<div class="ceo"><b>CEO${p.ceo_stance === 'oppose' ? ' — KARŞI' : p.ceo_stance === 'support' ? ' — destekliyor' : ''}:</b> ${p.ceo_note}</div>` : ''}
+      ${p.owner_override ? html`<div class="small warn-text">Sahip, CEO itirazına rağmen onayladı (override).</div>` : ''}
       ${p.risk_checks.length ? html`<ul class="checks">${p.risk_checks.map((c) => html`<li class="${c.severity === 'block' ? 'neg' : ''}">${c.severity === 'block' ? '⛔' : '⚠️'} ${c.message}</li>`)}</ul>` : ''}
       ${p.execution_result && p.execution_result.instructions ? html`<div class="notice info small">${p.execution_result.instructions}</div>` : ''}
       <details><summary class="small">Detay / kanıt</summary>${evidenceList(p.evidence)}${Object.keys(p.params || {}).length ? evidenceList(p.params) : ''}
         <a href="#" class="small" data-trail="${p.id}">İşlem izini göster</a><div id="trail-${p.id}"></div></details>
       ${can('admin') ? html`<div class="actions">
-        ${p.status === 'pending_approval' ? html`<button class="btn btn-primary btn-sm" data-ok="${p.id}">${p.requires_approval ? 'ONAYLA' : 'Ele aldım'}</button><button class="btn btn-sm" data-no="${p.id}">REDDET</button>` : ''}
+        ${p.status === 'pending_approval' ? html`<button class="btn btn-primary btn-sm" data-ok="${p.id}" data-oppose="${p.ceo_stance === 'oppose' ? '1' : ''}">${p.ceo_stance === 'oppose' ? 'CEO\'ya rağmen onayla' : p.requires_approval ? 'ONAYLA' : 'Ele aldım'}</button><button class="btn btn-sm" data-no="${p.id}">REDDET</button>` : ''}
         ${p.status === 'blocked' ? html`<button class="btn btn-sm" data-no="${p.id}">Kapat</button>` : ''}
         ${p.status === 'approved' ? html`<button class="btn btn-primary btn-sm" data-done="${p.id}">Uyguladım</button>` : ''}</div>` : ''}
     </div>`)}${pager(d, (pg) => aiApprovals(box, ov, pg, status))}` : empty('Kayıt yok', 'Bu durumda öneri yok.')}</div>`);
@@ -2518,13 +2532,16 @@ async function aiApprovals(box, ov, page = 1, status = 'open') {
     if (note === null) return;
     try { await api(path, { method: 'POST', body: { note: note || null } }); toast(label); aiApprovals(box, ov, page, status); } catch (e) { fail(e); }
   };
-  $$('[data-ok]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.ok}/approve`, 'Onaylandı', 'Not (isteğe bağlı):')));
+  $$('[data-ok]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.ok}/approve`, 'Onaylandı',
+    b.dataset.oppose ? 'CEO bu karara karşı. Yine de devam etmek için gerekçeni yaz (en az 10 karakter; override olarak kaydedilir):' : 'Not (isteğe bağlı):')));
   $$('[data-no]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.no}/reject`, 'Reddedildi', 'Neden reddediyorsun? (CEO öğrenir)')));
   $$('[data-done]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.done}/executed`, 'Uygulandı olarak kaydedildi', 'Platformda ne yaptın? (isteğe bağlı)')));
   $$('[data-trail]', box).forEach((a) => a.addEventListener('click', async (e) => {
     e.preventDefault();
-    const t = await api('/api/ai/activity', { query: { proposal_id: a.dataset.trail, page_size: 50 } });
-    $(`#trail-${a.dataset.trail}`).innerHTML = renderVal(html`<ul class="timeline mt">${t.items.slice().reverse().map((x) => html`<li><span class="muted small">${dateTime(x.created_at)}</span> ${x.agent_name || x.username || ''}: ${x.message}</li>`)}</ul>`);
+    const t = await api(`/api/ai/proposals/${a.dataset.trail}/trail`);
+    $(`#trail-${a.dataset.trail}`).innerHTML = renderVal(html`<p class="small mt"><b>Öneri #${t.proposal.id}</b> · ajan çalışması #${t.agent_run ? t.agent_run.id : '—'} · durum: ${t.proposal.situation || '—'}${t.decisions.map((x) => ` · karar #${x.id}`).join('')}</p>
+      <ul class="timeline">${t.activity.map((x) => html`<li><span class="muted small">${dateTime(x.created_at)} · ${x.kind}</span> ${x.agent_code || x.username || ''}: ${x.message}</li>`)}</ul>
+      ${t.audit.length ? html`<p class="small muted">Denetim kaydı: ${t.audit.map((x) => `${x.action} (${x.actor})`).join(', ')}</p>` : ''}`);
   }));
 }
 
@@ -2623,12 +2640,37 @@ async function aiJournal(box, ov, page = 1) {
         <div><h3>Davranış ve sonuç</h3>${o.behaviour.length ? html`<div class="table-wrap"><table><thead><tr><th>Karar türü</th><th class="r">Onay</th><th class="r">Ret</th><th class="r">Başarı</th></tr></thead><tbody>
           ${o.behaviour.map((b) => html`<tr><td>${b.decision_type}</td><td class="r num">${num(b.approved)}</td><td class="r num">${num(b.rejected)}</td><td class="r num">${b.success_rate === null ? '—' : pct(b.success_rate)}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small">Henüz karar yok.</p>`}
           ${o.findings.map((f) => html`<div class="notice ${f.type === 'repeated_mistake' ? 'bad' : 'info'} small mt">${f.message}</div>`)}</div></div></div>
+    ${can('admin') ? html`<form class="card mt" id="od-form"><div class="card-head"><div><h2>Kendi kararımı kaydet</h2><p>Platformda kendin yaptığın bir işlemi (ör. reklamı durdurdun) kaydet; sonucu 1/3/7/30 gün sonra ölçülür ve CEO tercihini öğrenir. CEO kanıta dayanarak karşı çıkarsa gerekçe istenir.</p></div></div>
+      <div class="form-grid"><label>Karar<select name="decision_type">${[['ads.pause', 'Reklamı durdurdum'], ['ads.increase_budget', 'Bütçeyi artırdım'], ['ads.decrease_budget', 'Bütçeyi azalttım'], ['product.review_loss', 'Ürün fiyat/maliyetini değiştirdim']].map(([v, l]) => html`<option value="${v}">${l}</option>`)}</select></label>
+        <label>Kayıt türü<select name="entity_type"><option value="campaign">Kampanya</option><option value="product">Ürün</option></select></label>
+        <label>Kayıt no (ID)<input name="entity_id" type="number" min="1" required></label><label>Not<input name="note" maxlength="300"></label></div>
+      <div id="od-assess"></div><p class="form-error"></p><div class="row mt"><button class="btn" type="button" id="od-ask">CEO ne diyor?</button><button class="btn btn-primary" type="submit">Kaydet</button></div></form>` : ''}
     <div class="card mt"><div class="card-head"><div><h2>Karar günlüğü</h2><p>${d.note}</p></div></div>
       ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Karar</th><th>Kim</th><th>Sonuçlar (1/3/7/30 gün)</th></tr></thead><tbody>
         ${d.items.map((x) => html`<tr><td>${dateTime(x.created_at)}</td><td><b>${x.title || x.decision_type}</b><span class="muted small">${x.decision}${x.executed_at ? ' · uygulandı' : ''}${x.reason ? ` · ${x.reason}` : ''}</span></td>
           <td>${x.actor === 'owner' ? (x.username || 'Sahip') : x.agent_code || x.actor}</td>
           <td>${x.outcomes.length ? x.outcomes.map((r) => html`<span class="badge ${AI_RESULT[r.result][1]}" title="Kâr değişimi ${r.profit_change ?? '—'} TL">${r.horizon}g: ${AI_RESULT[r.result][0]}</span> `) : html`<span class="muted small">ölçüm bekliyor</span>`}</td></tr>`)}
       </tbody></table></div>${pager(d, (pg) => aiJournal(box, ov, pg))}` : empty('Karar yok', 'Önerileri onayladıkça veya reddettikçe günlük dolar.')}</div>`);
+  const odBody = () => { const v = formData($('#od-form')); return { decision_type: v.decision_type, entity_type: v.entity_type, entity_id: Number(v.entity_id), note: v.note || null }; };
+  $('#od-ask')?.addEventListener('click', async () => {
+    try {
+      const a = await api('/api/ai/decisions/assess', { method: 'POST', body: odBody() });
+      $('#od-assess').innerHTML = renderVal(html`<div class="notice ${a.stance === 'oppose' ? 'bad' : 'info'} mt"><b>CEO (${{ oppose: 'karşı', support: 'destekliyor', neutral: 'nötr' }[a.stance]}):</b> ${a.note || 'Bu tür kararın ölçülmüş geçmiş sonucu yok.'}
+        <span class="small muted" style="display:block">Tercih: ${a.owner_preference.initiated} kendi kararın, ${a.owner_preference.approved} onay / ${a.owner_preference.rejected} ret · Kanıt: ${a.business_evidence.evaluated} sonuç, ${a.business_evidence.worsened} kötüleşme</span></div>`);
+    } catch (err) { fail(err); }
+  });
+  $('#od-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(e.target, async () => {
+      try { await api('/api/ai/decisions', { method: 'POST', body: odBody() }); } catch (err) {
+        if (err.status !== 409) throw err;
+        const reason = prompt(`${err.message}\n\nYine de kaydetmek için gerekçeni yaz:`, '');
+        if (!reason) return;
+        await api('/api/ai/decisions', { method: 'POST', body: { ...odBody(), override_reason: reason } });
+      }
+      toast('Karar kaydedildi'); aiJournal(box, ov, page);
+    });
+  });
   $$('[data-pref]', box).forEach((a) => a.addEventListener('click', async (e) => {
     e.preventDefault();
     let v = prompt(o.preference_keys[a.dataset.pref], '');

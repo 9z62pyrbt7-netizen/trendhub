@@ -56,6 +56,11 @@ def campaign(c, name, pids, *, budget="100", spend_per_day="100", days=7, clicks
     return cid
 
 
+def cash(c, amount="50000"):
+    c.execute(text("""INSERT INTO ai_capital_accounts(kind, name, amount) VALUES ('cash', 'Banka', :a)
+                      ON CONFLICT (kind, name) DO UPDATE SET amount = EXCLUDED.amount"""), {"a": amount})
+
+
 def cycle(engine):
     from app.services.ai.ceo import run_cycle
     return run_cycle(engine, trigger="test")
@@ -111,6 +116,7 @@ def test_ads_decisions_use_net_profit_not_roas(engine, conn):
     c_thin = campaign(conn, "İnce marj", [thin], revenue_per_day="480", clicks=60)   # ROAS 4.8 ama marj düşük
     c_loss = campaign(conn, "Zarar", [thin], spend_per_day="300", revenue_per_day="300", clicks=60)
     c_nodata = campaign(conn, "Verisiz", [good], perf=False)
+    cash(conn)
     v = {c["id"]: c for c in agents.advertising_analysis(conn)}
     assert v[c_good]["verdict"] == "INCREASE_BUDGET" and v[c_good]["ad_net_profit"] > 0
     assert v[c_thin]["roas"] == Decimal("4.8000") and v[c_thin]["verdict"] == "CONTINUE"
@@ -144,6 +150,8 @@ def _ads_setup(engine, conn):
     pid = product(conn, "APP", cost="150", price="600")
     sell(conn, pid, price="600", n=10, tag="x")
     cid = campaign(conn, "Onaylık", [pid], revenue_per_day="1500", clicks=60)
+    if not conn.execute(text("SELECT 1 FROM ai_capital_accounts WHERE kind = 'cash'")).first():
+        cash(conn)
     cycle(engine)
     return pid, cid, conn.execute(text("SELECT id FROM ai_proposals WHERE action_type = 'ads.increase_budget'")).scalar()
 
@@ -165,7 +173,7 @@ def test_approval_flow_manual_execution_and_journal(engine, conn, client_factory
     audit = {r[0] for r in conn.execute(text("SELECT action FROM audit_logs"))}
     assert {"ai.proposal_approved", "ai.proposal_executed"} <= audit
     feed = [r[0] for r in conn.execute(text("SELECT kind FROM ai_activity WHERE proposal_id = :p ORDER BY id"), {"p": prop})]
-    assert feed[:3] == ["proposal", "risk", "approval"] and "action" in feed
+    assert feed[:4] == ["proposal", "validation", "ceo_review", "risk"] and "approval" in feed and "action" in feed
 
 
 def test_risk_recheck_at_approval_blocks_and_persists(engine, conn, client_factory):
@@ -236,7 +244,7 @@ def test_capital_cash_is_not_profit(engine, conn, client_factory):
     # 60000 − 5000 borç − rezerv (90 günlük gider 9000/3 = 3000 × 1 ay) = 52000 → üst limit 50000; hakediş sayılmaz
     assert Decimal(cap["reserve_required"]) == Decimal("3000.00") and Decimal(cap["usable"]) == Decimal("50000.00")
     assert Decimal(cap["pending_payout_not_counted"]) == Decimal("12000.00")
-    assert Decimal(cap["justified"]) == 0 and "ek sermaye kullanmayı önermiyorum" in cap["recommendation"]
+    assert Decimal(cap["justified"]) == 0 and "sermaye kullanmayı şu anda önermiyorum" in cap["recommendation"]
     pid, cid, prop = _ads_setup(engine, conn)
     cap = c.get("/api/ai/capital").json()
     assert Decimal(cap["justified"]) == Decimal("420.00") and Decimal(cap["unused"]) == Decimal("49580.00")
@@ -264,7 +272,7 @@ def test_outcomes_and_ceo_pushback(engine, conn):
                                 title="tekrar artır", reason="x", evidence={}, confidence=0.8,
                                 params={"current_daily_budget": "100", "new_daily_budget": "130", "delta_per_day": "30"})
     p = conn.execute(text("SELECT ceo_note, confidence FROM ai_proposals WHERE id = :i"), {"i": new}).mappings().one()
-    assert "3 kez uyguladın; 3 durumda net kâr düştü" in p["ceo_note"] and p["confidence"] == Decimal("0.600")
+    assert "3 uygulamanın 3 tanesinde net kâr düştü" in p["ceo_note"] and p["confidence"] == Decimal("0.500")
     with engine.begin() as c:
         rep = decisions.quality_report(c, 30)
         pat = decisions.owner_patterns(c)
@@ -381,7 +389,7 @@ def test_rbac_and_screens(engine, conn, client_factory):
     assert c.put("/api/ai/owner/preferences", json={"key": "min_margin", "value": 5}, headers=H).status_code == 422
     assert c.post("/api/ai/run", headers=H).status_code == 200
     sc = c.get("/api/ai/scorecard").json()
-    assert sc["go_live"] is not None and "en az 7 gün" in sc["message"]
+    assert sc["go_live"] is not None and "en az 7 gün" in sc["message"] and sc["after"] is None
 
 
 def test_stale_proposals_are_retired_when_condition_disappears(engine, conn):

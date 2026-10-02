@@ -89,22 +89,12 @@ def product_economics(conn: Connection, window: Window, product_ids: list[int] |
 
 
 def ad_allocation(conn: Connection, window: Window) -> dict[int, Decimal]:
-    """Ürün başına reklam harcaması payı (kampanya eşit bölüşüm + SKU'ya bağlı reklam giderleri)."""
-    out: dict[int, Decimal] = {}
-    for r in rows(conn, """
-        WITH camp AS (
-            SELECT c.id, SUM(s.amount) AS spend FROM ad_campaigns c JOIN ad_spend s ON s.campaign_id = c.id
-             WHERE s.spend_date >= :start_date AND s.spend_date <= :end_date GROUP BY c.id),
-        n AS (SELECT campaign_id, COUNT(*) AS n FROM ad_campaign_products GROUP BY campaign_id)
-        SELECT x.product_id, SUM(camp.spend / n.n) AS spend
-          FROM ad_campaign_products x JOIN camp ON camp.id = x.campaign_id JOIN n ON n.campaign_id = x.campaign_id
-         GROUP BY x.product_id""", **window.params()):
-        out[r["product_id"]] = out.get(r["product_id"], Decimal("0")) + d(r["spend"])
-    for r in rows(conn, """
-        SELECT p.id AS product_id, SUM(e.amount) AS spend FROM expenses e JOIN products p ON p.sku = e.sku
-         WHERE e.category = 'advertising' AND e.sku IS NOT NULL
-           AND e.expense_date >= :start_date AND e.expense_date <= :end_date GROUP BY p.id""", **window.params()):
-        out[r["product_id"]] = out.get(r["product_id"], Decimal("0")) + d(r["spend"])
+    """Ürün başına reklam payı = kampanya eşit bölüşümü + SKU'ya bağlı reklam giderleri (finance_view, tek kaynak)."""
+    out = dict(finance_view.campaign_ad_allocation(conn, window.start_date, window.end_date))
+    skus = finance_view.sku_ad_expenses(conn, window.start_date, window.end_date)
+    if skus:
+        for r in rows(conn, "SELECT id, sku FROM products WHERE sku = ANY(:s)", s=list(skus)):
+            out[r["id"]] = out.get(r["id"], Decimal("0")) + skus[r["sku"]]
     return {k: finance_view.q2(v) for k, v in out.items()}
 
 

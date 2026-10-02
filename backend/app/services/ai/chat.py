@@ -43,6 +43,20 @@ def tool_period(conn: Connection, days: int = 7) -> dict:
     return {"current": period_summary(conn, cur), "previous": period_summary(conn, cur.previous())}
 
 
+NO_DATA = "Bunu söylemek için yeterli verim yok"
+
+
+def tool_today(conn: Connection) -> dict:
+    """Bugünün (şu ana kadar) sonucu + son 7 günün günlük ortalaması + veri kalitesi uyarıları."""
+    from .data import data_quality, period_summary
+    t = today()
+    cur = period_summary(conn, Window(1, end_date=t))
+    base = period_summary(conn, Window(7, end_date=t - timedelta(days=1)))
+    avg = {k: finance_view.q2(d(base[k]) / 7) for k in ("orders", "net_sales", "product_cost", "commission", "shipping",
+                                                        "service_fee", "ad_spend", "expenses", "vat_estimate", "net_profit", "refund")}
+    return {"today": cur, "daily_average_7d": avg, "data_quality": data_quality(conn)}
+
+
 def tool_profit_drop(conn: Connection, days: int = 7) -> dict:
     from .data import product_economics
     p = tool_period(conn, days)
@@ -166,6 +180,7 @@ def tool_brief(conn: Connection) -> dict:
 
 TOOLS = {
     "get_daily_brief": (tool_brief, "Bugün bilinmesi gereken en önemli konular (önceliklendirilmiş).", {}),
+    "get_today_summary": (tool_today, "Bugünün (şu ana kadar) sipariş, ciro, gider ve tahmini net kârı; son 7 gün günlük ortalaması.", {}),
     "get_period_summary": (tool_period, "Son N günün sipariş, ciro, gider ve tahmini net kâr özeti + önceki eş dönem.",
                            {"days": {"type": "integer", "description": "Gün sayısı (1 = dün)"}}),
     "get_profit_drop_analysis": (tool_profit_drop, "Net kârın önceki döneme göre neden değiştiği: gider kalemleri ve en çok kâr kaybeden ürünler.",
@@ -208,16 +223,89 @@ def parse_amount(q: str) -> Decimal | None:
     return v if v > 0 else None
 
 
-def rules_answer(conn: Connection, question: str) -> tuple[str, list[str]]:
+SOURCES = {
+    "get_today_summary": "Siparişler + kalem kârı (finance_view, dashboard ile aynı formül), bugün",
+    "get_period_summary": "Siparişler + kalem kârı (finance_view), dönem giderleri, reklam harcaması",
+    "get_profit_drop_analysis": "Dönem karşılaştırması (finance_view) + ürün ekonomisi",
+    "get_products": "Ürün birim ekonomisi (finance_view kalem kârı − reklam payı)",
+    "get_ads_analysis": "ad_spend + ad_performance + ürün marjları",
+    "get_ad_budget_plan": "Reklam ajanı kararları + eşikler",
+    "get_inventory_risks": "Ürün stoğu, tedarikçi stoğu, tüm kanal satışları",
+    "get_capital_position": "Elle girilen kasa/borç hesapları + açık öneriler",
+    "get_pending_approvals": "ai_proposals",
+    "get_decision_quality": "Karar günlüğü + ölçülmüş sonuçlar (ai_decision_outcomes)",
+    "get_daily_brief": "CEO günlük özeti",
+}
+
+
+def _today_answer(t: dict) -> str:
+    c, avg = t["today"], t["daily_average_7d"]
+    if not c["orders"]:
+        return f"{NO_DATA}: bugün henüz kayıtlı sipariş yok (son senkron verisine göre)."
+    lines = [f"Bugün şu ana kadar {c['orders']} sipariş; tahmini net kâr {_money(c['net_profit'])} "
+             f"(net satış {_money(c['net_sales'])}, net marj {_pct(c['net_margin'])}). Son 7 günün günlük ortalaması {_money(avg['net_profit'])}."]
+    if c["missing_cost_orders"]:
+        lines.append(f"Uyarı: {c['missing_cost_orders']} siparişte ürün maliyeti eksik; kâr olduğundan yüksek görünür.")
+    for q in t["data_quality"]:
+        if q["code"] == "orders_stale":
+            lines.append("Uyarı: " + q["message"])
+    return "\n".join(lines)
+
+
+def _why_today(t: dict) -> str:
+    c, avg = t["today"], t["daily_average_7d"]
+    if not c["orders"]:
+        return f"{NO_DATA}: bugün sipariş olmadığı için açıklanacak bir kâr yok."
+    parts = [("net satış", d(c["net_sales"]) - d(avg["net_sales"])), ("ürün maliyeti", -(d(c["product_cost"]) - d(avg["product_cost"]))),
+             ("komisyon", -(d(c["commission"]) - d(avg["commission"]))), ("kargo", -(d(c["shipping"]) - d(avg["shipping"]))),
+             ("reklam", -(d(c["ad_spend"]) - d(avg["ad_spend"]))), ("dönem giderleri", -(d(c["expenses"]) - d(avg["expenses"]))),
+             ("tahmini KDV", -(d(c["vat_estimate"]) - d(avg["vat_estimate"])))]
+    parts.sort(key=lambda x: x[1])
+    lines = [f"Bugünün net kârı {_money(c['net_profit'])}: net satış {_money(c['net_sales'])} − ürün maliyeti {_money(c['product_cost'])} "
+             f"− komisyon {_money(c['commission'])} − kargo {_money(c['shipping'])} − reklam {_money(c['ad_spend'])} "
+             f"− dönem giderleri {_money(c['expenses'])} − tahmini KDV {_money(c['vat_estimate'])}."]
+    neg = [f"{n} ({_money(finance_view.q2(v))})" for n, v in parts if v < 0][:3]
+    pos = [f"{n} (+{_money(finance_view.q2(v))})" for n, v in parts[::-1] if v > 0][:2]
+    if neg:
+        lines.append("7 günlük ortalamaya göre kârı aşağı çekenler: " + ", ".join(neg) + ".")
+    if pos:
+        lines.append("Yukarı çekenler: " + ", ".join(pos) + ".")
+    return "\n".join(lines)
+
+
+def rules_answer(conn: Connection, question: str, last_tools: list[str] | None = None) -> tuple[str, list[str]]:
     q = _fold(question)
     used: list[str] = []
+    last_tools = last_tools or []
 
     def use(name, **kw):
         used.append(name)
         return call_tool(conn, name, kw)
 
     amount = parse_amount(question)
-    if any(w in q for w in ("sermaye", "koyarsam", "yatırır", "yatırsam", "kasaya", "nakit")):
+    if re.match(r"^\s*(neden|niye|niçin|sebebi|nasıl yani)\b", q) and last_tools:
+        if "get_today_summary" in last_tools:
+            return _why_today(use("get_today_summary")), used
+        r = use("get_profit_drop_analysis", days=7)
+        neg = [x for x in r["drivers"] if x["profit_effect"] < 0][:3]
+        if not neg:
+            return f"{NO_DATA}: önceki döneme göre kârı aşağı çeken bir kalem görünmüyor.", used
+        return "Önceki eş döneme göre kârı aşağı çeken kalemler: " + ", ".join(
+            f"{x['component']} ({_money(x['profit_effect'])})" for x in neg) + ".", used
+    if "bugün" in q and re.search(r"k[âa]r|kazan|ne kadar", q):
+        return _today_answer(use("get_today_summary")), used
+    if re.search(r"en kötü|en zayıf|en çok zarar", q):
+        p = use("get_products", limit=50)
+        judged = [x for x in p["products"] if x["class"] != "NO_DATA"]
+        if not judged:
+            nodata = len(p["products"])
+            return (f"{NO_DATA}: son {p['window_days']} günde karar verilecek kadar satışı ve maliyeti tam olan ürün yok"
+                    + (f" ({nodata} ürün 'veri yok': satış az veya maliyet eksik)." if nodata else ".")), used
+        w = min(judged, key=lambda x: x["net_profit"])
+        return (f"Son {p['window_days']} günün en kötü ürünü: {w['name']} — {w['units']} adet, net satış {_money(w['net_sales'])}, "
+                f"net kâr {_money(w['net_profit'])} (reklam payı {_money(w['ad_spend_allocated'])}, net marj {_pct(w['net_margin'])}). "
+                "Sıralama ciroya değil net kâra göre."), used
+    if any(w in q for w in ("sermaye", "koyarsam", "yatırır", "yatırsam", "kasaya", "nakit")) and not ("reklam" in q and amount):
         c = use("get_capital_position", hypothetical_amount=float(amount) if amount else None)
         lines = [c["recommendation"]]
         if c.get("hypothetical"):
@@ -230,6 +318,10 @@ def rules_answer(conn: Connection, question: str) -> tuple[str, list[str]]:
     if "bütçe" in q or ("reklam" in q and amount):
         if amount:
             p = use("get_ad_budget_plan", amount=float(amount))
+            if not p["plan"] and not p["excluded_losing"] and not any(
+                    c["ad_net_profit"] is not None for c in use("get_ads_analysis")["campaigns"]):
+                return (f"{NO_DATA}: hiçbir kampanyanın ölçülmüş reklam sonrası net kârı yok (performans verisi veya ürün maliyeti eksik) "
+                        f"ve kanıtlanmış yıldız ürün de yok. Bu yüzden {_money(p['requested'])} eklemeyi önermiyorum."), used
             lines = [f"{_money(p['requested'])} reklam bütçesinin kanıtla desteklenen kısmı {_money(p['justified'])}; "
                      f"{_money(p['unused'])} kullanılmamalı."]
             lines += [f"• {x['campaign']}: {_money(x['monthly'])}/ay — {x['reason']}" for x in p["plan"]]
@@ -237,6 +329,8 @@ def rules_answer(conn: Connection, question: str) -> tuple[str, list[str]]:
                 lines.append("Zarar eden kampanyalara pay verilmedi: " + ", ".join(p["excluded_losing"]) + ".")
             if not p["plan"]:
                 lines.append("Kârlılığı kanıtlanmış reklam ya da yıldız ürün yok. Bu bütçeyi şimdilik kullanmamayı öneriyorum.")
+            elif p["unused"] > 0:
+                lines.append(f"Kalan {_money(p['unused'])} için ek reklam harcamasını şu anda önermiyorum.")
             return "\n".join(lines), used
     if "reklam" in q:
         a = use("get_ads_analysis")
@@ -282,6 +376,11 @@ def rules_answer(conn: Connection, question: str) -> tuple[str, list[str]]:
             + (f"~{p['days_of_inventory']} gün" if p["days_of_inventory"] is not None else "stok yok") for p in r["products"]]), used
     if any(w in q for w in ("yanlış", "hata", "karar", "ne öğren")):
         r = use("get_decision_quality", days=30)
+        measured = r["owner_successes"] or r["owner_failures"] or r["ai_mistakes"] or r["missed_opportunities"]
+        if not measured:
+            return (f"{NO_DATA}: son 30 günde sonucu ölçülmüş kararın yok"
+                    + (f" ({r['awaiting_measurement']} karar ölçüm bekliyor)." if r["awaiting_measurement"] else ".")
+                    + " Kararlarını onay/ret veya 'Kararımı kaydet' ile girdikçe hatalarını kanıta dayalı söyleyebilirim."), used
         lines = []
         if r["owner_failures"]:
             lines.append("Net kârı düşüren kararların: " + "; ".join(f"{x['title']} ({_money(x['profit_change'])})" for x in r["owner_failures"]) + ".")
@@ -312,7 +411,7 @@ SYSTEM_PROMPT = """Sen Trendçantanız'ın (Trendyol ve kendi web sitesinde kad�
 Tek hedefin işletmenin sürdürülebilir NET KÂRINI artırmak; ciroyu tek başına başarı sayma.
 
 Kurallar:
-- Her rakamı araçlardan al. Araçta olmayan veriyi tahmin etme, uydurma; "bu veri sistemde yok" de ve hangi verinin girilmesi gerektiğini söyle.
+- Her rakamı araçlardan al. Araçta olmayan veriyi tahmin etme, uydurma; "Bunu söylemek için yeterli verim yok" de ve hangi verinin eksik olduğunu söyle.
 - Finans rakamları tahminidir (hakediş verisi bağlı değil); bunu gerektiğinde belirt. Kâr ile nakit aynı şey değildir.
 - Reklamda ROAS tek başına karar ölçütü değildir; reklam sonrası net kâra ve net marja bak.
 - Mevcut sermayenin tamamını kullanmayı önermek zorunda değilsin; kanıt yoksa "şu anda ek sermaye kullanmayı önermiyorum" de.
@@ -369,11 +468,16 @@ def claude_answer(conn: Connection, question: str, history: list[dict]) -> tuple
 
 
 def answer(conn: Connection, question: str, history: list[dict]) -> dict:
+    fallback = None
     if llm_available(conn):
         try:
-            text_out, used, usage = claude_answer(conn, question, history)
-            return {"answer": text_out, "engine": "claude", "tools_used": used, "usage": usage}
+            text_out, used, usage = claude_answer(conn, question, [{"role": h["role"], "content": h["content"]} for h in history])
+            return {"answer": text_out, "engine": "claude", "tools_used": used, "usage": usage,
+                    "sources": [SOURCES[t] for t in dict.fromkeys(used) if t in SOURCES]}
         except Exception as exc:  # noqa: BLE001 - model hatasında kural motoru
+            fallback = f"Claude kullanılamadı ({exc.__class__.__name__}); kural motoru cevapladı"
             log.warning("CEO sohbeti Claude hatası, kural motoruna geçildi: %s", exc.__class__.__name__)
-    text_out, used = rules_answer(conn, question)
-    return {"answer": text_out, "engine": "rules", "tools_used": used, "usage": {}}
+    last_tools = next((h.get("tools_used") or [] for h in reversed(history) if h["role"] == "assistant"), [])
+    text_out, used = rules_answer(conn, question, last_tools)
+    return {"answer": text_out, "engine": "rules", "tools_used": used, "usage": {}, "fallback_reason": fallback,
+            "sources": [SOURCES[t] for t in dict.fromkeys(used) if t in SOURCES]}

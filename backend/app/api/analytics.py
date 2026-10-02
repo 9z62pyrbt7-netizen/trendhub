@@ -288,11 +288,13 @@ def sku_report(conn: Connection, rng: DateRange, marketplace: str | None = None)
                  WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled' {extra}) x
          GROUP BY sku
     """, **rng.params(), mp=marketplace, **cfg.params())
-    # SKU'ya doğrudan girilmiş dönem reklam giderleri (expenses.sku)
-    direct_ads = {r["sku"]: _num(r["amount"]) for r in rows(conn, """
-        SELECT sku, SUM(amount) AS amount FROM expenses
-         WHERE sku IS NOT NULL AND category = 'advertising' AND expense_date >= :start_date AND expense_date <= :end_date
-         GROUP BY sku""", **rng.params())}
+    # Reklam payı: SKU'ya doğrudan girilmiş reklam giderleri + kampanya harcamasının eşit bölüşümü (tek kaynak:
+    # finance_view; Reklam merkezi ve AI Control Center ile aynı ürün kârı)
+    direct_ads = {k: _num(v) for k, v in finance_view.sku_ad_expenses(conn, rng.start_date, rng.end_date).items()}
+    camp = finance_view.campaign_ad_allocation(conn, rng.start_date, rng.end_date)
+    if camp:
+        for r in rows(conn, "SELECT id, sku FROM products WHERE id = ANY(:ids) AND sku IS NOT NULL", ids=list(camp)):
+            direct_ads[r["sku"]] = direct_ads.get(r["sku"], Decimal("0")) + camp[r["id"]]
     out = []
     for it in items:
         r = {k: (_num(v) if isinstance(v, Decimal) else v) for k, v in it.items()}

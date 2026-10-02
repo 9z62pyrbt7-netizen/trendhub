@@ -106,8 +106,15 @@ def _cost_driver(e: dict) -> str:
     return f"en büyük gider kalemi {name} ({tl(val)}{f', satışın %{share * 100:.0f}' if share else ''})"
 
 
+def _quality_warnings(conn: Connection, ctx: RunContext, codes: set[str]) -> None:
+    """Kararı etkileyen veri sorunları çalışmayı DEGRADED yapar (yanlış veriyle 'her şey yolunda' denmez)."""
+    from .data import data_quality
+    ctx.warnings += [q["message"] for q in data_quality(conn) if q["code"] in codes]
+
+
 def run_product_profit(conn: Connection, ctx: RunContext) -> dict:
     th = thresholds(conn)
+    _quality_warnings(conn, ctx, {"orders_stale"})
     window = Window(th["analysis_days"])
     ctx.sources += ["orders/order_items (finance_view)", "ad_spend + ad_campaign_products", "expenses (SKU reklam)"]
     items = classified_products(conn, window)
@@ -150,6 +157,7 @@ def run_inventory(conn: Connection, ctx: RunContext) -> dict:
     from .data import inventory_status
     th = thresholds(conn)
     model = config.inventory_model(conn)
+    _quality_warnings(conn, ctx, {"orders_stale"})
     ctx.sources += ["products.stock", "supplier_products.stock", "order_items (tüm kanallar)", "stock_reservations"]
     items = inventory_status(conn)
     risky = [i for i in items if i["stockout_risk"]]
@@ -255,6 +263,7 @@ def run_advertising(conn: Connection, ctx: RunContext) -> dict:
     th = thresholds(conn)
     ctx.sources += ["ad_spend", "ad_performance (platform/kullanıcı bildirimli)", "ürün marjları (finance_view)",
                     "stok sinyali (DO_NOT_SCALE_ADS)"]
+    _quality_warnings(conn, ctx, {"orders_stale", "ads_stale", "no_ad_performance"})
     camps = advertising_analysis(conn)
     step = Decimal(str(th["ads_max_budget_step"]))
     counts: dict[str, int] = {}
@@ -314,13 +323,14 @@ def scan_anomalies(conn: Connection) -> list[dict]:
     """Sistem düzeyi risk olayları: anormal reklam harcaması, beklenmeyen sipariş artışı, stoksuz ürüne reklam."""
     found = []
     r = row(conn, """
-        SELECT (SELECT COALESCE(SUM(amount), 0) FROM ad_spend WHERE spend_date = CURRENT_DATE - 1) AS y_spend,
+        SELECT GREATEST((SELECT COALESCE(SUM(amount), 0) FROM ad_spend WHERE spend_date = CURRENT_DATE - 1),
+                        (SELECT COALESCE(SUM(amount), 0) FROM ad_spend WHERE spend_date = CURRENT_DATE)) AS y_spend,
                (SELECT COALESCE(SUM(amount), 0) / 7 FROM ad_spend WHERE spend_date BETWEEN CURRENT_DATE - 8 AND CURRENT_DATE - 2) AS avg_spend,
                (SELECT COUNT(*) FROM orders WHERE order_date >= CURRENT_DATE - 1 AND order_date < CURRENT_DATE) AS y_orders,
                (SELECT COUNT(*)::numeric / 14 FROM orders WHERE order_date >= CURRENT_DATE - 15 AND order_date < CURRENT_DATE - 1) AS avg_orders""")
     if r["avg_spend"] and d(r["y_spend"]) > d(r["avg_spend"]) * 2 and d(r["y_spend"]) > 200:
         found.append({"code": "ad_spend_spike", "severity": "warning",
-                      "message": f"Dün reklam harcaması {tl(r['y_spend'])}; son 7 gün ortalaması {tl(r['avg_spend'])}."})
+                      "message": f"Son gün reklam harcaması {tl(r['y_spend'])}; son 7 gün ortalaması {tl(r['avg_spend'])}."})
     if r["avg_orders"] and d(r["y_orders"]) > d(r["avg_orders"]) * 3 and r["y_orders"] >= 10:
         found.append({"code": "order_spike", "severity": "warning",
                       "message": f"Dün {r['y_orders']} sipariş geldi (ortalama {d(r['avg_orders']):.1f}). Fiyat hatası veya olağandışı kampanya kontrol edin."})

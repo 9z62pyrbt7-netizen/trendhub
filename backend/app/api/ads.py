@@ -22,7 +22,6 @@ from sqlalchemy.exc import IntegrityError
 
 from ..db import get_conn, row, rows
 from ..deps import CurrentUser, client_ip, finance_editor, viewer
-from ..services import finance_view
 from ..services.audit import log_audit
 from .analytics import _csv_safe, _num, _ratio
 from .common import DateRange, Page, not_found, paged
@@ -322,38 +321,16 @@ def ads_summary(rng: DateRange = Depends(), _: CurrentUser = Depends(viewer), co
 
 
 def product_profit_after_ads(conn: Connection, rng: DateRange) -> list[dict]:
-    """Kampanyaya bağlı ürünlerin dönem kârı − payına düşen reklam harcaması (TAHMİNİ, eşit bölüşüm).
-    Reklam öncesi kâr = tahmini KDV sonrası kâr (finance_view; sipariş ekranıyla aynı formül)."""
-    cfg = finance_view.load(conn)
-    items = rows(conn, f"""
-        WITH camp AS (
-            SELECT c.id, COALESCE(SUM(s.amount), 0) AS spend,
-                   (SELECT COUNT(*) FROM ad_campaign_products x WHERE x.campaign_id = c.id) AS n
-              FROM ad_campaigns c LEFT JOIN ad_spend s ON s.campaign_id = c.id
-                   AND s.spend_date >= :start_date AND s.spend_date <= :end_date
-             GROUP BY c.id),
-        alloc AS (
-            SELECT x.product_id, SUM(camp.spend / NULLIF(camp.n, 0)) AS ad_spend
-              FROM ad_campaign_products x JOIN camp ON camp.id = x.campaign_id GROUP BY x.product_id),
-        sales AS (
-            SELECT i.product_id, SUM(i.quantity) AS quantity, SUM(fi.net_sales) AS revenue,
-                   SUM(fi.profit_after_vat) AS profit
-              FROM order_items i JOIN orders o ON o.id = i.order_id LEFT JOIN products p ON p.id = i.product_id
-              CROSS JOIN LATERAL (SELECT {finance_view.item_columns(cfg)}) fi
-             WHERE o.order_date >= :start AND o.order_date < :end AND o.internal_status <> 'cancelled'
-             GROUP BY i.product_id)
-        SELECT p.id, p.name, p.sku, alloc.ad_spend, COALESCE(sales.quantity, 0) AS quantity,
-               COALESCE(sales.revenue, 0) AS revenue, COALESCE(sales.profit, 0) AS profit
-          FROM alloc JOIN products p ON p.id = alloc.product_id LEFT JOIN sales ON sales.product_id = p.id
-         ORDER BY alloc.ad_spend DESC NULLS LAST, p.id
-    """, **rng.params(), **cfg.params())
-    out = []
-    for i in items:
-        spend = _q2(i["ad_spend"] or 0)
-        profit = _q2(i["profit"])
-        out.append({"product_id": i["id"], "name": i["name"], "sku": i["sku"], "quantity": int(i["quantity"]),
-                    "revenue": _q2(i["revenue"]), "profit_before_ads": profit, "ad_spend": spend,
-                    "profit_after_ads": profit - spend, "is_estimate": True})
+    """Kampanyaya bağlı ürünlerin dönem kârı − payına düşen reklam (TAHMİNİ, eşit bölüşüm).
+    Tek kaynak: AI Control Center ürün ekonomisi (finance_view kalem kârı + finance_view reklam bölüşümü)."""
+    from ..services.ai.data import product_economics
+    linked = [r["product_id"] for r in rows(conn, "SELECT DISTINCT product_id FROM ad_campaign_products")]
+    if not linked:
+        return []
+    out = [{"product_id": e["product_id"], "name": e["name"], "sku": e["sku"], "quantity": e["units"], "revenue": e["net_sales"],
+            "profit_before_ads": e["profit_before_ads"], "ad_spend": e["ad_spend_allocated"], "profit_after_ads": e["net_profit"],
+            "is_estimate": True} for e in product_economics(conn, rng, linked) if e["ad_spend_allocated"] > 0]
+    out.sort(key=lambda x: (-x["ad_spend"], x["product_id"]))
     return out
 
 

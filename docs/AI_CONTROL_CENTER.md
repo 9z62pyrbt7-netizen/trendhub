@@ -108,3 +108,22 @@ blokaj, acil durdurma `audit_logs`'a yazılır. API anahtarları yalnızca ortam
 6. Risk Engine  7. Onay + Action Engine + acil durdurma  8. Karar günlüğü + sonuç değerlendirici + sahip analizi
 9. CEO (günlük özet, öneri incelemesi, sohbet)  10. Worker döngüsü (`ai.cycle`)  11. Panel: AI Control Center
 12. Testler (gerçek finans formülleriyle; LLM çağrısı test edilmez, kural tabanlı sohbet test edilir)
+
+## C. Doğrulama turu (V1 davranış kanıtları)
+
+Kanıt testleri: `backend/tests/test_ai_proof.py` (gerçek kod yolları, kontrollü veri; sonuçlar `evaluate_outcomes` ile
+gerçek sipariş/reklam verisinden hesaplanır, elle yazılmaz).
+
+**Öğrenme modeli (migration 0011):**
+* `situation`: kararın verildiği durum anahtarı (`ads:early` = reklam az veriyle, `ads:mature`, `product:<sınıf>`).
+* OWNER_PREFERENCE (`decisions.owner_preference`): sahibin kendi kararları (`decision='owner_action'`), ajan önerilerini
+  onay/ret oranı, açık tercihler (`ai_owner_preferences`). Sonuçtan bağımsızdır.
+* BUSINESS_EVIDENCE (`decisions._evidence`): uygulanmış kararların ölçülmüş sonuçları; benzer durumda ≥3 sonuç yoksa
+  aynı karar türünün tüm sonuçları. Sahip kaynaklı ve AI kaynaklı sonuçlar ayrıca raporlanır (AI isabeti).
+* CEO duruşu (`decisions.assess`): ≥3 sonuçta ≥%60 kötüleşme **ve** toplam net kâr etkisi negatifse `oppose`;
+  ≥%60 iyileşme ve toplam pozitifse `support`; aksi `neutral`. Tercih duruşu değiştirmez, yalnızca gerekçede söylenir.
+* Owner override: CEO `oppose` + risk LOW/MEDIUM → en az 10 karakterlik gerekçe ile onay, `override` olarak kaydedilir
+  ve `ai.owner_override` denetim kaydı yazılır. CEO `oppose` + HIGH/CRITICAL → onaylanamaz. Risk motoru bloğu
+  (`blocked`) hiçbir koşulda (override dahil) aşılamaz.
+* Ürün kârı tek kaynak: `finance_view.item_columns` + `finance_view.campaign_ad_allocation` + `finance_view.sku_ad_expenses`;
+  SKU raporu, Reklam merkezi, AI Kâr Merkezi, ajanlar, CEO sohbeti ve karar günlüğü aynı fonksiyonları kullanır.

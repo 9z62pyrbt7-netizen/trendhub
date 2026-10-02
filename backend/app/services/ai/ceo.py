@@ -30,6 +30,17 @@ def run_cycle(engine: Engine, trigger: str = "schedule") -> dict:
     with engine.begin() as conn:
         if not config.enabled(conn):
             return {"skipped": "ai.enabled=false"}
+    with engine.begin() as conn:
+        # Worker yeniden başladıysa yarıda kalan çalışmalar sonsuza dek 'running' görünmesin
+        stale = conn.execute(text("""UPDATE ai_agent_runs SET status = 'error', finished_at = NOW(),
+                                     error = 'Çalışma yarıda kesildi (worker yeniden başladı veya bağlantı koptu)'
+                                     WHERE status = 'running' AND started_at < NOW() - INTERVAL '30 minutes'
+                                     RETURNING agent_code""")).all()
+        for (code,) in stale:
+            conn.execute(text("UPDATE ai_agents SET last_status = 'error', last_error = 'Çalışma yarıda kesildi' WHERE code = :c"),
+                         {"c": code})
+            activity(conn, "Önceki çalışma yarıda kesilmiş (worker yeniden başladı); hata olarak işaretlendi", agent=code,
+                     kind="run", level="error")
     with agents.agent_run(engine, "ceo", trigger) as ceo:
         ceo.sources += [c for c, _ in AGENT_ORDER]
         for code, fn in AGENT_ORDER:
@@ -47,6 +58,7 @@ def run_cycle(engine: Engine, trigger: str = "schedule") -> dict:
                 ceo.warnings.append(f"{code} ajanı hata verdi")
         with engine.begin() as conn:
             out["risk_anomalies"] = len(agents.scan_anomalies(conn))
+            conn.execute(text("UPDATE ai_agents SET last_run_at = NOW(), last_status = 'ok', last_error = NULL WHERE code = 'risk'"))
             out["expired"] = expire_old(conn)
         with engine.begin() as conn:
             from .decisions import evaluate_outcomes
@@ -131,6 +143,11 @@ def build_brief(conn: Connection) -> dict:
     if pos["usable"] is not None and pos["justified"] == 0 and pos["usable"] > 0:
         items.append({"priority": 30, "kind": "capital", "level": "info", "text": pos["recommendation"],
                       "source": "Sermaye motoru", "link": "#/ai?tab=capital"})
+    failed = conn.execute(text("SELECT name, last_error FROM ai_agents WHERE last_status = 'error' AND enabled")).all()
+    for name, err in failed:
+        items.append({"priority": 95, "kind": "agent_error", "level": "critical",
+                      "text": f"{name} ajanı son çalışmada hata verdi; bu alandaki öneriler güncel değil. ({(err or '')[:120]})",
+                      "source": "Ajan durumu", "link": "#/ai?tab=agents"})
     quality = data_quality(conn)
     for q in quality:
         if q["severity"] == "warning":

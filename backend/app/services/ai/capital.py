@@ -68,9 +68,10 @@ def _recommendation(p: dict) -> str:
                 "Yeni harcama önermiyorum.")
     if p["justified"] <= 0:
         return (f"Kullanılabilir {tl(p['usable'])} var ama şu anda kanıtla desteklenen bir fırsat yok. "
-                "Şu anda ek sermaye kullanmayı önermiyorum; para kasada kalmalı.")
+                "Ek sermaye kullanmayı şu anda önermiyorum; para kasada kalmalı.")
     return (f"Kullanılabilir {tl(p['usable'])}'nin yalnızca {tl(p['justified'])}'si kanıta dayalı önerilerle "
-            f"gerekçelendirilebiliyor; {tl(p['unused'])} kullanılmadan kalmalı. Önce küçük ölçekte test → ölç → büyüt.")
+            f"gerekçelendirilebiliyor. Kalan {tl(p['unused'])} için ek sermaye kullanmayı şu anda önermiyorum; "
+            "para kasada kalmalı. Önce küçük ölçekte test → ölç → büyüt.")
 
 
 def efficiency(conn: Connection) -> dict:

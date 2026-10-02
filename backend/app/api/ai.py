@@ -20,6 +20,8 @@ from ..db import get_conn, get_engine, row, rows
 from ..deps import CurrentUser, admin, client_ip, operator, viewer
 from ..services import app_settings
 from ..services.ai import agents, capital, ceo, chat, config, decisions, proposals
+from datetime import timedelta
+
 from ..services.ai.config import Window, thresholds
 from ..services.audit import log_audit
 from .common import Page, paged
@@ -67,9 +69,29 @@ def overview(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_co
                                  COUNT(*) FILTER (WHERE status = 'approved') AS to_apply,
                                  COUNT(*) FILTER (WHERE status = 'blocked') AS blocked FROM ai_proposals""")
     last = row(conn, "SELECT started_at, finished_at, status FROM ai_agent_runs WHERE agent_code = 'ceo' ORDER BY id DESC LIMIT 1")
-    return {"brief": b, "emergency_stop": config.emergency_stop(conn), "enabled": config.enabled(conn),
+    return {"brief": b, "kpis": kpis(conn, counts), "emergency_stop": config.emergency_stop(conn), "enabled": config.enabled(conn),
             "agents": agent_list(conn), "counts": counts, "last_cycle": last,
             "llm": {"available": chat.llm_available(conn), "model": None}}
+
+
+def kpis(conn: Connection, counts: dict) -> dict:
+    """Ana ekranın 7 göstergesi. Hepsi diğer ekranlarla aynı kaynaktan (period_summary, capital.position)."""
+    from ..services.ai.data import data_quality, period_summary
+    t = config.today()
+    week = period_summary(conn, Window(7, end_date=t))
+    yday = period_summary(conn, Window(1, end_date=t - timedelta(days=1)))
+    pos = capital.position(conn)
+    used = row(conn, """SELECT COALESCE(SUM(required_capital), 0) AS v FROM ai_proposals
+                         WHERE required_capital > 0 AND (status = 'approved' OR (status = 'executed' AND executed_at > NOW() - INTERVAL '30 days'))""")["v"]
+    ad_today = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM ad_spend WHERE spend_date = :d"), {"d": t}).scalar()
+    risk_24h = conn.execute(text("SELECT COUNT(*) FROM ai_risk_events WHERE created_at > NOW() - INTERVAL '24 hours' AND severity <> 'info'")).scalar()
+    dq = [q for q in data_quality(conn) if q["severity"] == "warning"]
+    return {"net_profit_7d": week["net_profit"], "net_profit_yesterday": yday["net_profit"], "net_margin_7d": week["net_margin"],
+            "cash_usable": pos["usable"], "cash_total": pos["totals"]["cash"] if pos["usable"] is not None else None,
+            "capital_used": used, "capital_pending": max(pos["justified"] - used, 0) if pos["justified"] is not None else 0,
+            "capital_unused": pos["unused"], "ad_spend_today": ad_today,
+            "pending_proposals": counts["pending"], "to_apply": counts["to_apply"],
+            "risk_alerts": int(risk_24h) + len(dq) + int(counts["blocked"] or 0), "data_warnings": [q["message"] for q in dq]}
 
 
 @router.post("/run")
@@ -185,6 +207,54 @@ def executed(pid: int, body: DecisionIn, request: Request, user: CurrentUser = D
     return {"ok": True}
 
 
+@router.get("/proposals/{pid}/trail")
+def proposal_trail(pid: int, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Tek öneri kimliği üzerinden tüm zincir: ajan → kâr doğrulaması → CEO → risk → onay → uygulama → sonuç ölçümü."""
+    p = row(conn, "SELECT * FROM ai_proposals WHERE id = :id", id=pid)
+    if p is None:
+        raise HTTPException(404, "Öneri bulunamadı")
+    run = row(conn, "SELECT id, agent_code, status, started_at, input_sources FROM ai_agent_runs WHERE id = :r", r=p["run_id"]) \
+        if p["run_id"] else None
+    decs = rows(conn, "SELECT * FROM ai_decisions WHERE proposal_id = :p ORDER BY id", p=pid)
+    for x in decs:
+        x["outcomes"] = rows(conn, "SELECT horizon_days, final_result, metrics, evaluated_at FROM ai_decision_outcomes WHERE decision_id = :d ORDER BY horizon_days", d=x["id"])
+    return {"proposal": proposals.decorate(p), "agent_run": run, "decisions": decs,
+            "activity": rows(conn, """SELECT a.id, a.created_at, a.agent_code, a.kind, a.level, a.message, u.username
+                                        FROM ai_activity a LEFT JOIN users u ON u.id = a.user_id WHERE a.proposal_id = :p ORDER BY a.id""", p=pid),
+            "risk_events": rows(conn, "SELECT code, severity, message, created_at FROM ai_risk_events WHERE proposal_id = :p ORDER BY id", p=pid),
+            "audit": rows(conn, """SELECT occurred_at, actor, action, details FROM audit_logs
+                                    WHERE (entity_type = 'ai_proposal' AND entity_id = CAST(:p AS TEXT)) ORDER BY id""", p=pid)}
+
+
+class OwnerDecisionIn(BaseModel):
+    decision_type: str
+    entity_type: str
+    entity_id: int
+    note: str | None = Field(None, max_length=1000)
+    override_reason: str | None = Field(None, max_length=1000)
+
+
+@router.post("/decisions/assess")
+def assess_decision(body: OwnerDecisionIn, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Sahip bir karar vermeden önce CEO'nun kanıta dayalı görüşü (kayıt oluşturmaz)."""
+    sit = decisions.situation_for(conn, body.decision_type, body.entity_type, body.entity_id)
+    return decisions.assess(conn, body.decision_type, sit)
+
+
+@router.post("/decisions")
+def record_decision(body: OwnerDecisionIn, request: Request, user: CurrentUser = Depends(admin)):
+    """Sahibin kendi kararını günlüğe yazar (sonucu 1/3/7/30 gün sonra ölçülür)."""
+    with get_engine().begin() as conn:
+        try:
+            return decisions.record_owner_action(conn, user, decision_type=body.decision_type, entity_type=body.entity_type,
+                                                 entity_id=body.entity_id, note=body.note, override_reason=body.override_reason,
+                                                 ip=client_ip(request))
+        except decisions.DecisionError as exc:
+            err = exc
+    detail = {"message": str(err), "assessment": err.assessment} if err.assessment else str(err)
+    raise HTTPException(err.status, json.loads(json.dumps(detail, default=str)))
+
+
 # ------------------------------------------------------------------ analiz ekranları
 @router.get("/profit")
 def profit(days: int = Query(None, ge=7, le=365), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
@@ -287,7 +357,7 @@ def quality_report(days: int = Query(7, ge=1, le=90), _: CurrentUser = Depends(v
 
 @router.get("/scorecard")
 def scorecard(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
-    return decisions.scorecard(conn)
+    return {**decisions.scorecard(conn), "ai_accuracy": decisions.ai_accuracy(conn)}
 
 
 PREFERENCE_KEYS = {
@@ -436,8 +506,8 @@ def chat_send(body: ChatIn, user: CurrentUser = Depends(viewer), conn: Connectio
         raise HTTPException(429, "Çok fazla soru; bir dakika sonra tekrar deneyin.")
     q.append(now)
     conv = body.conversation_id or secrets.token_urlsafe(9)
-    history = [{"role": r["role"], "content": r["content"]} for r in rows(conn, """
-        SELECT role, content FROM ai_chat_messages WHERE conversation_id = :c AND user_id = :u ORDER BY id DESC LIMIT 10""",
+    history = [{"role": r["role"], "content": r["content"], "tools_used": r["tools_used"]} for r in rows(conn, """
+        SELECT role, content, tools_used FROM ai_chat_messages WHERE conversation_id = :c AND user_id = :u ORDER BY id DESC LIMIT 10""",
         c=conv, u=user.id)][::-1]
     conn.execute(text("INSERT INTO ai_chat_messages(user_id, conversation_id, role, content) VALUES (:u, :c, 'user', :m)"),
                  {"u": user.id, "c": conv, "m": body.message})

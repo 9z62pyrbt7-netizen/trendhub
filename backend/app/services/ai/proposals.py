@@ -106,10 +106,19 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
             if nm is not None and nm < d(th["ads_target_margin_after_ads"]):
                 checks.append(_check("low_margin", "block",
                                      f"Reklam sonrası net marj %{nm * 100:.1f}; hedef en az %{th['ads_target_margin_after_ads'] * 100:.0f}."))
-            risky = [i for i in inventory_status(conn, camp["product_ids"]) if i["stockout_risk"]] if camp["product_ids"] else []
+            risky = [i for i in inventory_status(conn, camp["product_ids"])
+                     if i["stockout_risk"] or i["out_of_stock"]] if camp["product_ids"] else []
             if risky:
-                checks.append(_check("stock_risk", "block", "DO_NOT_SCALE_ADS: kampanya ürünlerinde stok tükenme riski var.",
+                checks.append(_check("stock_risk", "block", "DO_NOT_SCALE_ADS: kampanya ürünlerinde stok yok veya tükenmek üzere.",
                                      products=[r["sku"] or r["product_id"] for r in risky]))
+            spike = row(conn, """SELECT (SELECT COALESCE(MAX(amount), 0) FROM ad_spend WHERE campaign_id = :c
+                                          AND spend_date >= CURRENT_DATE - 1) AS recent,
+                                        (SELECT COALESCE(SUM(amount), 0) / 7 FROM ad_spend WHERE campaign_id = :c
+                                          AND spend_date BETWEEN CURRENT_DATE - 8 AND CURRENT_DATE - 2) AS avg""", c=camp["id"])
+            if d(spike["avg"]) > 0 and d(spike["recent"]) > d(spike["avg"]) * 2 and d(spike["recent"]) >= 100:
+                checks.append(_check("spend_anomaly", "block",
+                                     f"Anormal reklam harcaması: son gün {tl(spike['recent'])}, önceki ortalama {tl(spike['avg'])}. "
+                                     "Neden anlaşılmadan bütçe artırılmaz.", recent=spike["recent"], avg=spike["avg"]))
             if camp["missing_cost"]:
                 checks.append(_check("missing_cost", "block", "Kampanya ürünlerinde maliyet eksik; kâr olduğundan yüksek görünür."))
             level = "high" if d(params.get("delta_per_day")) >= 200 else "medium"
@@ -124,12 +133,17 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
             return checks, "critical"
         level = "medium" if action == "inventory.restock" else "low"
 
+    if action in ("ads.increase_budget", "inventory.restock"):
+        from .data import data_quality
+        stale_orders = [q for q in data_quality(conn) if q["code"] == "orders_stale"]
+        if stale_orders:
+            checks.append(_check("stale_orders", "block", stale_orders[0]["message"] + " Para harcayan öneri bayat veriyle onaylanmaz."))
     cap = d(p.get("required_capital"))
     if cap > 0:
         from .capital import position
         pos = position(conn, exclude_proposal=p.get("id"))
         if pos["usable"] is None:
-            checks.append(_check("no_cash_data", "warning", "Kasa bilgisi girilmemiş; sermaye uygunluğu doğrulanamadı."))
+            checks.append(_check("no_cash_data", "block", "Kasa bilgisi girilmemiş: kasada olduğu doğrulanmayan para harcanamaz."))
         elif cap > pos["unused"]:
             checks.append(_check("capital_exceeded", "block",
                                  f"Gereken sermaye {tl(cap)}, kullanılabilir ve ayrılmamış sermaye {tl(pos['unused'])}."))
@@ -157,13 +171,16 @@ def propose(conn: Connection, *, agent: str, action_type: str, entity_type: str,
     checks, level = evaluate(conn, p)
     blocked = any(c["severity"] == "block" for c in checks)
     status = "blocked" if blocked else "pending_approval"
-    note, conf_adj = ceo_review(conn, action_type)
-    conf = None if confidence is None else max(0.0, min(1.0, confidence + conf_adj))
+    from .decisions import assess, situation_for
+    situation = situation_for(conn, action_type, entity_type, entity_id)
+    ceo = assess(conn, action_type, situation)
+    note = ceo["note"]
+    conf = None if confidence is None else round(max(0.0, min(1.0, confidence + ceo["confidence_adjustment"])), 3)
     values = {"agent": agent, "run": run_id, "ch": channel, "act": action_type, "et": entity_type, "eid": entity_id,
               "title": title[:300], "reason": reason[:2000], "ev": _json(evidence), "params": _json(params or {}),
               "exp": _json(expected_result or {}), "cap": d(required_capital), "capcat": capital_category,
               "risk": level, "conf": conf, "req": requires_approval, "status": status, "checks": _json(checks),
-              "note": note, "k": dedupe}
+              "note": note, "k": dedupe, "sit": situation, "stance": ceo["stance"], "assess": _json(ceo)}
     # Aynı varlık için ajanın açık başka aksiyonu varsa (ör. önce artır, şimdi durdur) eskisi geçersiz olur
     superseded = [r["id"] for r in rows(conn, """
         UPDATE ai_proposals SET status = 'superseded', updated_at = NOW()
@@ -174,16 +191,24 @@ def propose(conn: Connection, *, agent: str, action_type: str, entity_type: str,
         conn.execute(text("""UPDATE ai_proposals SET run_id = :run, title = :title, reason = :reason, evidence = CAST(:ev AS JSONB),
                              params = CAST(:params AS JSONB), expected_result = CAST(:exp AS JSONB), required_capital = :cap,
                              risk_level = :risk, confidence = :conf, status = :status, risk_checks = CAST(:checks AS JSONB),
-                             ceo_note = :note, updated_at = NOW() WHERE id = :id"""), {**values, "id": pid})
+                             ceo_note = :note, situation = :sit, ceo_stance = :stance, ceo_assessment = CAST(:assess AS JSONB),
+                             updated_at = NOW() WHERE id = :id"""), {**values, "id": pid})
     else:
         pid = conn.execute(text("""
             INSERT INTO ai_proposals(agent_code, run_id, channel, action_type, entity_type, entity_id, title, reason, evidence,
                                      params, expected_result, required_capital, capital_category, risk_level, confidence,
-                                     requires_approval, status, risk_checks, ceo_note, dedupe_key, expires_at)
+                                     requires_approval, status, risk_checks, ceo_note, dedupe_key, expires_at, situation,
+                                     ceo_stance, ceo_assessment)
             VALUES (:agent, :run, :ch, :act, :et, :eid, :title, :reason, CAST(:ev AS JSONB), CAST(:params AS JSONB),
                     CAST(:exp AS JSONB), :cap, :capcat, :risk, :conf, :req, :status, CAST(:checks AS JSONB), :note, :k,
-                    NOW() + INTERVAL '7 days') RETURNING id"""), values).scalar()
+                    NOW() + INTERVAL '7 days', :sit, :stance, CAST(:assess AS JSONB)) RETURNING id"""), values).scalar()
         activity(conn, f"{title} önerildi", agent=agent, kind="proposal", proposal_id=pid, run_id=run_id)
+        pv = _profit_validation(conn, p)
+        if pv:
+            activity(conn, pv, agent="product_profit", kind="validation", proposal_id=pid, run_id=run_id)
+        stance_tr = {"oppose": "KARŞI", "support": "destekliyor", "neutral": "nötr"}[ceo["stance"]]
+        activity(conn, f"CEO incelemesi ({stance_tr}): " + (note or "geçmişte benzer karar yok; kanıt yok."), agent="ceo",
+                 kind="ceo_review", level="warning" if ceo["stance"] == "oppose" else "info", proposal_id=pid, run_id=run_id)
         for c in checks:
             conn.execute(text("""INSERT INTO ai_risk_events(proposal_id, code, severity, message, details)
                                  VALUES (:p, :c, :s, :m, CAST(:d AS JSONB))"""),
@@ -199,19 +224,20 @@ def propose(conn: Connection, *, agent: str, action_type: str, entity_type: str,
     return pid
 
 
-def ceo_review(conn: Connection, action_type: str) -> tuple[str | None, float]:
-    """CEO: sahibin aynı türdeki geçmiş kararlarının GERÇEK sonuçlarına bakar (tercih ≠ kanıt)."""
-    from .decisions import track_record
-    tr = track_record(conn, action_type)
-    n, bad, good = tr["evaluated"], tr["worsened"], tr["improved"]
-    if n >= 3 and bad / n >= 0.6:
-        return (f"Dikkat: Bu tür kararı daha önce {n} kez uyguladın; {bad} durumda net kâr düştü. "
-                "Kanıt bu yaklaşımın aleyhine; bu sefer onaylamadan önce gerekçeyi yeniden değerlendir."), -0.2
-    if n >= 3 and good / n >= 0.6:
-        return f"Bu tür kararı {n} kez uyguladın; {good} durumda net kâr arttı.", 0.05
-    if n:
-        return f"Bu tür kararın {n} ölçülmüş sonucu var ({good} iyileşme, {bad} kötüleşme); henüz net bir örüntü yok.", 0.0
-    return None, 0.0
+def _profit_validation(conn: Connection, p: dict) -> str | None:
+    """Önerinin dayandığı kâr rakamını tek kaynaktan (finance_view → ai.data) yeniden hesaplayıp aktiviteye yazar."""
+    from .data import campaign_performance, product_economics
+    th = thresholds(conn)
+    if p["entity_type"] == "campaign":
+        c = next((c for c in campaign_performance(conn, Window(th["ads_window_days"])) if c["id"] == p["entity_id"]), None)
+        if c is None or c["ad_net_profit"] is None:
+            return "Kâr doğrulaması: güncel veriyle reklamın net kâr etkisi hesaplanamadı."
+        return (f"Kâr doğrulaması (finance_view): ürün marjı %{(c['product_margin_before_ads'] or 0) * 100:.1f}, "
+                f"reklam sonrası net {tl(c['ad_net_profit'])}.")
+    if p["entity_type"] == "product":
+        e = next(iter(product_economics(conn, Window(th["analysis_days"]), [p["entity_id"]])), None)
+        return f"Kâr doğrulaması (finance_view): {th['analysis_days']} gün net kâr {tl(e['net_profit'])}." if e else None
+    return None
 
 
 # ------------------------------------------------------------------ onay / ret / uygulama
@@ -255,6 +281,14 @@ def approve(conn: Connection, pid: int, user, note: str | None, ip: str | None) 
         log_audit(conn, actor=user.username, user_id=user.id, action="ai.proposal_blocked_at_approval", entity_type="ai_proposal",
                   entity_id=pid, ip=ip, details={"checks": [c["code"] for c in checks if c["severity"] == "block"]})
         raise ProposalError("Onay anında risk kontrolü başarısız: " + "; ".join(c["message"] for c in checks if c["severity"] == "block"))
+    # Owner override ≠ güvenlik bypass: CEO itiraz ediyorsa sahip gerekçeyle devam edebilir (yalnızca LOW/MEDIUM risk).
+    # Risk motorunun bloğu (yukarıda) hiçbir koşulda aşılamaz.
+    override = p.get("ceo_stance") == "oppose"
+    if override and level in ("high", "critical"):
+        raise ProposalError(f"CEO bu karara karşı ve risk {RISK_TR[level].upper()}: sahip onayıyla bile uygulanamaz.")
+    if override and len((note or "").strip()) < 10:
+        raise ProposalError("CEO bu karara karşı. Yine de devam etmek için gerekçeni yaz (en az 10 karakter); "
+                            "karar 'sahip override' olarak kaydedilir.", 422)
     result = execute_action(conn, p)
     status = "executed" if result.get("mode") == "automatic" and result.get("ok") else "approved"
     conn.execute(text("""UPDATE ai_proposals SET status = :s, decided_by = :u, decided_at = NOW(), decision_note = :n,
@@ -263,8 +297,13 @@ def approve(conn: Connection, pid: int, user, note: str | None, ip: str | None) 
                  {"s": status, "u": user.id, "n": note, "r": _json(result), "c": _json(checks), "l": level, "id": pid})
     from .decisions import record
     record(conn, proposal=p, actor="owner", decision="approved", user_id=user.id, snapshot=_snapshot(conn, p),
-           executed=status == "executed", reason=note)
-    activity(conn, f"Sahip onayladı: {p['title']}", agent="ceo", kind="approval", level="success", proposal_id=pid, user_id=user.id)
+           executed=status == "executed", reason=note, override=override, override_reason=note if override else None)
+    if override:
+        conn.execute(text("UPDATE ai_proposals SET owner_override = TRUE WHERE id = :id"), {"id": pid})
+        log_audit(conn, actor=user.username, user_id=user.id, action="ai.owner_override", entity_type="ai_proposal",
+                  entity_id=pid, ip=ip, details={"ceo_note": p.get("ceo_note"), "reason": note, "risk_level": level})
+    activity(conn, (f"Sahip CEO itirazına rağmen onayladı (override): {note}" if override else f"Sahip onayladı: {p['title']}"),
+             agent="ceo", kind="approval", level="warning" if override else "success", proposal_id=pid, user_id=user.id)
     if status == "approved":
         activity(conn, "Uygulama bağlantısı yok: öneri sahibin manuel uygulamasını bekliyor", kind="action", proposal_id=pid)
     log_audit(conn, actor=user.username, user_id=user.id, action="ai.proposal_approved", entity_type="ai_proposal",

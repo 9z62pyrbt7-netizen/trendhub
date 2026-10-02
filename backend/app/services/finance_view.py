@@ -222,3 +222,28 @@ def totals(conn: Connection, start, end, marketplace: str | None = None, cfg: Fi
     out["profit_after_vat"] = out["profit_before_vat"] - out["vat_estimate"]
     out["vat_complete"] = cfg.vat_complete and not out["orders_without_items"]
     return decorate(out)
+
+
+def campaign_ad_allocation(conn: Connection, start_date, end_date) -> dict[int, Decimal]:
+    """Ürün başına kampanya reklam harcaması payı: kampanya harcaması ÷ kampanyadaki ürün sayısı (eşit bölüşüm, TAHMİNİ).
+    SKU raporu, Reklam merkezi ve AI Control Center AYNI fonksiyonu kullanır (ürün kârı tek kaynak)."""
+    out: dict[int, Decimal] = {}
+    for r in rows(conn, """
+        WITH camp AS (
+            SELECT c.id, SUM(s.amount) AS spend FROM ad_campaigns c JOIN ad_spend s ON s.campaign_id = c.id
+             WHERE s.spend_date >= :sd AND s.spend_date <= :ed GROUP BY c.id),
+        n AS (SELECT campaign_id, COUNT(*) AS n FROM ad_campaign_products GROUP BY campaign_id)
+        SELECT x.product_id, SUM(camp.spend / n.n) AS spend
+          FROM ad_campaign_products x JOIN camp ON camp.id = x.campaign_id JOIN n ON n.campaign_id = x.campaign_id
+         GROUP BY x.product_id""", sd=start_date, ed=end_date):
+        out[r["product_id"]] = Decimal(r["spend"])
+    return out
+
+
+def sku_ad_expenses(conn: Connection, start_date, end_date) -> dict[str, Decimal]:
+    """SKU'ya doğrudan girilmiş reklam giderleri (expenses.category='advertising')."""
+    return {r["sku"]: Decimal(r["amount"]) for r in rows(conn, """
+        SELECT sku, SUM(amount) AS amount FROM expenses
+         WHERE sku IS NOT NULL AND category = 'advertising' AND expense_date >= :sd AND expense_date <= :ed
+         GROUP BY sku""", sd=start_date, ed=end_date)}
+
