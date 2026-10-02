@@ -64,11 +64,12 @@ n=$(echo "$integ" | grep -o '"state":"not_connected"' | wc -l)
 step "credential yokken hiçbir senkron işi planlanmaz"
 # Yalnızca iç (dışarıya istek atmayan) uyarı taraması ve web mağazası bakımı beklenir; pazaryeri/tedarikçi işi olmamalı.
 jobs=$(curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs?page_size=200")
-others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' || true)
+others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' -e '"job_type":"ai.cycle"' || true)
 [ -z "$others" ] || fail "beklenmeyen iş var: $others"
 
 step "dashboard ve panel"
 curl -fsS -b "$JAR" "$BASE_URL/api/dashboard?period=7d" | grep -q '"statuses"' || fail "dashboard"
+curl -fsS -b "$JAR" "$BASE_URL/api/ai/overview" | grep -q '"emergency_stop"' || fail "AI Control Center"
 curl -fsS "$BASE_URL/" | grep -q 'TrendHub' || fail "panel HTML"
 curl -fsS "$BASE_URL/assets/app.js" >/dev/null || fail "app.js"
 

@@ -87,7 +87,15 @@ def gates(conn: Connection, code: str, settings=None) -> list[dict]:
          "hint": None if settings.connector_write_enabled else "Güvenlik için pazaryerine yazma sunucu genelinde kapalı."},
         {"code": "store_write", "ok": bool(m["store_write"]), "label": "Bu mağaza için yayın izni",
          "hint": None if m["store_write"] else "Mağaza için yayın izni verilmedi."},
+        _emergency_gate(conn),
     ]
+
+
+def _emergency_gate(conn: Connection) -> dict:
+    from .ai.config import emergency_stop
+    stop = emergency_stop(conn)
+    return {"code": "emergency_stop", "ok": not stop, "label": "Acil durdurma kapalı",
+            "hint": "AI Control Center'da acil durdurma aktif: tüm yazma işlemleri durduruldu." if stop else None}
 
 
 def _drafts(conn: Connection, ids: list[int], code: str) -> list[dict]:

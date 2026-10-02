@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     # Mağaza sahibine yeni sipariş bildirimi (virgülle ayrılmış e-posta adresleri; boşsa gönderilmez).
     storefront_order_alert_emails: str = ""
 
+    # AI Control Center — CEO sohbeti için isteğe bağlı Claude API. Boşsa sohbet kural tabanlı çalışır (gerçek veriyle).
+    anthropic_api_key: str = ""
+    ai_model: str = "claude-opus-5-5"
+
     # E-fatura/e-arşiv sağlayıcısı: "" (kapalı). Uygulanmış sağlayıcı yoktur; bkz. app/services/einvoice.py
     einvoice_provider: str = ""
 

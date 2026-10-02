@@ -429,3 +429,33 @@ table.statement tr.info-line td { color: var(--text-3); font-style: italic; }
 label.wz-check { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; font-weight: 400; }
 label.wz-check input { width: auto; min-height: 0; margin-top: 3px; flex-shrink: 0; }
 .kpi .label .badge { white-space: normal; max-width: 100%; }
+
+/* AI Control Center */
+.ai-stop { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); margin-bottom: 16px; }
+.ai-stop.on { background: var(--bad-soft); border-color: var(--bad); }
+.ai-stop b { font-size: 14px; }
+.brief-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.brief-list li { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border-left: 4px solid var(--border); }
+.brief-list li.warning { border-left-color: var(--warn); }
+.brief-list li.critical { border-left-color: var(--bad); background: var(--bad-soft); }
+.brief-list li.action { border-left-color: var(--primary); }
+.brief-list .n { font-weight: 800; min-width: 18px; }
+.brief-list a { margin-left: auto; white-space: nowrap; font-size: 12px; }
+.ai-tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+.ai-tabs button { white-space: nowrap; }
+.proposal { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; background: var(--surface); display: grid; gap: 8px; }
+.proposal + .proposal { margin-top: 10px; }
+.proposal .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.proposal .head b { font-size: 15px; }
+.proposal .ceo { background: var(--violet-soft); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+.proposal .checks { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-2); }
+.proposal .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.chat-box { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding: 4px; }
+.chat-msg { max-width: 88%; padding: 10px 12px; border-radius: 12px; white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
+.chat-msg.user { align-self: flex-end; background: var(--primary); color: var(--primary-ink); }
+.chat-msg.assistant { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); }
+.chat-msg .meta { display: block; margin-top: 6px; font-size: 11px; opacity: .7; }
+.chat-form { display: flex; gap: 8px; margin-top: 12px; }
+.chat-form input { flex: 1; min-width: 0; }
+.chat-suggest { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 640px) { .chat-msg { max-width: 96%; } .proposal .actions .btn { flex: 1; } }

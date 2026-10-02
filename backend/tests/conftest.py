@@ -75,7 +75,8 @@ os.environ.update({
 })
 run_migrations(_APP_DB)
 
-DATA_TABLES = ["notification_outbox", "einvoice_records", "storefront_password_resets", "storefront_customer_sessions",
+DATA_TABLES = ["ai_decision_outcomes", "ai_decisions", "ai_activity", "ai_risk_events", "ai_proposals", "ai_agent_runs",
+               "ai_owner_preferences", "ai_capital_accounts", "ai_chat_messages", "ai_briefs", "ai_inventory_snapshots", "notification_outbox", "einvoice_records", "storefront_password_resets", "storefront_customer_sessions",
                "storefront_customer_addresses", "storefront_customers", "storefront_payment_events", "stock_reservations", "storefront_cart_items", "storefront_carts",
                "storefront_orders", "storefront_products", "listing_publications", "publish_requests", "alerts", "marketplace_connections", "ad_performance",
                "ad_spend", "ad_campaign_products", "ad_campaigns", "ad_accounts", "listing_drafts", "marketplace_category_mappings", "marketplace_rules", "supplier_product_changes",
@@ -110,6 +111,7 @@ def engine():
             ('finance.commission_vat_rate', '20'), ('finance.expense_vat_mode', '"unset"'),
             ('finance.expense_vat_rate', '20'), ('finance.fx_rates', '{}') ON CONFLICT (key) DO NOTHING"""))
         c.execute(text("INSERT INTO marketplace_rules(marketplace_id) SELECT id FROM marketplaces"))
+        c.execute(text("UPDATE ai_agents SET enabled = available, last_run_at = NULL, last_status = NULL, last_error = NULL"))
         c.execute(text("UPDATE marketplaces SET last_check_at = NULL, last_check_ok = NULL, last_check_message = NULL, last_sync_at = NULL"))
     from app.security import login_limiter
     login_limiter.hits.clear()

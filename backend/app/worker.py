@@ -68,6 +68,7 @@ class Worker:
             sync_service.schedule_supplier_jobs(conn)
             sync_service.schedule_alerts_scan(conn)
             sync_service.schedule_storefront_maintenance(conn)
+            sync_service.schedule_ai_cycle(conn)
 
     @contextmanager
     def _keepalive(self, job_id: int):

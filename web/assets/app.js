@@ -354,8 +354,9 @@ PAGES.dashboard = {
     const draw = async () => {
       setHeader('Genel Bakış', 'Tüm pazaryerlerinin merkezi özeti', periodSeg(state.period, draw));
       loading();
-      const [d, al] = await Promise.all([api('/api/dashboard', { query: periodQuery() }),
-        api('/api/alerts', { query: { status: 'open', page_size: 5 } }).catch(() => null)]);
+      const [d, al, ai] = await Promise.all([api('/api/dashboard', { query: periodQuery() }),
+        api('/api/alerts', { query: { status: 'open', page_size: 5 } }).catch(() => null),
+        api('/api/ai/overview').catch(() => null)]);
       const s = d.summary, t = s.orders;
       const connected = d.integrations.filter((i) => i.state === 'connected').length;
       const hasMarketplaceOrders = d.by_marketplace.some((m) => Number(m.orders));
@@ -366,6 +367,9 @@ PAGES.dashboard = {
         ${al && al.total ? html`<a class="attention-box ${al.items.some((a) => a.severity === 'critical') ? 'bad' : 'warn'}" href="#/alerts">
           <span class="big num">${num(al.total)}</span><span><b>konu ilgilenmeni bekliyor</b>
           <span class="small">${al.items.slice(0, 3).map((a) => `${SEV_ICON[a.severity]} ${a.title}: ${a.description || ''}`).join(' · ')}</span></span><span class="go">Uyarılar →</span></a>` : ''}
+        ${ai ? html`<div class="card" style="margin-bottom:16px"><div class="card-head"><div><h2>Bugün bilmen gerekenler</h2>
+          <p>AI CEO özeti${ai.emergency_stop ? ' · ⛔ acil durdurma aktif' : ''}</p></div><a class="btn btn-sm" href="#/ai">AI Control Center →</a></div>
+          ${briefList(ai.brief.items.slice(0, 5))}</div>` : ''}
         ${connected === 0 ? html`<div class="notice info" style="margin-bottom:16px">Henüz bağlı bir pazaryeri yok. <a href="#/integrations">Entegrasyonlar → Mağaza Ekle</a> ile mağazanızı bağladığınızda siparişler otomatik gelir. Aşağıdaki değerler gerçek kayıtlardan hesaplanır; veri yoksa 0 gösterilir.</div>` : ''}
         <div class="grid grid-4">
           ${kpi('Bugünkü satış', money0(d.today.revenue), `${num(d.today.orders)} sipariş`)}
@@ -2377,6 +2381,334 @@ async function sfSettings(box) {
   });
 }
 
+// ---- AI Control Center (öneri + onay; V1'de hiçbir platform aksiyonu otomatik uygulanmaz)
+const AI_TABS = [['brief', 'Özet'], ['chat', 'CEO ile Konuş'], ['approvals', 'Onaylar'], ['profit', 'Kâr Merkezi'], ['ads', 'Reklam'],
+  ['inventory', 'Stok'], ['capital', 'Sermaye'], ['journal', 'Karar Günlüğü'], ['activity', 'Ajan Hareketleri'], ['risk', 'Risk Merkezi'],
+  ['agents', 'Ajanlar'], ['settings', 'Ayarlar']];
+const AI_HEALTH = { RUNNING: ['Çalışıyor', 'tone-info'], IDLE: ['Hazır', 'tone-good'], DEGRADED: ['Kısıtlı veri', 'tone-warn'], ERROR: ['Hata', 'tone-bad'],
+  STOPPED: ['Kapalı', ''], RUNNING_READ_ONLY: ['Salt analiz (acil durdurma)', 'tone-warn'], UNAVAILABLE: ['Veri kaynağı yok', ''] };
+const AI_CLASS_TONE = { STAR: 'tone-good', PROFITABLE: 'tone-info', WATCH: 'tone-warn', LOSS: 'tone-bad', NO_DATA: '' };
+const AI_VERDICT_TONE = { INCREASE_BUDGET: 'tone-good', CONTINUE: 'tone-info', TEST: 'tone-info', DECREASE_BUDGET: 'tone-warn', PAUSE: 'tone-bad', INSUFFICIENT_DATA: '' };
+const AI_RISK_TONE = { low: 'tone-good', medium: 'tone-info', high: 'tone-warn', critical: 'tone-bad' };
+const AI_RESULT = { improved: ['İyileşti', 'tone-good'], worsened: ['Kötüleşti', 'tone-bad'], neutral: ['Nötr', ''], insufficient_data: ['Veri yetersiz', ''] };
+const aiState = { conv: null, msgs: [] };
+
+const briefList = (items) => (items && items.length ? html`<ol class="brief-list">${items.map((it, i) => html`<li class="${it.level}"><span class="n">${i + 1}.</span>
+  <span>${it.text}<span class="muted small" style="display:block">${it.source}</span></span>${it.link ? html`<a href="${it.link}">Aç →</a>` : ''}</li>`)}</ol>`
+  : html`<p class="muted">Henüz özet yok. Ajanlar ilk kez çalıştığında oluşur.</p>`);
+
+PAGES.ai = {
+  title: 'AI Control Center', icon: 'ai',
+  async render(params) {
+    const tab = params.get('tab') || 'brief';
+    const ov = await api('/api/ai/overview');
+    setHeader('AI Control Center', 'Amaç: sermayeyi kontrollü riskle kullanıp sürdürülebilir NET KÂRI artırmak. Ajanlar önerir, sen onaylarsın.',
+      can('operator') ? html`<button class="btn" id="ai-run">Ajanları şimdi çalıştır</button>` : '');
+    const pend = ov.counts.pending + ov.counts.to_apply;
+    view().innerHTML = renderVal(html`
+      <div class="ai-stop ${ov.emergency_stop ? 'on' : ''}">
+        ${ov.emergency_stop ? html`<b>⛔ ACİL DURDURMA AKTİF</b><span class="small">Fiyat, reklam, kampanya, yayın ve tedarikçiye otomatik gönderim durdu. Analiz sürüyor.</span>`
+          : html`<b>Ajanlar: ${ov.enabled ? 'açık' : 'kapalı'}</b><span class="small muted">Son döngü: ${ov.last_cycle ? dateTime(ov.last_cycle.started_at) : 'henüz yok'} · CEO sohbeti: ${ov.llm.available ? 'Claude' : 'kural tabanlı (API anahtarı yok)'}</span>`}
+        <span class="spacer"></span>
+        ${ov.emergency_stop ? (can('admin') ? html`<button class="btn" id="ai-stop-off">Durdurmayı kaldır</button>` : '')
+          : (can('operator') ? html`<button class="btn btn-danger" id="ai-stop-on">TÜM AJANLARI DURDUR</button>` : '')}
+      </div>
+      <div class="seg ai-tabs" role="tablist" style="margin-bottom:16px">${AI_TABS.map(([k, l]) => html`<button role="tab" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}" data-aitab="${k}">${l}${k === 'approvals' && pend ? ` (${pend})` : ''}</button>`)}</div>
+      <div id="ai-body"></div>`);
+    $$('[data-aitab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/ai?tab=${b.dataset.aitab}`; }));
+    $('#ai-run')?.addEventListener('click', async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Çalışıyor…';
+      try { await api('/api/ai/run', { method: 'POST' }); toast('Ajanlar çalıştı; öneriler güncellendi'); refresh(); } catch (err) { fail(err); e.target.disabled = false; }
+    });
+    $('#ai-stop-on')?.addEventListener('click', async () => {
+      const reason = prompt('Tüm ajanların yazma işlemleri durdurulacak. Neden (isteğe bağlı):', '');
+      if (reason === null) return;
+      try { await api('/api/ai/emergency-stop', { method: 'POST', body: { active: true, reason: reason || null } }); toast('Acil durdurma aktif'); refresh(); } catch (err) { fail(err); }
+    });
+    $('#ai-stop-off')?.addEventListener('click', async () => {
+      if (!confirm('Acil durdurma kaldırılsın mı? Onay ve uygulama yeniden mümkün olur.')) return;
+      try { await api('/api/ai/emergency-stop', { method: 'POST', body: { active: false } }); toast('Acil durdurma kaldırıldı'); refresh(); } catch (err) { fail(err); }
+    });
+    const box = $('#ai-body');
+    const fn = { brief: aiBrief, chat: aiChat, approvals: aiApprovals, profit: aiProfit, ads: aiAds, inventory: aiInventory, capital: aiCapital,
+      journal: aiJournal, activity: aiActivity, risk: aiRisk, agents: aiAgents, settings: aiSettings }[tab] || aiBrief;
+    return fn(box, ov);
+  },
+};
+
+async function aiBrief(box, ov) {
+  const sc = await api('/api/ai/scorecard').catch(() => null);
+  const row2 = (label, k, f) => html`<tr><td>${label}</td><td class="r num">${sc.before ? f(sc.before[k]) : '—'}</td><td class="r num">${sc.after ? f(sc.after[k]) : '—'}</td></tr>`;
+  box.innerHTML = renderVal(html`
+    <div class="card"><div class="card-head"><div><h2>Bugün bilmen gerekenler</h2><p>CEO yüzlerce metriği dökmez; en önemli konuları önem sırasıyla gösterir.${ov.brief.live ? ' (canlı hesaplandı)' : ''}</p></div></div>
+      ${briefList(ov.brief.items)}</div>
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Ajan durumu</h3><div class="table-wrap mt"><table><tbody>
+        ${ov.agents.filter((a) => a.available).map((a) => html`<tr><td><b>${a.name}</b>${a.last_error ? html`<span class="small neg">${a.last_error}</span>` : ''}</td>
+          <td><span class="badge ${AI_HEALTH[a.health][1]}">${AI_HEALTH[a.health][0]}</span></td><td class="small muted">${a.last_run_at ? dateTime(a.last_run_at) : 'çalışmadı'}</td></tr>`)}
+      </tbody></table></div></div>
+      <div class="card"><h3>AI karnesi</h3>
+        ${!sc || !sc.go_live ? html`<p class="muted small mt">${sc ? sc.message : 'Karne alınamadı.'}</p>` : html`
+          <p class="small muted">Başlangıç: ${date(sc.go_live)} (${sc.after_days} gün). ${sc.message || ''}</p>
+          <div class="table-wrap mt"><table><thead><tr><th>Metrik</th><th class="r">AI öncesi</th><th class="r">AI sonrası</th></tr></thead><tbody>
+            ${row2('Günlük net kâr', 'net_profit_per_day', money)}${row2('Net marj', 'net_margin', pct)}${row2('Reklam lirası başına kâr', 'profit_per_ad_lira', (v) => (v === null || v === undefined ? '—' : Number(v).toFixed(2)))}
+            ${row2('İade oranı', 'refund_rate', pct)}${row2('Stoksuz ürün-gün', 'stockout_product_days', (v) => (v === null || v === undefined ? 'ölçülmedi' : num(v)))}
+          </tbody></table></div>
+          <p class="small mt">Karar başarı oranı: <b>${sc.decision_success_rate === null ? '—' : pct(sc.decision_success_rate)}</b> (${num(sc.decisions_evaluated)} ölçülmüş karar)</p>
+          <p class="small muted">${sc.note}</p>`}</div>
+    </div>`);
+}
+
+async function aiChat(box) {
+  const draw = () => {
+    const log = $('#chat-log');
+    log.innerHTML = renderVal(aiState.msgs.length ? html`${aiState.msgs.map((m) => html`<div class="chat-msg ${m.role}">${m.content}${m.role === 'assistant' && m.engine ? html`<span class="meta">${m.engine === 'claude' ? 'Claude' : 'Kural motoru'}${m.tools_used && m.tools_used.length ? ` · veri: ${m.tools_used.join(', ')}` : ''}</span>` : ''}</div>`)}`
+      : html`<p class="muted small">CEO yalnızca sistemdeki gerçek veriye dayanarak cevap verir; veri yoksa "yok" der. Hiçbir işlemi kendisi uygulamaz.</p>`);
+    log.scrollTop = log.scrollHeight;
+  };
+  box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>CEO ile Konuş</h2></div>
+      ${aiState.conv ? html`<button class="btn btn-sm" id="chat-new">Yeni konuşma</button>` : ''}</div>
+    <div class="chat-box" id="chat-log"></div>
+    <form class="chat-form" id="chat-form"><input name="message" maxlength="2000" placeholder="Örn. Neden kâr düştü?" autocomplete="off" aria-label="Soru"><button class="btn btn-primary" type="submit">Sor</button></form>
+    <div class="chat-suggest">${['Bugün mağazada ne oldu?', 'Neden kâr düştü?', 'Zarar eden ürünleri bul.', 'Hangi ürünlere reklam vermeliyiz?',
+      '5000 TL reklam bütçesini nasıl kullanmalıyız?', 'Şu anda sisteme 50.000 TL koyarsam ne kadarını kullanmak mantıklı?', 'Bu ay neyi yanlış yaptım?'].map((q) => html`<button class="chip" type="button" data-q="${q}">${q}</button>`)}</div></div>`);
+  draw();
+  const send = async (q) => {
+    if (!q.trim()) return;
+    aiState.msgs.push({ role: 'user', content: q });
+    aiState.msgs.push({ role: 'assistant', content: 'Veriye bakıyorum…' });
+    draw();
+    try {
+      const r = await api('/api/ai/chat', { method: 'POST', body: { message: q, conversation_id: aiState.conv } });
+      aiState.conv = r.conversation_id;
+      aiState.msgs[aiState.msgs.length - 1] = { role: 'assistant', content: r.answer, engine: r.engine, tools_used: r.tools_used };
+    } catch (e) { aiState.msgs[aiState.msgs.length - 1] = { role: 'assistant', content: `Hata: ${e.message}` }; }
+    draw();
+  };
+  $('#chat-form').addEventListener('submit', (e) => { e.preventDefault(); const i = e.target.elements.message; const q = i.value; i.value = ''; send(q); });
+  $$('[data-q]', box).forEach((b) => b.addEventListener('click', () => send(b.dataset.q)));
+  $('#chat-new')?.addEventListener('click', () => { aiState.conv = null; aiState.msgs = []; aiChat(box); });
+}
+
+const evidenceList = (ev) => html`<dl class="kv small">${Object.entries(ev || {}).filter(([, v]) => v !== null && v !== '' && typeof v !== 'object').slice(0, 12).map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl>`;
+
+async function aiApprovals(box, ov, page = 1, status = 'open') {
+  const d = await api('/api/ai/proposals', { query: { status: status === 'all' ? '' : status, page, page_size: 20 } });
+  box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Onaylar ve görevler</h2>
+      <p>Para harcayan veya müşteriyi etkileyen her öneri onay ister. Risk motorunun bloke ettiği öneri kimse tarafından onaylanamaz. V1'de platforma yazan bağlantı yok: onaydan sonra işlemi platformda yapıp "Uyguladım" deyin; sonuç ölçümü o anda başlar.</p></div>
+      <select id="aip-status" aria-label="Durum">${[['open', 'Açık'], ['pending_approval', 'Onay bekleyen'], ['approved', 'Uygulanmayı bekleyen'], ['blocked', 'Bloke'], ['executed', 'Uygulandı'], ['rejected', 'Reddedildi'], ['all', 'Tümü']].map(([v, l]) => html`<option value="${v}" ${raw(v === status ? 'selected' : '')}>${l}</option>`)}</select></div>
+    ${d.items.length ? html`${d.items.map((p) => html`<div class="proposal">
+      <div class="head"><b>${p.title}</b><span class="badge ${AI_RISK_TONE[p.risk_level]}">${p.risk_label} risk</span><span class="badge">${p.status_label}</span>
+        ${p.requires_approval ? '' : html`<span class="badge plain">Görev</span>`}<span class="muted small">${p.agent_name} · ${dateTime(p.created_at)}${p.confidence !== null ? ` · güven ${pct(p.confidence)}` : ''}</span></div>
+      <div>${p.reason}</div>
+      ${Number(p.required_capital) ? html`<div class="small">Gereken sermaye: <b>${money(p.required_capital)}</b> (${p.capital_category || '—'})</div>` : ''}
+      ${p.ceo_note ? html`<div class="ceo"><b>CEO:</b> ${p.ceo_note}</div>` : ''}
+      ${p.risk_checks.length ? html`<ul class="checks">${p.risk_checks.map((c) => html`<li class="${c.severity === 'block' ? 'neg' : ''}">${c.severity === 'block' ? '⛔' : '⚠️'} ${c.message}</li>`)}</ul>` : ''}
+      ${p.execution_result && p.execution_result.instructions ? html`<div class="notice info small">${p.execution_result.instructions}</div>` : ''}
+      <details><summary class="small">Detay / kanıt</summary>${evidenceList(p.evidence)}${Object.keys(p.params || {}).length ? evidenceList(p.params) : ''}
+        <a href="#" class="small" data-trail="${p.id}">İşlem izini göster</a><div id="trail-${p.id}"></div></details>
+      ${can('admin') ? html`<div class="actions">
+        ${p.status === 'pending_approval' ? html`<button class="btn btn-primary btn-sm" data-ok="${p.id}">${p.requires_approval ? 'ONAYLA' : 'Ele aldım'}</button><button class="btn btn-sm" data-no="${p.id}">REDDET</button>` : ''}
+        ${p.status === 'blocked' ? html`<button class="btn btn-sm" data-no="${p.id}">Kapat</button>` : ''}
+        ${p.status === 'approved' ? html`<button class="btn btn-primary btn-sm" data-done="${p.id}">Uyguladım</button>` : ''}</div>` : ''}
+    </div>`)}${pager(d, (pg) => aiApprovals(box, ov, pg, status))}` : empty('Kayıt yok', 'Bu durumda öneri yok.')}</div>`);
+  $('#aip-status').addEventListener('change', (e) => aiApprovals(box, ov, 1, e.target.value));
+  const act = async (path, label, ask) => {
+    const note = ask ? prompt(ask, '') : '';
+    if (note === null) return;
+    try { await api(path, { method: 'POST', body: { note: note || null } }); toast(label); aiApprovals(box, ov, page, status); } catch (e) { fail(e); }
+  };
+  $$('[data-ok]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.ok}/approve`, 'Onaylandı', 'Not (isteğe bağlı):')));
+  $$('[data-no]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.no}/reject`, 'Reddedildi', 'Neden reddediyorsun? (CEO öğrenir)')));
+  $$('[data-done]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.done}/executed`, 'Uygulandı olarak kaydedildi', 'Platformda ne yaptın? (isteğe bağlı)')));
+  $$('[data-trail]', box).forEach((a) => a.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const t = await api('/api/ai/activity', { query: { proposal_id: a.dataset.trail, page_size: 50 } });
+    $(`#trail-${a.dataset.trail}`).innerHTML = renderVal(html`<ul class="timeline mt">${t.items.slice().reverse().map((x) => html`<li><span class="muted small">${dateTime(x.created_at)}</span> ${x.agent_name || x.username || ''}: ${x.message}</li>`)}</ul>`);
+  }));
+}
+
+async function aiProfit(box) {
+  const d = await api('/api/ai/profit');
+  const p = d.period;
+  box.innerHTML = renderVal(html`
+    <div class="grid grid-4">${kpi('Tahmini net kâr', money0(p.net_profit), `${d.window.days} gün · marj ${pct(p.net_margin)}`, signClass(p.net_profit), TAHMINI)}
+      ${kpi('Net satış', money0(p.net_sales), `${num(p.orders)} sipariş`)}${kpi('Reklam harcaması', money0(p.ad_spend), 'Reklam merkezi kayıtları')}
+      ${kpi('Zarar eden ürün', num(d.counts.LOSS), `${num(d.counts.NO_DATA)} ürün veri yok`, d.counts.LOSS ? 'neg' : '')}</div>
+    <div class="card mt"><div class="card-head"><div><h2>SKU birim ekonomisi</h2><p>${d.note} Eşikler Ayarlar'dan değişir (yıldız: marj ≥ ${pct(d.thresholds.star_margin)} ve kâr ≥ ${money0(d.thresholds.star_min_profit)}).</p></div></div>
+      <div class="chips">${Object.entries(d.classes).map(([k, l]) => html`<span class="chip"><span class="badge ${AI_CLASS_TONE[k]}">${l}</span> ${num(d.counts[k])}</span>`)}</div>
+      ${d.products.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Ürün</th><th>Sınıf</th><th class="r">Adet</th><th class="r">Net satış</th><th class="r">Maliyet</th><th class="r">Komisyon</th><th class="r">Kargo</th><th class="r">İade</th><th class="r">Reklam payı</th><th class="r">Net kâr</th><th class="r">Net marj</th></tr></thead><tbody>
+        ${d.products.slice().sort((a, b) => Number(b.net_profit) - Number(a.net_profit)).map((x) => html`<tr><td><b>${x.name}</b><span class="muted small">${x.sku || ''}</span></td>
+          <td><span class="badge ${AI_CLASS_TONE[x.class]}" title="${x.class_reason}">${x.class_label}</span></td><td class="r num">${num(x.units)}</td><td class="r num">${money(x.net_sales)}</td>
+          <td class="r num">${x.missing_cost ? html`<span class="badge tone-warn">Eksik</span>` : money(x.product_cost)}</td><td class="r num">${money(x.commission)}</td><td class="r num">${money(x.shipping)}</td>
+          <td class="r num">${money(x.refund)}</td><td class="r num">${money(x.ad_spend_allocated)}</td><td class="r num ${signClass(x.net_profit)}"><b>${money(x.net_profit)}</b></td><td class="r num">${pct(x.net_margin)}</td></tr>`)}
+      </tbody></table></div>` : empty('Satış yok', 'Seçili dönemde satış veya reklam harcaması olan ürün yok.')}</div>`);
+}
+
+async function aiAds(box) {
+  const d = await api('/api/ai/ads');
+  box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Reklam ajanı (son ${d.window_days} gün)</h2><p>${d.note}</p></div><a class="btn btn-sm" href="#/ads">Reklam verisi gir →</a></div>
+    ${d.campaigns.length ? html`<div class="table-wrap"><table><thead><tr><th>Kampanya</th><th class="r">Günlük bütçe</th><th class="r">Harcama</th><th class="r">Tıklama</th><th class="r">CTR</th><th class="r">CPC</th><th class="r">Dönüşüm</th><th class="r">ROAS</th><th class="r">Reklam sonrası net</th><th>Karar</th></tr></thead><tbody>
+      ${d.campaigns.map((c) => html`<tr><td><b>${c.name}</b><span class="muted small">${c.channel}${c.stock_risk ? ' · ⚠️ stok riski' : ''}</span></td>
+        <td class="r num">${c.daily_budget === null ? html`<span class="muted">—</span>` : money(c.daily_budget)}${can('operator') ? html`<br><a href="#" class="small" data-budget="${c.id}" data-cur="${c.daily_budget ?? ''}">düzenle</a>` : ''}</td>
+        <td class="r num">${money(c.spend)}</td><td class="r num">${num(c.clicks)}</td><td class="r num">${pct(c.ctr)}</td><td class="r num">${money(c.cpc)}</td><td class="r num">${pct(c.conversion_rate)}</td>
+        <td class="r num">${c.roas === null ? '—' : Number(c.roas).toFixed(2)}</td><td class="r num ${signClass(c.ad_net_profit)}"><b>${money(c.ad_net_profit)}</b><span class="muted small">${pct(c.net_margin_after_ads)}</span></td>
+        <td><span class="badge ${AI_VERDICT_TONE[c.verdict]}">${c.verdict_label}</span><span class="small muted" style="display:block;max-width:320px">${c.verdict_reason}</span></td></tr>`)}
+    </tbody></table></div>` : empty('Aktif kampanya yok', 'Reklam merkezinde kampanya, harcama ve performans (tıklama, sipariş, ciro) girildiğinde değerlendirilir.')}</div>`);
+  $$('[data-budget]', box).forEach((a) => a.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const v = prompt('Kampanyanın platformdaki günlük bütçesi (TL, boş = bilinmiyor):', a.dataset.cur);
+    if (v === null) return;
+    try { await api(`/api/ai/campaigns/${a.dataset.budget}/daily-budget`, { method: 'PUT', body: { daily_budget: v === '' ? null : Number(v.replace(',', '.')) } }); toast('Bütçe kaydedildi'); aiAds(box); } catch (err) { fail(err); }
+  }));
+}
+
+async function aiInventory(box) {
+  const d = await api('/api/ai/inventory');
+  const risky = d.items.filter((i) => i.stockout_risk);
+  box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Stok / tedarikçi ajanı</h2>
+      <p>Model: <b>${d.models[d.model]}</b>. Satış hızı tüm kanallardan; kullanılabilir stok kanallar arası düşülmüş. ${d.stockout_days} günden az stoğu kalan ürünler için reklam ölçeklenmez (DO_NOT_SCALE_ADS).</p></div></div>
+    ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Ürün</th><th class="r">Kullanılabilir</th><th class="r">Tedarikçi</th><th class="r">7 gün satış</th><th class="r">Günlük hız</th><th class="r">Kalan gün</th><th>Durum</th></tr></thead><tbody>
+      ${d.items.map((i) => html`<tr><td><b>${i.name}</b><span class="muted small">${i.sku || ''}</span></td><td class="r num">${num(i.available)}</td><td class="r num">${num(i.supplier_stock)}</td>
+        <td class="r num">${num(i.units_7d)}</td><td class="r num">${i.daily_velocity}</td><td class="r num">${i.days_of_inventory ?? '—'}</td>
+        <td>${i.stockout_risk ? html`<span class="badge tone-bad">Tükenme riski</span>` : i.dead_stock ? html`<span class="badge tone-warn">Satmayan stok</span>` : html`<span class="badge tone-good">Normal</span>`}</td></tr>`)}
+    </tbody></table></div><p class="small muted mt">${num(risky.length)} üründe tükenme riski.</p>` : empty('İzlenen ürün yok', 'Son satışları olan veya reklamı yapılan ürünler burada izlenir.')}</div>`);
+}
+
+async function aiCapital(box) {
+  const c = await api('/api/ai/capital');
+  const t = c.totals;
+  box.innerHTML = renderVal(html`
+    <div class="notice ${c.usable === null ? 'warn' : 'info'}" style="margin-bottom:16px"><b>CEO:</b> ${c.recommendation}</div>
+    <div class="grid grid-4">${kpi('Kullanılabilir sermaye', c.usable === null ? '—' : money0(c.usable), 'Kasa − borçlar − ayrılmış − rezerv (üst limitle)')}
+      ${kpi('Gerekçelendirilmiş', money0(c.justified), 'Kanıta dayalı açık öneriler')}${kpi('Kullanılmayan', c.unused === null ? '—' : money0(c.unused), 'Fırsat yoksa kasada kalır')}
+      ${kpi('Nakit rezervi', money0(c.reserve_required), `Aylık sabit gider ${money0(c.monthly_opex)}`)}</div>
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Nakit pozisyonu (kâr ≠ nakit)</h3><dl class="kv mt">${Object.entries(c.kinds).map(([k, l]) => html`<dt>${l}</dt><dd>${money(t[k])}</dd>`)}</dl>
+        <p class="small muted">Bekleyen hakediş (${money(c.pending_payout_not_counted)}) henüz kasada değil; kullanılabilir sayılmaz.</p></div>
+      <div class="card"><h3>Gerekçelendirilmiş kullanım</h3>${c.justified_by_category.length ? html`<dl class="kv mt">${c.justified_by_category.map((x) => html`<dt>${x.label}</dt><dd>${money(x.amount)} (${x.n} öneri)</dd>`)}</dl>` : html`<p class="muted small mt">Kanıta dayalı sermaye ihtiyacı yok.</p>`}
+        <p class="small mt">Sermaye verimliliği: ${c.efficiency.profit_per_lira === null ? html`<span class="muted">henüz ölçülmedi</span>` : html`<b>${Number(c.efficiency.profit_per_lira).toFixed(2)} TL</b> net kâr / harcanan 1 TL (${c.efficiency.measured_decisions} karar)`}</p></div>
+    </div>
+    <div class="card mt"><div class="card-head"><div><h2>Hesaplar</h2><p>Banka / hakediş API'si bağlı değil; tutarları güncel tutun.</p></div></div>
+      ${c.accounts.length ? html`<div class="table-wrap"><table><thead><tr><th>Tür</th><th>Ad</th><th class="r">Tutar</th><th>Tarih</th><th></th></tr></thead><tbody>
+        ${c.accounts.map((a) => html`<tr><td>${c.kinds[a.kind]}</td><td>${a.name}</td><td class="r num">${money(a.amount)}</td><td>${date(a.as_of)}</td>
+          <td class="r">${can('admin') ? html`<button class="btn btn-sm btn-danger-text" data-del="${a.id}">Sil</button>` : ''}</td></tr>`)}</tbody></table></div>` : ''}
+      ${can('admin') ? html`<form class="form-grid mt" id="cap-form"><label>Tür<select name="kind">${Object.entries(c.kinds).map(([k, l]) => html`<option value="${k}">${l}</option>`)}</select></label>
+        <label>Ad<input name="name" required maxlength="100" placeholder="ör. Ziraat, Trendyol, Çanta Bayim"></label>
+        <label>Tutar (TL)<input name="amount" type="number" step="0.01" min="0" required></label><label>Tarih<input name="as_of" type="date"></label>
+        <p class="form-error full"></p><button class="btn btn-primary" type="submit">Kaydet</button></form>` : ''}</div>`);
+  $('#cap-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(e.target, async () => { const v = formData(e.target); await api('/api/ai/capital/accounts', { method: 'PUT', body: { ...v, as_of: v.as_of || null } }); toast('Kaydedildi'); aiCapital(box); });
+  });
+  $$('[data-del]', box).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Hesap kaydı silinsin mi?')) return;
+    try { await api(`/api/ai/capital/accounts/${b.dataset.del}`, { method: 'DELETE' }); aiCapital(box); } catch (e) { fail(e); }
+  }));
+}
+
+async function aiJournal(box, ov, page = 1) {
+  const [d, q, o] = await Promise.all([api('/api/ai/decisions', { query: { page, page_size: 20 } }), api('/api/ai/quality-report', { query: { days: 7 } }), api('/api/ai/owner')]);
+  const lst = (xs) => (xs.length ? html`<ul class="small">${xs.map((x) => html`<li>${x.title || x.decision_type} ${x.profit_change !== null && x.profit_change !== undefined ? html`(${money(x.profit_change)})` : ''}</li>`)}</ul>` : html`<p class="muted small">Yok</p>`);
+  box.innerHTML = renderVal(html`
+    <div class="card"><div class="card-head"><div><h2>Karar Kalitesi Raporu (7 gün)</h2><p>${q.note}</p></div></div>
+      <div class="grid grid-3">
+        <div><h3>Başarılı kararların</h3>${lst(q.owner_successes)}</div><div><h3>Kâr düşüren kararların</h3>${lst(q.owner_failures)}</div>
+        <div><h3>AI hataları</h3>${lst(q.ai_mistakes)}</div><div><h3>Olası kaçırılan fırsatlar</h3>${lst(q.missed_opportunities)}</div>
+        <div><h3>Tekrarlanan hatalar</h3>${q.repeated_mistakes.length ? html`<ul class="small">${q.repeated_mistakes.map((x) => html`<li>${x.message}</li>`)}</ul>` : html`<p class="muted small">Yok</p>`}</div>
+        <div><h3>Dersler</h3>${q.lessons.length ? html`<ul class="small">${q.lessons.map((x) => html`<li>${x}</li>`)}</ul>` : html`<p class="muted small">—</p>`}<p class="small muted">${num(q.awaiting_measurement)} karar ölçüm bekliyor.</p></div>
+      </div></div>
+    <div class="card mt"><div class="card-head"><div><h2>Sahip profili</h2><p>Tercih (OWNER_PREFERENCE) ile kanıt (BUSINESS_EVIDENCE) ayrı tutulur; CEO tercihi körü körüne izlemez.</p></div></div>
+      <div class="grid grid-2"><div><h3>Açık tercihler</h3><dl class="kv small">${Object.entries(o.preference_keys).map(([k, l]) => { const p = o.preferences.find((x) => x.key === k); return html`<dt>${l}</dt><dd>${p ? JSON.stringify(p.value) : html`<span class="muted">—</span>`}${can('admin') ? html` <a href="#" data-pref="${k}">düzenle</a>` : ''}</dd>`; })}</dl></div>
+        <div><h3>Davranış ve sonuç</h3>${o.behaviour.length ? html`<div class="table-wrap"><table><thead><tr><th>Karar türü</th><th class="r">Onay</th><th class="r">Ret</th><th class="r">Başarı</th></tr></thead><tbody>
+          ${o.behaviour.map((b) => html`<tr><td>${b.decision_type}</td><td class="r num">${num(b.approved)}</td><td class="r num">${num(b.rejected)}</td><td class="r num">${b.success_rate === null ? '—' : pct(b.success_rate)}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small">Henüz karar yok.</p>`}
+          ${o.findings.map((f) => html`<div class="notice ${f.type === 'repeated_mistake' ? 'bad' : 'info'} small mt">${f.message}</div>`)}</div></div></div>
+    <div class="card mt"><div class="card-head"><div><h2>Karar günlüğü</h2><p>${d.note}</p></div></div>
+      ${d.items.length ? html`<div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Karar</th><th>Kim</th><th>Sonuçlar (1/3/7/30 gün)</th></tr></thead><tbody>
+        ${d.items.map((x) => html`<tr><td>${dateTime(x.created_at)}</td><td><b>${x.title || x.decision_type}</b><span class="muted small">${x.decision}${x.executed_at ? ' · uygulandı' : ''}${x.reason ? ` · ${x.reason}` : ''}</span></td>
+          <td>${x.actor === 'owner' ? (x.username || 'Sahip') : x.agent_code || x.actor}</td>
+          <td>${x.outcomes.length ? x.outcomes.map((r) => html`<span class="badge ${AI_RESULT[r.result][1]}" title="Kâr değişimi ${r.profit_change ?? '—'} TL">${r.horizon}g: ${AI_RESULT[r.result][0]}</span> `) : html`<span class="muted small">ölçüm bekliyor</span>`}</td></tr>`)}
+      </tbody></table></div>${pager(d, (pg) => aiJournal(box, ov, pg))}` : empty('Karar yok', 'Önerileri onayladıkça veya reddettikçe günlük dolar.')}</div>`);
+  $$('[data-pref]', box).forEach((a) => a.addEventListener('click', async (e) => {
+    e.preventDefault();
+    let v = prompt(o.preference_keys[a.dataset.pref], '');
+    if (v === null) return;
+    if (v !== '' && !Number.isNaN(Number(v))) v = Number(v);
+    try { await api('/api/ai/owner/preferences', { method: 'PUT', body: { key: a.dataset.pref, value: v } }); aiJournal(box, ov, page); } catch (err) { fail(err); }
+  }));
+}
+
+async function aiActivity(box, ov, page = 1) {
+  const d = await api('/api/ai/activity', { query: { page, page_size: 50 } });
+  const tone = { success: 'pos', warning: 'warn-text', error: 'neg', info: '' };
+  box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Ajan hareketleri</h2><p>Her analiz, öneri, risk kararı, onay ve uygulama izlenebilir.</p></div></div>
+    ${d.items.length ? html`<ul class="timeline">${d.items.map((x) => html`<li><span class="muted small">${dateTime(x.created_at)}</span> <b>${x.agent_name || x.username || 'Sistem'}</b> <span class="${tone[x.level]}">${x.message}</span></li>`)}</ul>${pager(d, (pg) => aiActivity(box, ov, pg))}`
+      : empty('Hareket yok', 'Ajanlar çalıştığında burada görünür.')}</div>`);
+}
+
+async function aiRisk(box) {
+  const d = await api('/api/ai/risk');
+  const sev = { block: ['Bloke', 'tone-bad'], warning: ['Uyarı', 'tone-warn'], info: ['Bilgi', ''] };
+  box.innerHTML = renderVal(html`
+    <div class="card"><h2>Veri kalitesi</h2>${d.data_quality.length ? html`${d.data_quality.map((q) => html`<div class="notice ${q.severity === 'warning' ? 'warn' : 'info'} mt">${q.message}</div>`)}` : html`<p class="muted mt">Kararları etkileyen veri sorunu yok.</p>`}</div>
+    <div class="card mt"><h2>Güvenlik limitleri</h2><dl class="kv mt small">
+      <dt>Tek adımda en fazla bütçe değişimi</dt><dd>${pct(d.limits.ads_max_budget_step)}</dd><dt>Bütçe artışı için en az reklam sonrası net marj</dt><dd>${pct(d.limits.ads_target_margin_after_ads)}</dd>
+      <dt>Reklam verisi bayatlama</dt><dd>${d.limits.ads_data_stale_days} gün</dd><dt>Sipariş verisi bayatlama</dt><dd>${d.limits.data_stale_hours} saat</dd>
+      <dt>Stok tükenme eşiği</dt><dd>${d.limits.stockout_days} gün</dd></dl>
+      <p class="small muted">Risk motoru her öneriyi ajandan bağımsız olarak yeniden hesaplar; CEO dahil hiçbir ajan veya kullanıcı bloke edilen bir öneriyi onaylayamaz.</p></div>
+    <div class="card mt"><h2>Risk olayları</h2>${d.events.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Tarih</th><th>Seviye</th><th>Olay</th></tr></thead><tbody>
+      ${d.events.map((e) => html`<tr><td>${dateTime(e.created_at)}</td><td><span class="badge ${sev[e.severity][1]}">${sev[e.severity][0]}</span></td><td>${e.message}${e.title ? html`<span class="muted small">${e.title}</span>` : ''}</td></tr>`)}</tbody></table></div>` : html`<p class="muted mt">Olay yok.</p>`}</div>`);
+}
+
+async function aiAgents(box) {
+  const [agentsList, runs] = await Promise.all([api('/api/ai/agents'), api('/api/ai/runs', { query: { page_size: 30 } })]);
+  box.innerHTML = renderVal(html`<div class="card"><div class="card-head"><div><h2>Ajanlar</h2><p>Veri kaynağı olmayan ajan çalıştırılmaz (boş ya da uydurma çıktı kâra hizmet etmez).</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Ajan</th><th>Durum</th><th class="r">7 gün çalışma</th><th class="r">Hata</th><th class="r">Ort. süre</th><th class="r">Bekleyen</th><th></th></tr></thead><tbody>
+      ${agentsList.map((a) => html`<tr><td><b>${a.name}</b>${a.unavailable_reason ? html`<span class="muted small">${a.unavailable_reason}</span>` : ''}${a.last_error ? html`<span class="small neg">${a.last_error}</span>` : ''}</td>
+        <td><span class="badge ${AI_HEALTH[a.health][1]}">${AI_HEALTH[a.health][0]}</span></td><td class="r num">${num(a.runs_7d)}</td><td class="r num ${a.errors_7d ? 'neg' : ''}">${num(a.errors_7d)}</td>
+        <td class="r num">${a.avg_ms === null ? '—' : `${num(a.avg_ms)} ms`}</td><td class="r num">${num(a.pending)}</td>
+        <td class="r">${can('admin') && a.available && !['ceo', 'risk'].includes(a.code) ? html`<button class="btn btn-sm" data-toggle="${a.code}" data-on="${a.enabled ? '0' : '1'}">${a.enabled ? 'Kapat' : 'Aç'}</button>` : ''}</td></tr>`)}
+    </tbody></table></div></div>
+    <div class="card mt"><h2>Son çalışmalar</h2><div class="table-wrap mt"><table><thead><tr><th>Başlangıç</th><th>Ajan</th><th>Durum</th><th class="r">Süre</th><th>Girdi</th><th>Uyarı / hata</th></tr></thead><tbody>
+      ${runs.items.map((r) => html`<tr><td>${dateTime(r.started_at)}</td><td>${r.agent_code}</td><td><span class="badge ${{ ok: 'tone-good', degraded: 'tone-warn', error: 'tone-bad', running: 'tone-info' }[r.status] || ''}">${r.status}</span></td>
+        <td class="r num">${r.duration_ms === null ? '—' : `${num(r.duration_ms)} ms`}</td><td class="small muted">${(r.input_sources || []).join(', ')}</td><td class="small">${r.error || (r.warnings || []).join('; ')}</td></tr>`)}
+    </tbody></table></div></div>`);
+  $$('[data-toggle]', box).forEach((b) => b.addEventListener('click', async () => {
+    try { await api(`/api/ai/agents/${b.dataset.toggle}`, { method: 'PATCH', body: { enabled: b.dataset.on === '1' } }); aiAgents(box); } catch (e) { fail(e); }
+  }));
+}
+
+async function aiSettings(box) {
+  const s = await api('/api/ai/settings');
+  const labels = { analysis_days: 'Ürün analiz penceresi (gün)', min_units_for_data: 'Karar için en az satış adedi', star_margin: 'Yıldız: en az net marj (0–1)',
+    star_min_profit: 'Yıldız: en az net kâr (TL)', profitable_margin: 'Kârlı: en az net marj (0–1)', ads_window_days: 'Reklam penceresi (gün)',
+    ads_min_clicks: 'Reklam kararı için en az tıklama', ads_min_spend: 'Reklam kararı için en az harcama (TL)', ads_target_margin_after_ads: 'Bütçe artışı için en az reklam sonrası marj (0–1)',
+    ads_max_budget_step: 'Tek adımda en fazla bütçe değişimi (0–1)', ads_pause_loss: 'Durdurma eşiği: reklam net zararı (TL)', stockout_days: 'Stok tükenme eşiği (gün)',
+    dead_stock_days: 'Satmayan stok (gün)', reserve_months_opex: 'Nakit rezervi (ay × sabit gider)', data_stale_hours: 'Sipariş verisi bayat (saat)', ads_data_stale_days: 'Reklam verisi bayat (gün)' };
+  const ro = !can('admin');
+  box.innerHTML = renderVal(html`<form class="card" id="ais-form"><div class="card-head"><div><h2>AI ayarları</h2><p>Eşikler kod içine gömülü değildir; buradan değişir ve denetim kaydına yazılır.</p></div></div>
+    <div class="form-grid">
+      <label class="check full"><input type="checkbox" name="enabled" ${raw(s.enabled ? 'checked' : '')} ${raw(ro ? 'disabled' : '')}>Ajan döngüsü açık (her ${s.cycle_minutes} dk; salt analiz + öneri)</label>
+      <label>Döngü aralığı (dk)<input name="cycle_minutes" type="number" min="15" max="1440" value="${s.cycle_minutes}" ${raw(ro ? 'disabled' : '')}></label>
+      <label>Stok modeli<select name="inventory_model" ${raw(ro ? 'disabled' : '')}>${Object.entries(s.inventory_models).map(([k, l]) => html`<option value="${k}" ${raw(k === s.inventory_model ? 'selected' : '')}>${l}</option>`)}</select></label>
+      <label class="check full"><input type="checkbox" name="llm_enabled" ${raw(s.llm_enabled ? 'checked' : '')} ${raw(ro ? 'disabled' : '')}>CEO sohbetinde Claude kullan (${s.llm_configured ? 'ANTHROPIC_API_KEY tanımlı' : 'sunucuda ANTHROPIC_API_KEY yok → kural motoru'})</label>
+      ${Object.entries(labels).map(([k, l]) => html`<label>${l}<input name="t.${k}" type="number" step="any" min="0" value="${s.thresholds[k]}" ${raw(ro ? 'disabled' : '')}><span class="small muted">varsayılan ${s.defaults[k]}</span></label>`)}
+    </div>
+    <p class="small muted mt">Yetkiler: okuma ${s.permissions.read.join(', ')} · öneri/çalıştırma ${s.permissions.propose.join(', ')} · onay/uygulama ${s.permissions.approve.join(', ')}.</p>
+    ${ro ? '' : html`<p class="form-error"></p><button class="btn btn-primary mt" type="submit">Kaydet</button>`}</form>`);
+  $('#ais-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitting(e.target, async () => {
+      const el = e.target.elements;
+      const thresholds = {};
+      Object.keys(labels).forEach((k) => { thresholds[k] = Number(el[`t.${k}`].value); });
+      const r = await api('/api/ai/settings', { method: 'PUT', body: { enabled: el.enabled.checked, llm_enabled: el.llm_enabled.checked, inventory_model: el.inventory_model.value,
+        cycle_minutes: parseInt(el.cycle_minutes.value, 10), thresholds } });
+      toast(r.changed.length ? 'AI ayarları kaydedildi' : 'Değişiklik yok');
+    });
+  });
+}
+
 // ---- Kullanıcılar (yalnızca yönetici)
 PAGES.users = {
   title: 'Kullanıcılar', icon: 'users', admin: true,
@@ -2420,7 +2752,7 @@ PAGES.users = {
 };
 
 // ------------------------------------------------------------------- yönlendirme
-const NAV = ['dashboard', 'alerts', 'orders', 'products', 'storefront', 'suppliers', 'transfer', 'shipping', 'finance', 'ads', 'reports', 'integrations', 'system', 'settings', 'users'];
+const NAV = ['dashboard', 'ai', 'alerts', 'orders', 'products', 'storefront', 'suppliers', 'transfer', 'shipping', 'finance', 'ads', 'reports', 'integrations', 'system', 'settings', 'users'];
 // Sade çizgi ikonlar (24x24, currentColor)
 const ICONS = {
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -2436,6 +2768,7 @@ const ICONS = {
   ads: '<path d="M3 10v4h3l6 4V6L6 10z"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"/>',
   alerts: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  ai: '<rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 3v4M9 12h.01M15 12h.01M9 15.5h6M3 11v3M21 11v3"/>',
   storefront: '<path d="M4 9h16l-1 11H5z"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/><path d="M3 5h18"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
 };

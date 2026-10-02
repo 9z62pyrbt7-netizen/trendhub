@@ -144,6 +144,9 @@ def send(conn: Connection, so_id: int) -> dict:
     so = _get(conn, so_id)
     if so["status"] not in ("draft", "failed"):
         raise ForwardingError(f"Bu kayıt gönderilemez (durum: {STATUS_LABELS.get(so['status'], so['status'])}).")
+    from .ai.config import emergency_stop
+    if emergency_stop(conn):
+        raise ForwardingError("Acil durdurma aktif: tedarikçiye gönderim yapılamaz.")
     connector = connector_for(so["supplier_code"])
     if connector is None:
         raise ForwardingError("Bu tedarikçi için sipariş aktarım bağlantısı tanımlı değil; siparişi tedarikçiye "
@@ -195,7 +198,8 @@ def run_auto(conn: Connection, limit: int = 50) -> dict:
             prepared += len(prepare(conn, order_id))
         except ForwardingError as exc:
             log.info("Web siparişi #%s tedarikçi taslağı hazırlanmadı: %s", order_id, exc)
-    if m == "auto":
+    from .ai.config import emergency_stop
+    if m == "auto" and not emergency_stop(conn):
         drafts = [r.id for r in conn.execute(text("""
             SELECT so.id FROM supplier_orders so JOIN suppliers s ON s.id = so.supplier_id
              WHERE so.channel = :ch AND so.status = 'draft' AND s.code = ANY(:codes) ORDER BY so.id LIMIT :l"""),

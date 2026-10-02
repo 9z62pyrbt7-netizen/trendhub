@@ -27,6 +27,7 @@ ALERTS_SCAN_EVERY_MINUTES = 15
 STOREFRONT_MAINTENANCE = "storefront.maintenance"
 STOREFRONT_MAINTENANCE_EVERY_MINUTES = 10
 STOREFRONT_NOTIFY = "storefront.notify"
+AI_CYCLE = "ai.cycle"
 DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
@@ -41,6 +42,7 @@ JOB_LABELS_TR = {
     "listing.publish": "Ürün yayınlama (onaylı)",
     STOREFRONT_MAINTENANCE: "Web mağazası bakımı (ödeme beklemeleri, sepetler, kargo bildirimi, tedarikçi taslakları, e-fatura)",
     STOREFRONT_NOTIFY: "Web siparişi bildirimleri (e-posta/SMS)",
+    AI_CYCLE: "AI Control Center döngüsü (analiz + öneri; hiçbir aksiyon uygulamaz)",
 }
 
 
@@ -157,6 +159,9 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
         return run_alerts_scan(engine)
     if t == STOREFRONT_MAINTENANCE:
         return run_storefront_maintenance(engine)
+    if t == AI_CYCLE:
+        from .ai.ceo import run_cycle
+        return run_cycle(engine)
     if t == STOREFRONT_NOTIFY:
         from . import order_notifications
         return order_notifications.deliver_pending(engine.begin)
@@ -264,3 +269,17 @@ def schedule_storefront_maintenance(conn) -> int | None:
     if recent:
         return None
     return jobs.enqueue(conn, STOREFRONT_MAINTENANCE, payload={}, idempotency_key=STOREFRONT_MAINTENANCE, max_attempts=2)
+
+
+def schedule_ai_cycle(conn) -> int | None:
+    """AI Control Center: ajan döngüsü (salt analiz + öneri). ai.enabled=false ise planlanmaz."""
+    from . import app_settings
+    if not app_settings.get(conn, "ai.enabled", True):
+        return None
+    every = max(15, int(app_settings.get(conn, "ai.cycle_minutes", 60) or 60))
+    recent = conn.execute(text("""SELECT 1 FROM sync_jobs WHERE job_type = :t
+                                   AND (status IN ('queued','running') OR created_at > NOW() - make_interval(mins => :i))
+                                 LIMIT 1"""), {"t": AI_CYCLE, "i": every}).first()
+    if recent:
+        return None
+    return jobs.enqueue(conn, AI_CYCLE, payload={}, idempotency_key=AI_CYCLE, max_attempts=1)

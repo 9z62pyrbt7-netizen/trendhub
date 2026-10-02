@@ -472,6 +472,15 @@ Operatör ── panel ───────────────────
 **Bilinen eksikler:** gerçek sağlayıcı anahtarlarıyla uçtan uca doğrulama (PayTR/iyzico/SMTP/Netgsm), e-fatura
 entegratörü, tedarikçi sipariş API'si, pazaryerlerine stok yazımı (bilinçli olarak kapalı).
 
+## 8f. AI Control Center (migration 0010)
+
+Ayrıntılı analiz, V1 kapsamı, güvenlik modeli ve bilinçli olarak dışarıda bırakılanlar: `docs/AI_CONTROL_CENTER.md`.
+Kod: `app/services/ai/` (data, agents, proposals = risk motoru + onay + action engine, capital, decisions, ceo, chat),
+API `app/api/ai.py` (`/api/ai/*`), worker işi `ai.cycle` (varsayılan 60 dk), panel `#/ai`.
+Kâr rakamları `finance_view` ile aynı SQL'den gelir; ajan kararları deterministiktir; LLM yalnızca CEO sohbetinde,
+salt okunur araçlarla kullanılır. Acil durdurma (`ai.emergency_stop`) onay/uygulamayı, pazaryeri yayın kapısını ve
+tedarikçiye otomatik gönderimi durdurur.
+
 ## 9. Güvenilirlik
 
 * **Idempotency**

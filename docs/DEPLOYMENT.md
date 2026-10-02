@@ -187,3 +187,15 @@ sağlık kontrolünden (`/api/store/health`, nginx üzerinden :8090) geçmeden d
 Durum: Panel → Web Sitesi → **Entegrasyonlar** (secret göstermez).
 
 Görsel önbelleği `storefront_images` volume'undadır (WebP); silinirse kendiliğinden yeniden üretilir.
+
+## AI Control Center
+
+Aynı `deploy.sh` ile gelir (migration 0010, yalnızca ekleme). Kurulumdan sonra:
+1. Panel → **AI Control Center → Sermaye:** kasa, bekleyen hakediş, borçlar ve "sisteme ayırdığım sermaye" limitini girin
+   (bunlar girilmeden sermaye önerisi yapılmaz).
+2. **Reklamlar** ekranında kampanyalara ürün bağlayın, harcama ve performans (tıklama, sipariş, ciro) girin; AI → Reklam'da
+   kampanyanın günlük bütçesini girin. Performans verisi olmayan kampanya için karar "Veri yetersiz" olur.
+3. Ürün maliyetlerinin eksiksiz olduğundan emin olun (maliyeti eksik ürün "Veri yok" sınıfına düşer).
+4. İsteğe bağlı: `.env` → `ANTHROPIC_API_KEY=...` (CEO sohbeti doğal dille; yoksa kural motoru).
+5. Acil durumda: AI Control Center → **TÜM AJANLARI DURDUR** (operatör açabilir, yalnızca yönetici kaldırabilir).
+

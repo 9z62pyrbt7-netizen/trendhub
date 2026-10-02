@@ -36,7 +36,7 @@ def test_fresh_database_migrates():
         run_migrations(url)  # ikinci çalıştırma no-op olmalı
         eng = create_engine(_sa(url))
         with eng.connect() as c:
-            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0009_storefront_production"
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0010_ai_control_center"
             assert c.execute(text("SELECT COUNT(*) FROM marketplaces")).scalar() == 4
         eng.dispose()
     finally:
