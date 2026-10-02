@@ -80,13 +80,19 @@ def cash_structure(conn: Connection, p: dict, sums: dict, acc: list[dict]) -> di
                    "next_payment_date": ps["next_payment_date"], "freshness": fs["freshness"]}
         receivable = {"amount": finance_view.q2(ps["receivable"]), "source": ps["source"], "kind": "ACTUAL",
                       "freshness": fs["freshness"]}
-    else:
+    elif any(a["kind"] == "pending_payout" for a in acc):
         pending = {"amount": finance_view.q2(sums["pending_payout"]), "kind": "MANUAL",
                    "source": "Elle girilen bekleyen hakediş (Trendyol finans verisi henüz yok)"}
+    else:
+        # Veri yok ≠ 0: ne Trendyol finansı ne elle giriş var → tutar BİLİNMİYOR (0 gösterilmez)
+        pending = {"amount": None, "kind": "UNKNOWN",
+                   "source": "Bilinmiyor: Trendyol finans verisi yok ve elle bekleyen hakediş girilmedi"}
+    if not ps["connected"]:
         receivable = {"amount": None, "kind": "UNKNOWN", "source": "Trendyol finans verisi yok"}
     reserved = finance_view.q2(sums["reserved"] + p["reserve_required"])
     total_money = None
     if p["free_cash"] is not None:
+        # Bilinmeyen kalem toplamı 0 gibi tamamlamaz: toplam yalnızca bilinen kalemlerden, eksik olduğu belirtilerek
         total_money = finance_view.q2(sums["cash"] + d(pending["amount"]) + d(receivable["amount"]))
     return {
         "available_cash": {"amount": finance_view.q2(sums["cash"]) if any(a["kind"] == "cash" for a in acc) else None,
@@ -99,7 +105,9 @@ def cash_structure(conn: Connection, p: dict, sums: dict, acc: list[dict]) -> di
                              "cash_reserve": p["reserve_required"]},
         "deployable_capital": {"amount": p["usable"], "rule": "Yalnızca kasadaki nakit − borçlar − ayrılmış − rezerv "
                                "(üst limit: sisteme ayrılan sermaye). Bekleyen hakediş ve alacak dahil DEĞİL."},
-        "total_money": {"amount": total_money, "note": "Kasa + bekleyen hakediş + alacak. Harcanabilir sermaye DEĞİLDİR."},
+        "total_money": {"amount": total_money, "note": "Kasa + bekleyen hakediş + alacak. Harcanabilir sermaye DEĞİLDİR."
+                        + ("" if pending["amount"] is not None and receivable["amount"] is not None
+                           else " Eksik: bilinmeyen hakediş/alacak toplama dahil değil.")},
         "payout_reconciliation": ps["reconciliation"], "overdue_unverified": ps["overdue_unverified"],
     }
 

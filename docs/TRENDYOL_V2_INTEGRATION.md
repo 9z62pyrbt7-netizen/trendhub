@@ -79,3 +79,44 @@ Kâr tarafı için yeni tablo açılmadı; mevcut `financial_transactions` kulla
    1. `.env` içine `TRENDYOL_WEBHOOK_API_KEY` ekleyin.
    2. Trendyol tarafında URL'yi `https://<panel>/api/webhooks/trendyol` olarak tanımlayın.
    3. Kimlik doğrulama türünü API_KEY seçin.
+
+## 5. Doğrulama turu (Docker + güvenlik)
+
+**Kimlik bilgileri: NOT_FOUND.** Trendyol kimlik bilgileri şu sırayla okunur:
+1. Panelden girilip şifreli olarak saklanan `marketplace_connections`.
+2. Ortam değişkenleri (`TRENDYOL_SELLER_ID`, `TRENDYOL_API_KEY`, `TRENDYOL_API_SECRET`). docker-compose bunları `env_file: .env` ile tüm servislere verir.
+
+Bu ortamda ikisi de boş. Ayrıca ağ politikası `apigw.trendyol.com` adresini engelliyor. Bu yüzden **gerçek Trendyol smoke testi çalıştırılamadı**; bütün servisler NOT_TESTED. Sunucuda çalıştırılacak komut: §4 madde 2.
+
+**Docker zinciri:** yedek → migration → başlatma → sağlık → girişli duman testi BAŞARILI.
+- Migration öncesi alınan yedek (0011) ayrı bir veritabanına geri yüklendi ve 0012 orada uygulandı. Yalnızca beklenen farklar çıktı: sürüm, 8 yeni `sync_state` kolonu, 4 yeni tablo. İkinci çalıştırma işlem yapmadı (no-op).
+- Sipariş, ürün, kullanıcı, sermaye, audit ve ayar verileri birebir aynı kaldı.
+
+**Bulunan ve düzeltilen hatalar** (her biri kök neden, düzeltme ve regresyon testiyle):
+
+1. **nginx reload'dan sonra web portu kapandı (health 000).**
+   - Kök neden: `./web` klasörü silinip yeniden oluşturulduğunda, çalışan nginx container'ı bind mount ile eski (silinmiş) klasörü, yani boş bir `conf.d` görüyor. `nginx -t` boş yapılandırmayı geçerli sayıyor, `nginx -s reload` tüm dinleyicileri kapatıyor. Kanıt: container içinde `conf.d` boş, nginx yalnızca DNS portunu dinliyor.
+   - Düzeltme: `deploy.sh` reload'dan önce container'ın gördüğü `nginx.conf` ile diskteki dosyanın SHA-256 değerini karşılaştırıyor. Farklıysa web container'ını `--force-recreate` ile yeniden oluşturuyor; yine de göremezse reload yapmadan duruyor ve canlı panel korunuyor.
+   - Regresyon: `tests/test_deploy_script.py`.
+2. **Duman testi `events.process` işini "beklenmeyen iş" sayıyordu.**
+   - Kök neden: iç olay kuyruğu işi, duman testinin izinli iş listesinde yoktu. Webhook açılınca her deploy bu noktada dururdu.
+   - Düzeltme: iş listeye eklendi.
+   - Regresyon: izinli liste ile koddaki iç iş tipleri birebir karşılaştırılıyor; dışarıya istek atan senkron işleri listede asla yer alamaz.
+3. **Veri yok ≠ 0.**
+   - Bekleyen hakediş: Trendyol finansı bağlı değilken ve elle de girilmemişken **0,00** gösteriliyordu. Artık `UNKNOWN` (tutar boş, "Bilinmiyor"). CEO "hakedişini bilmiyorum" diyor; toplam paranın eksik olduğu belirtiliyor.
+   - Net kâr ve reklam harcaması: sipariş ya da reklam verisi yokken KPI'larda **₺0** görünüyordu. Artık "—  Veri yok" görünüyor.
+   - Kâr kaynağı: sipariş yokken "Tahmin" yerine `NO_DATA` gösteriliyor.
+   - Regresyon: `test_unknown_pending_payout_is_not_zero`, `test_no_data_is_not_reported_as_zero_or_estimate`.
+
+**Güvenlik:**
+- `git grep` ile repoda secret/anahtar kalıbı, `.env` veya `.dump` dosyası bulunmadı.
+- Docker ve deploy loglarında admin parolası ve webhook anahtarı geçmiyor.
+- 34 `/api/ai/*` uç noktasının tamamı oturumsuz istekte 401 dönüyor.
+- Webhook: anahtarsız veya yanlış anahtarla 401, tekrar gönderimde `duplicates=1`, bozuk JSON'da 400.
+- Webhook olayı kuyruktan gerçek worker'da işleniyor; kişisel veri saklanmıyor.
+- LLM'e giden araç çıktılarında kişisel veri engeli ve acil durdurma testlerle kanıtlı.
+
+**Reklam API'si (yeniden kontrol):**
+- Trendyol, reklam raporlarını yalnızca satıcı panelinde sunuyor: kampanya, bütçe, harcama, gösterim, tıklama, sipariş, gelir ve ROAS; Excel olarak indirilebiliyor, veriler saatlik güncelleniyor.
+- Satıcı API'sinde (developers.trendyol.com) reklam uç noktası bulunamadı. Mevcut kimlik bilgileriyle erişim yok.
+- Panelden indirilen Excel → CSV içe aktarma ya da elle giriş devam ediyor.

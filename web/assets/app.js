@@ -2445,14 +2445,15 @@ async function aiBrief(box, ov) {
   const k = ov.kpis;
   box.innerHTML = renderVal(html`
     <div class="grid grid-4 ai-kpis">
-      ${kpi('Net kâr (7 gün)', money0(k.net_profit_7d), html`Dün ${money0(k.net_profit_yesterday)} · marj ${pct(k.net_margin_7d)}`, signClass(k.net_profit_7d), TAHMINI)}
+      ${k.orders_7d ? kpi('Net kâr (7 gün)', money0(k.net_profit_7d), html`Dün ${money0(k.net_profit_yesterday)} · marj ${pct(k.net_margin_7d)}`, signClass(k.net_profit_7d), TAHMINI)
+        : kpi('Net kâr (7 gün)', '—', 'Veri yok: son 7 günde sipariş kaydı yok')}
       ${kpi('Kullanılabilir nakit', k.cash_usable === null ? '—' : money0(k.cash_usable), k.cash_usable === null ? html`<a href="#/ai?tab=capital">Kasa bilgisi gir →</a>`
         : (Number(k.pending_payout) ? html`Bekleyen hakediş ${money0(k.pending_payout)} <b>dahil değil</b>` : 'Borç, rezerv ve hakediş hariç'))}
       ${kpi('Kullanılan sermaye', money0(k.capital_used), `Bekleyen öneri: ${money0(k.capital_pending)}`)}
       ${kpi('Kullanılmayan sermaye', k.capital_unused === null ? '—' : money0(k.capital_unused), 'Kanıt yoksa kasada kalır')}
     </div>
     <div class="grid grid-3 mt ai-kpis">
-      ${kpi('Bugünün reklam harcaması', money0(k.ad_spend_today), 'Kayıtlı harcama')}
+      ${kpi('Bugünün reklam harcaması', k.has_ad_data ? money0(k.ad_spend_today) : '—', k.has_ad_data ? 'Kayıtlı harcama (elle/CSV)' : 'Veri yok: reklam harcaması hiç girilmedi')}
       ${kpi('CEO\'nun bekleyen önerileri', num(k.pending_proposals), k.to_apply ? `${k.to_apply} onaylı öneri uygulanmayı bekliyor` : html`<a href="#/ai?tab=approvals">Onaylara git →</a>`, k.pending_proposals ? 'warn-text' : '')}
       ${kpi('Risk uyarıları', num(k.risk_alerts), k.data_warnings.length ? k.data_warnings[0] : 'Son 24 saat + veri kalitesi + bloke', k.risk_alerts ? 'neg' : '')}
     </div>
@@ -2605,7 +2606,7 @@ async function aiCapital(box) {
       ${kpi('Nakit rezervi', money0(c.reserve_required), `Aylık sabit gider ${money0(c.monthly_opex)}`)}</div>
     <div class="grid grid-2 mt">
       <div class="card"><h3>Nakit pozisyonu (kâr ≠ nakit)</h3><dl class="kv mt">${Object.entries(c.kinds).map(([k, l]) => html`<dt>${l}</dt><dd>${money(t[k])}</dd>`)}</dl>
-        <p class="small muted">Bekleyen hakediş (${money(c.pending_payout_not_counted)}) henüz kasada değil; kullanılabilir sayılmaz.</p></div>
+        <p class="small muted">${c.pending_payout_not_counted === null ? 'Bekleyen hakediş bilinmiyor (Trendyol finans verisi yok, elle de girilmedi).' : html`Bekleyen hakediş (${money(c.pending_payout_not_counted)}) henüz kasada değil; kullanılabilir sayılmaz.`}</p></div>
       <div class="card"><h3>Gerekçelendirilmiş kullanım</h3>${c.justified_by_category.length ? html`<dl class="kv mt">${c.justified_by_category.map((x) => html`<dt>${x.label}</dt><dd>${money(x.amount)} (${x.n} öneri)</dd>`)}</dl>` : html`<p class="muted small mt">Kanıta dayalı sermaye ihtiyacı yok.</p>`}
         <p class="small mt">Sermaye verimliliği: ${c.efficiency.profit_per_lira === null ? html`<span class="muted">henüz ölçülmedi</span>` : html`<b>${Number(c.efficiency.profit_per_lira).toFixed(2)} TL</b> net kâr / harcanan 1 TL (${c.efficiency.measured_decisions} karar)`}</p></div>
     </div>
@@ -2633,7 +2634,7 @@ const CONN_TR = { CONNECTED: 'Bağlı', PERMISSION_DENIED: 'Yetki yok', NO_DATA:
   NOT_CONFIGURED: 'Bağlı değil', DISABLED: 'Kapalı (TRENDYOL_EXTENDED_READ)', NEVER: 'Henüz çalışmadı', MANUAL: 'Elle', MISSING: 'Girilmedi',
   LOCAL: 'Yerel', RECEIVING: 'Olay alınıyor', NO_EVENTS: 'Olay yok' };
 const freshBadge = (f) => html`<span class="badge ${(FRESH_TONE[f] || ['', ''])[1]}">${(FRESH_TONE[f] || [f])[0]}</span>`;
-const KIND_TONE = { ACTUAL: ['Gerçek', 'tone-good'], MANUAL: ['Elle', 'tone-info'], ESTIMATED: ['Tahmin', 'tone-warn'], UNKNOWN: ['Bilinmiyor', ''],
+const KIND_TONE = { ACTUAL: ['Gerçek', 'tone-good'], MANUAL: ['Elle', 'tone-info'], ESTIMATED: ['Tahmin', 'tone-warn'], UNKNOWN: ['Bilinmiyor', ''], NO_DATA: ['Veri yok', ''],
   PARTIAL: ['Kısmen gerçek', 'tone-warn'] };
 const kindBadge = (k) => html`<span class="badge ${(KIND_TONE[k] || ['', ''])[1]}">${(KIND_TONE[k] || [k])[0]}</span>`;
 
@@ -2643,7 +2644,7 @@ async function aiFinance(box) {
   const pv = f.provenance;
   const line = (label, v, kind, src) => html`<tr><td>${label}</td><td class="r num">${v === null || v === undefined ? '—' : money(v)}</td><td>${kind ? kindBadge(kind) : ''}</td><td class="small muted">${src || ''}</td></tr>`;
   box.innerHTML = renderVal(html`
-    ${!f.status.connected ? html`<div class="notice warn" style="margin-bottom:16px">Trendyol finans (cari hesap) verisi henüz alınmadı. Bekleyen hakediş elle girilen değere dayanıyor; komisyon ve kargo TAHMİN.
+    ${!f.status.connected ? html`<div class="notice warn" style="margin-bottom:16px">Trendyol finans (cari hesap) verisi henüz alınmadı. Bekleyen hakediş ${cs.pending_marketplace_payout.kind === 'MANUAL' ? 'elle girilen değere dayanıyor' : 'bilinmiyor'}; komisyon ve kargo TAHMİN.
       Canlıda <code>python -m app.cli trendyol-smoke</code> başarılı olunca <code>TRENDYOL_EXTENDED_READ=true</code> ile açılır.</div>`
       : html`<div class="notice ${f.status.freshness === 'FRESH' ? 'info' : 'bad'}" style="margin-bottom:16px">Finans verisi: ${freshBadge(f.status.freshness)}
         son başarılı senkron ${f.status.age_hours ?? '—'} saat önce (sınır ${f.status.stale_hours} saat). ${f.status.freshness === 'FRESH' ? '' : 'Bu durumda CEO ek harcama önermez.'}</div>`}
@@ -2651,7 +2652,7 @@ async function aiFinance(box) {
       ${kpi('Harcanabilir sermaye', cs.deployable_capital.amount === null ? '—' : money0(cs.deployable_capital.amount), 'Yalnızca kasadan')}
       ${kpi('Bekleyen hakediş', money0(cs.pending_marketplace_payout.amount), cs.pending_marketplace_payout.next_payment_date ? `Sonraki ödeme ${date(cs.pending_marketplace_payout.next_payment_date)}` : 'Harcanabilir DEĞİL')}
       ${kpi('Pazaryeri alacağı', cs.marketplace_receivable.amount === null ? '—' : money0(cs.marketplace_receivable.amount), 'Vadesi gelmemiş')}
-      ${kpi('Toplam para', cs.total_money.amount === null ? '—' : money0(cs.total_money.amount), 'Toplam para ≠ harcanabilir sermaye')}
+      ${kpi('Toplam para', cs.total_money.amount === null ? '—' : money0(cs.total_money.amount), cs.total_money.note.includes('Eksik') ? 'Eksik: hakediş/alacak bilinmiyor' : 'Toplam para ≠ harcanabilir sermaye')}
     </div>
     <div class="grid grid-2 mt">
       <div class="card"><h3>Nakit yapısı</h3><div class="table-wrap mt"><table><tbody>
@@ -2664,8 +2665,8 @@ async function aiFinance(box) {
       </tbody></table></div></div>
       <div class="card"><h3>Kârın kaynağı (${f.window.days} gün)</h3>
         <p class="mt">${kindBadge(pv.status)} ${pv.items ? html`${num(pv.actual_commission_items)}/${num(pv.items)} kalemde komisyon <b>gerçek Trendyol kesintisi</b>; ${num(pv.estimated_commission_items)} kalem oranla tahmin.` : html`<span class="muted">Dönemde sipariş yok.</span>`}</p>
-        <dl class="kv small mt"><dt>Gerçek komisyon</dt><dd>${money(pv.actual_commission)}</dd><dt>Tahmini komisyon</dt><dd>${money(pv.estimated_commission)}</dd>
-          <dt>Gerçek kargo (kargo faturası)</dt><dd>${num(pv.actual_shipping_orders)}/${num(pv.orders)} sipariş</dd><dt>Tamamen gerçek finanslı sipariş</dt><dd>${num(pv.fully_actual_orders)}</dd></dl>
+        ${pv.items ? html`<dl class="kv small mt"><dt>Gerçek komisyon</dt><dd>${money(pv.actual_commission)}</dd><dt>Tahmini komisyon</dt><dd>${money(pv.estimated_commission)}</dd>
+          <dt>Gerçek kargo (kargo faturası)</dt><dd>${num(pv.actual_shipping_orders)}/${num(pv.orders)} sipariş</dd><dt>Tamamen gerçek finanslı sipariş</dt><dd>${num(pv.fully_actual_orders)}</dd></dl>` : ''}
         ${f.payout.reconciliation ? html`<p class="small mt">Mutabakat (son ödeme ${f.payout.reconciliation.payment_order_id}): ödenen ${money(f.payout.reconciliation.paid)}, defter ${money(f.payout.reconciliation.ledger_net)},
           fark <b class="${Math.abs(Number(f.payout.reconciliation.difference)) > 1 ? 'neg' : 'pos'}">${money(f.payout.reconciliation.difference)}</b></p>` : ''}
         ${f.sign_check.checked ? html`<p class="small muted">İşaret kontrolü: ${num(f.sign_check.checked)} kayıtta net tutar ↔ sellerRevenue, ${num(f.sign_check.mismatch)} uyumsuz.</p>` : ''}

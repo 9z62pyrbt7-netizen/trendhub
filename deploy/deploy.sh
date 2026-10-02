@@ -220,6 +220,21 @@ for s in "${APP_SERVICES[@]}"; do
   fi
 done
 # nginx.conf bind-mount ile gelir; içerik değiştiyse compose container'ı yeniden oluşturmaz.
+# Bind mount klasörü oluşturulduğu andaki (inode) haliyle tutar: ./web klasörü silinip yeniden oluşturulduysa
+# container BOŞ conf.d görür; `nginx -t` boş yapılandırmayı geçerli sayar ve reload tüm portları kapatır.
+# Bu yüzden reload'dan önce container'ın gördüğü nginx.conf, diskteki dosyayla birebir karşılaştırılır.
+ensure_web_config() {
+  local want got
+  want="$(sha256sum web/nginx.conf | cut -d' ' -f1)"
+  got="$("${DC[@]}" exec -T web sh -c 'sha256sum /etc/nginx/conf.d/nginx.conf 2>/dev/null || true' | cut -d' ' -f1 || true)"
+  if [ "$want" != "$got" ]; then
+    warn "web container'ı güncel nginx.conf'u görmüyor (bind mount eski klasörü gösteriyor); yeniden oluşturuluyor"
+    "${DC[@]}" up -d --no-deps --force-recreate web
+    got="$("${DC[@]}" exec -T web sh -c 'sha256sum /etc/nginx/conf.d/nginx.conf 2>/dev/null || true' | cut -d' ' -f1 || true)"
+    [ "$want" = "$got" ] || die "web container'ı nginx.conf'u hâlâ göremiyor; reload yapılmadı (canlı panel korunuyor)"
+  fi
+}
+ensure_web_config
 "${DC[@]}" exec -T web nginx -t >/dev/null 2>&1 || die "nginx yapılandırması geçersiz"
 "${DC[@]}" exec -T web nginx -s reload >/dev/null
 ok "${APP_SERVICES[*]} çalışıyor; nginx yapılandırması yeniden yüklendi"

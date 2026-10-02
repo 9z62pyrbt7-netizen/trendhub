@@ -297,7 +297,7 @@ def _today_answer(t: dict, conn: Connection | None = None) -> str:
         prov = provenance_lines(conn, w.start, w.end)
         from ..platform.finance import profit_provenance
         st = profit_provenance(conn, w.start, w.end)["status"]
-        label = {"ACTUAL": "gerçekleşen net kâr", "PARTIAL": "net kâr (kısmen tahmini)"}.get(st, "tahmini net kâr")
+        label = {"ACTUAL": "gerçekleşen net kâr", "PARTIAL": "net kâr (kısmen tahmini)"}.get(st, "tahmini net kâr")  # NO_DATA/ESTIMATED
     lines = [f"Bugün şu ana kadar {c['orders']} sipariş; {label} {_money(c['net_profit'])} "
              f"(net satış {_money(c['net_sales'])}, net marj {_pct(c['net_margin'])}). Son 7 günün günlük ortalaması {_money(avg['net_profit'])}."]
     if c["missing_cost_orders"]:
@@ -370,7 +370,10 @@ def rules_answer(conn: Connection, question: str, last_tools: list[str] | None =
             lines.append("Gerekçelendirilmiş kullanım: " + ", ".join(f"{x['label']} {_money(x['amount'])}" for x in c["justified_by_category"]) + ".")
         cs = c["cash_structure"]
         pend = cs["pending_marketplace_payout"]
-        if pend["amount"]:
+        if pend["kind"] == "UNKNOWN":
+            lines.append("Bekleyen Trendyol hakedişini bilmiyorum (finans verisi bağlı değil, elle de girilmedi); "
+                         "bu yüzden yalnızca kasadaki nakde göre konuşuyorum.")
+        elif pend["amount"]:
             src = "Trendyol cari hesap ekstresi" if pend["kind"] == "ACTUAL" else "elle girilen"
             lines.append(f"Bekleyen hakediş {_money(pend['amount'])} ({src}) henüz kasada olmadığı için harcanabilir sayılmadı.")
         if cs["marketplace_receivable"]["amount"]:

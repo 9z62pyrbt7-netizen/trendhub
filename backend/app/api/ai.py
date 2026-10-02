@@ -86,7 +86,9 @@ def kpis(conn: Connection, counts: dict) -> dict:
     ad_today = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM ad_spend WHERE spend_date = :d"), {"d": t}).scalar()
     risk_24h = conn.execute(text("SELECT COUNT(*) FROM ai_risk_events WHERE created_at > NOW() - INTERVAL '24 hours' AND severity <> 'info'")).scalar()
     dq = [q for q in data_quality(conn) if q["severity"] == "warning"]
-    return {"net_profit_7d": week["net_profit"], "net_profit_yesterday": yday["net_profit"], "net_margin_7d": week["net_margin"],
+    has_ads = bool(conn.execute(text("SELECT 1 FROM ad_spend LIMIT 1")).first())
+    return {"orders_7d": week["orders"], "has_ad_data": has_ads,   # veri yok ≠ 0: arayüz bu bayraklarla "—" gösterir
+            "net_profit_7d": week["net_profit"], "net_profit_yesterday": yday["net_profit"], "net_margin_7d": week["net_margin"],
             "cash_usable": pos["usable"], "cash_total": pos["totals"]["cash"] if pos["usable"] is not None else None,
             "capital_used": used, "capital_pending": max(pos["justified"] - used, 0) if pos["justified"] is not None else 0,
             "capital_unused": pos["unused"], "ad_spend_today": ad_today,

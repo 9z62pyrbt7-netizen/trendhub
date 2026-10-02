@@ -62,9 +62,10 @@ n=$(echo "$integ" | grep -o '"state":"not_connected"' | wc -l)
 [ "$n" -eq 3 ] || fail "3 entegrasyon da not_connected olmalı: $integ"
 
 step "credential yokken hiçbir senkron işi planlanmaz"
-# Yalnızca iç (dışarıya istek atmayan) uyarı taraması ve web mağazası bakımı beklenir; pazaryeri/tedarikçi işi olmamalı.
+# Yalnızca iç (dışarıya istek atmayan) işler beklenir: uyarı taraması, web mağazası bakımı/bildirimi, AI döngüsü ve
+# platform olay kuyruğu (events.process: webhook/polling olaylarını DB içinde işler). Pazaryeri/tedarikçi işi olmamalı.
 jobs=$(curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs?page_size=200")
-others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' -e '"job_type":"ai.cycle"' || true)
+others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' -e '"job_type":"ai.cycle"' -e '"job_type":"events.process"' || true)
 [ -z "$others" ] || fail "beklenmeyen iş var: $others"
 
 step "dashboard ve panel"

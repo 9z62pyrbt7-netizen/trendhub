@@ -268,5 +268,6 @@ def profit_provenance(conn: Connection, start, end) -> dict:
             "actual_commission": d(r["actual_commission"]), "estimated_commission": d(r["estimated_commission"]),
             "orders": int(r["orders"] or 0), "actual_shipping_orders": int(r["actual_shipping_orders"] or 0),
             "fully_actual_orders": int(r["fully_actual_orders"] or 0),
-            "status": ("ACTUAL" if items and int(r["fully_actual_orders"] or 0) == int(r["orders"] or 0)
+            # Veri yok ≠ tahmin: dönemde kalem yoksa NO_DATA
+            "status": "NO_DATA" if not items else ("ACTUAL" if int(r["fully_actual_orders"] or 0) == int(r["orders"] or 0)
                        else "PARTIAL" if int(r["actual_commission_items"] or 0) else "ESTIMATED")}

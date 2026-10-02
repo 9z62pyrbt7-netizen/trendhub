@@ -617,3 +617,37 @@ def test_next_payment_date_is_never_in_the_past(engine, conn, ty):
     assert p["pending_payout"] == Decimal("1350.00")               # vadesi 3 gün geçmiş ama ödenmemiş kayıt da beklemede
     assert p["next_payment_date"].date() >= datetime.now(timezone.utc).date() - timedelta(days=1)
     assert p["next_payment_date"] > NOW + timedelta(days=3)        # geçmiş tarih "sonraki ödeme" olarak gösterilmez
+
+
+def test_unknown_pending_payout_is_not_zero(engine, conn, api):
+    """Regresyon (Docker doğrulamasında bulundu): finans verisi yok + elle hakediş girilmemiş → hakediş 0 DEĞİL, BİLİNMİYOR."""
+    from app.services.ai.chat import rules_answer
+    cash(conn, "8000")
+    cap = api.get("/api/ai/capital").json()
+    pend = cap["cash_structure"]["pending_marketplace_payout"]
+    assert pend["amount"] is None and pend["kind"] == "UNKNOWN"
+    assert cap["pending_payout_not_counted"] is None
+    assert "Eksik" in cap["cash_structure"]["total_money"]["note"]
+    assert Decimal(cap["usable"]) == Decimal("8000.00")
+    ans = rules_answer(conn, "Ne kadar sermaye kullanabilirim?")[0]
+    assert "hakedişini bilmiyorum" in ans and "Bekleyen hakediş 0" not in ans
+    assert "Bunu söylemek için yeterli verim yok" in rules_answer(conn, "Trendyol hakediş ne zaman yatacak?")[0]
+    assert api.get("/api/ai/overview").json()["kpis"]["pending_payout_kind"] == "UNKNOWN"
+    # Elle girilirse MANUAL olarak, kaynağıyla birlikte gösterilir
+    conn.execute(text("INSERT INTO ai_capital_accounts(kind, name, amount) VALUES ('pending_payout', 'Trendyol', 0)"))
+    pend = api.get("/api/ai/capital").json()["cash_structure"]["pending_marketplace_payout"]
+    assert pend["kind"] == "MANUAL" and Decimal(pend["amount"]) == Decimal("0.00")
+
+
+def test_no_data_is_not_reported_as_zero_or_estimate(engine, conn, api):
+    """Regresyon (boş veri ekran kontrolünde bulundu): sipariş/reklam verisi yokken 'Tahmin' veya ₺0 iddiası yapılmaz."""
+    from app.services.platform import finance
+    pv = finance.profit_provenance(conn, NOW - timedelta(days=30), NOW + timedelta(days=1))
+    assert pv["items"] == 0 and pv["status"] == "NO_DATA"
+    k = api.get("/api/ai/overview").json()["kpis"]
+    assert k["orders_7d"] == 0 and k["has_ad_data"] is False          # arayüz bu bayraklarla "—  Veri yok" gösterir
+    pid = product(conn, "ND-1", cost="100", price="500")
+    order(conn, "TY-ND1", pid, price="500")
+    assert finance.profit_provenance(conn, NOW - timedelta(days=30), NOW + timedelta(days=1))["status"] == "ESTIMATED"
+    cid = campaign(conn, "ND", [pid], days=1)
+    assert cid and api.get("/api/ai/overview").json()["kpis"]["has_ad_data"] is True

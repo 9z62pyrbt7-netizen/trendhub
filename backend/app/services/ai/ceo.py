@@ -93,13 +93,13 @@ def build_brief(conn: Connection) -> dict:
         yw = Window(1, end_date=t - timedelta(days=1))
         pv = profit_provenance(conn, yw.start, yw.end)
         label = {"ACTUAL": "gerçekleşen net kâr", "PARTIAL": "net kâr (kısmen gerçek, kısmen tahmini)",
-                 "ESTIMATED": "tahmini net kâr"}[pv["status"]]
+                 "ESTIMATED": "tahmini net kâr", "NO_DATA": "tahmini net kâr"}[pv["status"]]
         basis = (f" Komisyonun {pv['actual_commission_items']}/{pv['items']} kalemi gerçek Trendyol kesintisi, kalanı tahmin."
-                 if pv["status"] == "PARTIAL" else " Komisyon/kargo gerçek Trendyol finans kaydı değil, tahmin." if pv["status"] == "ESTIMATED" else "")
+                 if pv["status"] == "PARTIAL" else " Komisyon/kargo gerçek Trendyol finans kaydı değil, tahmin." if pv["status"] in ("ESTIMATED", "NO_DATA") else "")
         items.append({"priority": 80 if diff < 0 else 60, "kind": "yesterday", "level": "warning" if d(y["net_profit"]) < 0 else "info",
                       "text": f"Dün {y['orders']} sipariş geldi; {label} {_money(y['net_profit'])} "
                               f"(son 7 gün günlük ortalaması {_money(finance_view.q2(avg_profit))}{', ' + trend if trend else ''}).{basis}",
-                      "source": "Satış: Trendyol Orders · komisyon: " + ("Trendyol Finance" if pv["status"] != "ESTIMATED" else "tahmin (oran)")
+                      "source": "Satış: Trendyol Orders · komisyon: " + ("Trendyol Finance" if pv["status"] in ("ACTUAL", "PARTIAL") else "tahmin (oran)")
                                 + " · maliyet: yerel maliyet kaydı · reklam: elle girilen reklam verisi", "link": "#/finance",
                       "provenance": pv})
     else:
