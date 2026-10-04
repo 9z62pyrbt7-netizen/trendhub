@@ -113,6 +113,8 @@ def _finish(conn: Connection, p: dict, status: str, *, actual: str | None, error
                              execution_result = CAST(:r AS JSONB), updated_at = NOW() WHERE id = :id"""),
                      {"u": user.id, "r": _j({**result, "actual_action": actual, "mode": "automatic"}), "id": p["id"]})
         conn.execute(text("UPDATE ai_decisions SET executed_at = NOW() WHERE proposal_id = :p AND decision = 'approved'"), {"p": p["id"]})
+        from . import governor
+        governor.commit(conn, p["id"])
     elif status == "FAILED":
         conn.execute(text("""UPDATE ai_proposals SET status = 'failed', execution_result = CAST(:r AS JSONB), updated_at = NOW()
                              WHERE id = :id"""), {"r": _j({**result, "error": error, "mode": "automatic"}), "id": p["id"]})

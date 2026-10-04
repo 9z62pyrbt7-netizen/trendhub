@@ -45,6 +45,9 @@ DEFAULT_THRESHOLDS: dict = {
     "stock_safety_units": 2,        # bu adetten az kullanılabilir stokta reklam/kampanya yok
     "tracking_change_pct": 0.30,    # ürün takibi: 7 gün / önceki 7 gün değişim eşiği
     "tracking_min_units": 5,        # ürün takibi: karşılaştırma için iki dönemden birinde en az adet
+    "profit_guard_unknown_max_spend": 1000,   # kârı doğrulanmamış (UNKNOWN) ürüne en fazla test harcaması (TL)
+    "unprocessed_order_hours": 24,  # operasyon: bu kadar saattir işlenmeyen sipariş olay açar
+    "failed_jobs_incident": 3,      # operasyon: 24 saatte bu kadar başarısız iş olay açar
 }
 INVENTORY_MODELS = {"dropship": "Dropshipping (stok tedarikçide; stok sermayesi gerekmez)",
                     "own_stock": "Kendi stoğu (stok sermaye bağlar)"}

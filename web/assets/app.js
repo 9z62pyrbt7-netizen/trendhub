@@ -2383,7 +2383,7 @@ async function sfSettings(box) {
 }
 
 // ---- AI Control Center (öneri + onay; V1'de hiçbir platform aksiyonu otomatik uygulanmaz)
-const AI_TABS = [['command', 'Komuta Merkezi'], ['brief', 'Özet'], ['chat', 'CEO ile Konuş'], ['approvals', 'Onaylar'], ['profit', 'Kâr Merkezi'], ['ads', 'Reklam'],
+const AI_TABS = [['command', 'Komuta Merkezi'], ['team', 'Ajan Kontrol Merkezi'], ['brief', 'Özet'], ['chat', 'CEO ile Konuş'], ['approvals', 'Onaylar'], ['profit', 'Kâr Merkezi'], ['ads', 'Reklam'],
   ['inventory', 'Stok'], ['capital', 'Sermaye'], ['finance', 'Finans / Nakit'], ['cx', 'Müşteri Deneyimi'], ['sources', 'Veri Kaynakları'],
   ['journal', 'Karar Günlüğü'], ['activity', 'Ajan Hareketleri'], ['risk', 'Risk Merkezi'],
   ['agents', 'Ajanlar'], ['settings', 'Ayarlar']];
@@ -2432,7 +2432,7 @@ PAGES.ai = {
       try { await api('/api/ai/emergency-stop', { method: 'POST', body: { active: false } }); toast('Acil durdurma kaldırıldı'); refresh(); } catch (err) { fail(err); }
     });
     const box = $('#ai-body');
-    const fn = { command: aiCommand, brief: aiBrief, chat: aiChat, approvals: aiApprovals, profit: aiProfit, ads: aiAds, inventory: aiInventory, capital: aiCapital,
+    const fn = { command: aiCommand, team: aiTeam, brief: aiBrief, chat: aiChat, approvals: aiApprovals, profit: aiProfit, ads: aiAds, inventory: aiInventory, capital: aiCapital,
       finance: aiFinance, cx: aiCx, sources: aiSources,
       journal: aiJournal, activity: aiActivity, risk: aiRisk, agents: aiAgents, settings: aiSettings }[tab] || aiCommand;
     return fn(box, ov);
@@ -2773,6 +2773,138 @@ async function aiCommand(box, ov) {
         <h3 class="mt">Hatalar (24 saat)</h3>${d.errors.agent_runs.length || d.errors.failed_actions.length ? html`<ul class="small">${d.errors.agent_runs.map((e) => html`<li class="neg">${e.agent_code}: ${e.error}</li>`)}${d.errors.failed_actions.map((e) => html`<li class="neg">${e.action_type}: ${e.error}</li>`)}</ul>` : html`<p class="muted small">Hata yok.</p>`}</div>
     </div>
     ${d.approvals.length ? html`<div class="card mt"><h3>Onayını bekleyenler</h3><ul class="small mt">${d.approvals.map((a) => html`<li>#${a.id} ${a.title} <span class="badge ${AI_RISK_TONE[a.risk_level]}">${a.risk_level}</span></li>`)}</ul><a href="#/ai?tab=approvals">Onaylara git →</a></div>` : ''}`);
+}
+
+// ---- Ajan Kontrol Merkezi: yalnızca backend'in gerçek durumu (ai_agent_runs / tasks / tool_calls / evidence)
+const AGENT_ST = { IDLE: ['Boşta', ''], RUNNING: ['Çalışıyor', 'tone-info'], WAITING_APPROVAL: ['Onay bekliyor', 'tone-warn'],
+  BLOCKED: ['Engelli', 'tone-bad'], ERROR: ['Hata', 'tone-bad'], OFFLINE: ['Kapalı', ''] };
+const VER_ST = { VERIFIED: ['Doğrulandı', 'tone-good'], PARTIALLY_VERIFIED: ['Kısmen', 'tone-warn'], UNVERIFIED: ['Doğrulanmadı', ''], FAILED: ['Yanlış', 'tone-bad'] };
+const TASK_ST = { completed: 'tone-good', waiting_approval: 'tone-warn', blocked: 'tone-bad', failed: 'tone-bad', no_evidence: 'tone-bad', running: 'tone-info', queued: '' };
+const badge2 = (map, k) => html`<span class="badge ${(map[k] || ['', ''])[1]}">${(map[k] || [k || '—'])[0]}</span>`;
+const LEVEL_TONE = { success: 'tone-good', warning: 'tone-warn', error: 'tone-bad', info: '' };
+let teamTimer = null;
+
+function mdLite(t) {
+  return html`${String(t || '').split('\n').map((line) => {
+    const m = line.match(/^\*\*(.+?)\*\*(.*)$/);
+    if (m) return html`<div class="mt"><b>${m[1]}</b>${m[2]}</div>`;
+    return html`<div>${line}</div>`;
+  })}`;
+}
+
+async function aiTeam(box) {
+  if (teamTimer) { clearInterval(teamTimer); teamTimer = null; }
+  const d = await api('/api/agents/control-center');
+  const m = d.metrics;
+  const b = d.budget;
+  box.innerHTML = renderVal(html`
+    <div class="card"><div class="card-head"><div><h2>CEO'ya görev ver</h2><p>CEO görevi uzman ajanlara dağıtır; ajanlar yalnızca kayıtlı araçlarla veri okur; Gerçeklik Denetçisi her rakamı bağımsız yeniden sorgulayarak doğrular. Para/fiyat/reklam isteği yalnızca <b>öneri</b> açar, hiçbir şey otomatik uygulanmaz.</p></div></div>
+      <form id="team-form" class="row" style="gap:8px;flex-wrap:wrap"><input name="message" style="flex:1;min-width:240px" maxlength="2000" placeholder="Mağazanın durumunu analiz et" value="Mağazanın durumunu analiz et" required>
+        <button class="btn btn-primary" type="submit">CEO'ya gönder</button></form>
+      <div class="row small muted mt" style="gap:12px;flex-wrap:wrap">${['Bugün ne durumdayız?', 'Reklam performansı', 'Stok ve operasyon hataları', 'Büyüme deneyi öner', 'Kreatif hazırla', 'Geçmiş kararlar ve sonuçları'].map((q) => html`<a href="#" data-q="${q}">${q}</a>`)}</div>
+      <div id="team-result"></div></div>
+    <div class="grid grid-4 ai-kpis mt">
+      ${kpi('İstek (24 saat)', num(m.requests_total), `${num(m.agent_runs_total)} ajan çalışması · ${num(m.agent_failures_total)} hata`, m.agent_failures_total ? 'warn-text' : '')}
+      ${kpi('Araç çağrısı (24 saat)', num(m.tool_calls_total), `${num(m.tool_failures_total)} başarısız · ort. ${m.tool_latency_avg_ms ? num(m.tool_latency_avg_ms) + ' ms' : '—'}`, m.tool_failures_total ? 'warn-text' : '')}
+      ${kpi('Onay talebi', num(m.approvals_pending), `${num(m.actions_blocked)} aksiyon engellendi (24 saat)`, m.approvals_pending ? 'warn-text' : '')}
+      ${kpi('Kalan bütçe', b.available_budget === null ? 'Tanımsız' : money0(b.available_budget), b.total_budget === null ? 'Toplam bütçe / kasa yok → harcama BLOCKED' : `Toplam ${money0(b.total_budget)} · ayrılmış ${money0(b.reserved_budget)} · harcanan ${money0(b.committed)}`, b.available_budget === null ? 'neg' : '')}
+    </div>
+    ${d.emergency_stop ? html`<div class="notice bad mt">Acil durdurma aktif: yazma/öneri uygulayan ajanlar ENGELLİ.</div>` : ''}
+    <div class="card mt"><div class="card-head"><div><h2>Ajanlar</h2><p>Durum backend kayıtlarından hesaplanır: Çalışıyor = açık görev/çalışma, Hata = son çalışma hatalı, Onay bekliyor = sahibin onayını bekleyen öneri, Kapalı = devre dışı/veri kaynağı yok. Sabit "online" ışığı yoktur.</p></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Ajan</th><th>Durum</th><th>Şu anki görev / neden</th><th>Son çalışma</th><th class="r">Başarılı / hata (7g)</th><th>Kullandığı araçlar (7g)</th><th class="r">Kanıt (7g)</th><th class="r">Maliyet</th><th class="r">Ort. süre</th><th>Son karar</th></tr></thead><tbody>
+      ${d.agents.map((a) => html`<tr>
+        <td><b>${a.name}</b><span class="muted small" style="display:block">${a.code}${a.unit && a.unit !== a.code ? ` · birim: ${a.unit}` : ''}</span></td>
+        <td>${badge2(AGENT_ST, a.status)}</td>
+        <td class="small">${a.current_task || a.status_reason || html`<span class="muted">—</span>`}</td>
+        <td class="small">${a.last_run ? html`${dateTime(a.last_run.started_at)}<span class="muted" style="display:block">${a.last_run.status}${a.last_run.trigger ? ' · ' + a.last_run.trigger : ''}</span>` : html`<span class="muted">hiç çalışmadı</span>`}</td>
+        <td class="r num">${num(a.success_7d)} / <span class="${a.failure_7d ? 'neg' : ''}">${num(a.failure_7d)}</span></td>
+        <td class="small">${a.tools_used.length ? a.tools_used.map((t) => `${t.tool} ×${t.n}${t.failed ? ` (${t.failed} hata)` : ''}`).join(', ') : html`<span class="muted">—</span>`}</td>
+        <td class="r small">${a.evidence_7d.claims ? html`${num(a.evidence_7d.claims)} iddia<span style="display:block">✓${num(a.evidence_7d.verified)} ${a.evidence_7d.failed ? html`<span class="neg">✗${num(a.evidence_7d.failed)}</span>` : ''}</span>` : '—'}</td>
+        <td class="r small">${a.cost.input_tokens ? `${num(a.cost.input_tokens + a.cost.output_tokens)} token` : html`<span class="muted" title="${a.cost.note}">0 (LLM yok)</span>`}</td>
+        <td class="r num small">${a.avg_duration_ms === null ? '—' : num(a.avg_duration_ms) + ' ms'}</td>
+        <td class="small">${a.last_decision ? html`#${a.last_decision.id} ${a.last_decision.title}<span class="muted" style="display:block">${a.last_decision.status}</span>` : (a.last_task ? html`${a.last_task.objective}<span class="muted" style="display:block">${a.last_task.status}${a.last_task.verification_status ? ' · ' + a.last_task.verification_status : ''}</span>` : html`<span class="muted">—</span>`)}</td>
+      </tr>`)}</tbody></table></div></div>
+    <div class="grid grid-2 mt">
+      <div class="card"><div class="card-head"><div><h2>Canlı aktivite</h2><p>Her satır gerçek bir backend olayıdır (görev, araç çağrısı, doğrulama, onay, hata). 5 sn'de bir yenilenir.</p></div></div><div id="team-feed"></div></div>
+      <div>
+        <div class="card"><h3>Son istekler</h3>${d.requests.length ? html`<div class="table-wrap mt"><table><thead><tr><th>#</th><th>İstek</th><th>Durum</th><th>Doğrulama</th><th class="r">Süre</th></tr></thead><tbody>
+          ${d.requests.map((r) => html`<tr><td><a href="#" data-trace="${r.id}">#${r.id}</a></td><td class="small">${r.message.slice(0, 80)}<span class="muted" style="display:block">${r.intent || ''} · ${dateTime(r.started_at)}</span></td>
+            <td><span class="badge ${{ completed: 'tone-good', partial: 'tone-warn', blocked: 'tone-bad', failed: 'tone-bad' }[r.status] || ''}">${r.status}</span></td><td>${r.verification ? badge2(VER_ST, r.verification) : '—'}</td><td class="r num small">${r.duration_ms === null ? '—' : num(r.duration_ms) + ' ms'}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small mt">Henüz istek yok.</p>`}</div>
+        <div class="card mt"><h3>Operasyon olayları (açık)</h3>${d.incidents.length ? html`<ul class="small mt">${d.incidents.map((i) => html`<li><span class="badge ${{ critical: 'tone-bad', warning: 'tone-warn', info: '' }[i.severity]}">${i.severity}</span> #${i.id} ${i.title} <span class="muted">(×${i.occurrences})</span></li>`)}</ul>` : html`<p class="muted small mt">Açık olay yok.</p>`}</div>
+        <div class="card mt"><h3>Bütçe Yöneticisi</h3>
+          <dl class="kv small mt"><dt>Toplam bütçe</dt><dd>${b.total_budget === null ? html`<span class="neg">tanımsız</span>` : money(b.total_budget)} <span class="muted">(${b.total_source === 'owner' ? 'sahip tanımladı' : b.total_source === 'capital_usable' ? 'kasadan kullanılabilir' : 'yok'})</span></dd>
+            <dt>Ayrılmış / harcanmış</dt><dd>${money(b.reserved_budget)} / ${money(b.committed)}</dd><dt>Kalan</dt><dd>${b.available_budget === null ? '—' : money(b.available_budget)}</dd>
+            <dt>Bugün / 7 gün onaylanan</dt><dd>${money(b.spent_today)} / ${money(b.spent_7d)}</dd>
+            ${Object.entries(b.config).filter(([k]) => k !== 'total_budget').map(([k, v]) => html`<dt>${({ daily_limit: 'Günlük limit', weekly_limit: 'Haftalık limit', per_agent_limit: 'Ajan başına (7g)', per_campaign_limit: 'Ürün/kampanya başına (7g)', max_single_action_amount: 'Tek işlem üst sınırı', max_daily_ad_spend: 'Günlük reklam üst sınırı' })[k] || k}</dt><dd>${v === null ? '—' : money0(v)}</dd>`)}</dl>
+          ${can('admin') ? html`<form id="budget-form" class="form-grid mt"><label>Toplam bütçe (TL)<input name="total_budget" type="number" min="0" step="1" value="${b.config.total_budget ?? ''}" placeholder="ör. 50000"></label>
+            <label>Tek işlem üst sınırı<input name="max_single_action_amount" type="number" min="0" value="${b.config.max_single_action_amount ?? ''}"></label>
+            <label>Günlük limit<input name="daily_limit" type="number" min="0" value="${b.config.daily_limit ?? ''}"></label><label>Haftalık limit<input name="weekly_limit" type="number" min="0" value="${b.config.weekly_limit ?? ''}"></label>
+            <label>Ajan başına (7g)<input name="per_agent_limit" type="number" min="0" value="${b.config.per_agent_limit ?? ''}"></label><label>Ürün/kampanya başına (7g)<input name="per_campaign_limit" type="number" min="0" value="${b.config.per_campaign_limit ?? ''}"></label>
+            <label>Günlük reklam üst sınırı<input name="max_daily_ad_spend" type="number" min="0" value="${b.config.max_daily_ad_spend ?? ''}"></label>
+            <div class="row"><button class="btn" type="submit">Bütçeyi kaydet</button></div></form>` : ''}</div>
+      </div>
+    </div>
+    <div id="team-trace"></div>`);
+
+  const feed = async () => {
+    const el = $('#team-feed');
+    if (!el || !document.body.contains(el)) { clearInterval(teamTimer); teamTimer = null; return; }
+    const rows_ = await api('/api/agents/activity', { query: { limit: 60 } }).catch(() => null);
+    if (!rows_) { el.innerHTML = renderVal(html`<div class="notice bad small">Aktivite alınamadı (API hatası) — eski veri gösterilmiyor.</div>`); return; }
+    el.innerHTML = renderVal(rows_.length ? html`<ul class="small" style="max-height:420px;overflow:auto;list-style:none;padding:0">${rows_.map((x) => html`<li style="padding:4px 0;border-bottom:1px solid var(--line)">
+      <span class="muted">${dateTime(x.created_at)}</span> <span class="badge ${LEVEL_TONE[x.level] || ''}">${x.agent_name || x.agent_code || 'sistem'}</span> ${x.message}${x.request_id ? html` <a href="#" data-trace="${x.request_id}">istek #${x.request_id}</a>` : ''}</li>`)}</ul>` : html`<p class="muted small">Henüz olay yok.</p>`);
+    $$('#team-feed [data-trace]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); showTrace(a.dataset.trace); }));
+  };
+  await feed();
+  teamTimer = setInterval(feed, 5000);
+
+  const send = async (message) => {
+    const out = $('#team-result');
+    out.innerHTML = renderVal(html`<p class="muted small mt">CEO görevleri dağıtıyor, ajanlar araçları çalıştırıyor…</p>`);
+    try {
+      const r = await api('/api/agents/requests', { method: 'POST', body: { message } });
+      const v = r.verification || {};
+      out.innerHTML = renderVal(html`<div class="mt">
+        <div class="row small" style="gap:8px;flex-wrap:wrap">İstek #${r.request_id} · niyet <b>${r.intent}</b> · <span class="badge ${{ completed: 'tone-good', partial: 'tone-warn', blocked: 'tone-bad', failed: 'tone-bad' }[r.status] || ''}">${r.status}</span> · ${num(r.duration_ms)} ms
+          ${v.counts ? html` · doğrulama: ✓${v.counts.VERIFIED} ≈${v.counts.PARTIALLY_VERIFIED} ?${v.counts.UNVERIFIED} ✗${v.counts.FAILED}` : ''} <a href="#" data-trace="${r.request_id}">Tam izi göster →</a></div>
+        <div class="table-wrap mt"><table><thead><tr><th>Ajan</th><th>Görev</th><th>Durum</th><th>Araç çağrıları</th></tr></thead><tbody>
+          ${r.tasks.map((t) => html`<tr><td>${t.agent}</td><td class="small">${t.task_type}</td><td><span class="badge ${TASK_ST[t.status] || ''}">${t.status}</span>${t.error ? html`<span class="neg small" style="display:block">${t.error}</span>` : ''}</td>
+            <td class="small">${t.tool_calls.map((c) => `${c.tool}: ${c.status}`).join(', ') || html`<span class="neg">araç çağrısı yok</span>`}</td></tr>`)}</tbody></table></div>
+        <div class="card mt small">${mdLite(r.answer)}</div></div>`);
+      $$('#team-result [data-trace]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); showTrace(a.dataset.trace); }));
+    } catch (err) { fail(err); out.innerHTML = ''; }
+  };
+  $('#team-form').addEventListener('submit', (e) => { e.preventDefault(); send(new FormData(e.target).get('message')); });
+  $$('[data-q]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); $('#team-form [name=message]').value = a.dataset.q; send(a.dataset.q); }));
+  $$('[data-trace]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); showTrace(a.dataset.trace); }));
+  $('#budget-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {};
+    for (const [k, v] of new FormData(e.target).entries()) body[k] = v === '' ? null : Number(v);
+    for (const k of Object.keys(body)) if (body[k] === null && k !== 'total_budget') delete body[k];
+    try { await api('/api/agents/budget', { method: 'PUT', body }); toast('Bütçe güncellendi'); aiTeam(box); } catch (err) { fail(err); }
+  });
+
+  async function showTrace(id) {
+    const t = await api(`/api/agents/requests/${id}`);
+    const el = $('#team-trace');
+    el.innerHTML = renderVal(html`<div class="card mt"><div class="card-head"><div><h2>İstek #${t.request.id} — tam iz</h2><p>${t.request.message} · ${t.request.status} · ${num(t.request.duration_ms || 0)} ms</p></div></div>
+      <h3>Mesajlar (USER → CEO → ajanlar → Denetçi → CEO → USER)</h3>
+      <ol class="small">${t.messages.map((x) => html`<li><b>${x.from_agent} → ${x.to_agent}</b> <span class="badge">${x.kind}</span> ${x.content.slice(0, 300)}</li>`)}</ol>
+      <h3 class="mt">Görevler</h3><div class="table-wrap"><table><thead><tr><th>task_uid</th><th>Ajan</th><th>Görev</th><th>Durum</th><th>Doğrulama</th><th class="r">Deneme</th><th class="r">Süre</th><th>run_id</th></tr></thead><tbody>
+        ${t.tasks.map((x) => html`<tr><td class="small mono">${x.task_uid.slice(0, 12)}</td><td>${x.agent_code}</td><td class="small">${x.objective}</td><td><span class="badge ${TASK_ST[x.status] || ''}">${x.status}</span>${x.error ? html`<span class="neg small" style="display:block">${x.error}</span>` : ''}</td>
+          <td>${x.verification_status ? badge2(VER_ST, x.verification_status) : '—'}</td><td class="r num">${x.attempts}</td><td class="r num small">${x.duration_ms === null ? '—' : num(x.duration_ms) + ' ms'}</td><td class="num small">${x.run_id || '—'}</td></tr>`)}</tbody></table></div>
+      <h3 class="mt">Araç çağrıları</h3><div class="table-wrap"><table><thead><tr><th>#</th><th>Ajan</th><th>Araç</th><th>Erişim</th><th>Durum</th><th class="r">Süre</th><th>Özet / hata</th></tr></thead><tbody>
+        ${t.tool_calls.map((x) => html`<tr><td class="num small">${x.id}</td><td>${x.agent_code}</td><td class="small mono">${x.tool}</td><td class="small">${x.access} · ${x.risk_level}</td>
+          <td><span class="badge ${{ succeeded: 'tone-good', pending_approval: 'tone-warn', blocked: 'tone-bad', not_connected: '', failed: 'tone-bad', timeout: 'tone-bad', denied: 'tone-bad' }[x.status] || ''}">${x.status}</span></td>
+          <td class="r num small">${x.duration_ms === null ? '—' : num(x.duration_ms) + ' ms'}</td><td class="small">${x.error ? html`<span class="neg">${x.error}</span>` : x.result_summary}${x.proposal_id ? html` · <a href="#/ai?tab=approvals">öneri #${x.proposal_id}</a>` : ''}</td></tr>`)}</tbody></table></div>
+      <h3 class="mt">Kanıt ve doğrulama</h3><div class="table-wrap"><table><thead><tr><th>#</th><th>Ajan</th><th>İddia</th><th>Kaynak</th><th>Sonuç</th><th>Denetçi notu</th></tr></thead><tbody>
+        ${t.evidence.map((x) => html`<tr><td class="num small">${x.id}</td><td>${x.agent_code}</td><td class="small">${x.claim}</td><td class="small mono">${x.source || html`<span class="neg">araç yok</span>`}</td><td>${x.verification ? badge2(VER_ST, x.verification) : '—'}</td><td class="small">${x.verifier_note || ''}</td></tr>`)}</tbody></table></div>
+      ${t.errors.length ? html`<h3 class="mt">Hatalar</h3><ul class="small">${t.errors.map((x) => html`<li class="neg">${x.agent_code || ''} ${x.error_type} (deneme ${x.attempt ?? '—'}${x.retryable ? ', yeniden denenebilir' : ''}): ${x.message}</li>`)}</ul>` : ''}
+      ${t.approvals.length ? html`<h3 class="mt">Onay kayıtları</h3><ul class="small">${t.approvals.map((x) => html`<li>#${x.id} ${x.title} — <b>${x.status}</b> (risk ${x.risk_level}, sermaye ${money(x.required_capital)})</li>`)}</ul>` : ''}
+    </div>`);
+    el.scrollIntoView({ behavior: 'smooth' });
+  }
 }
 
 async function aiJournal(box, ov, page = 1) {

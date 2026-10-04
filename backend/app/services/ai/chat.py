@@ -9,6 +9,8 @@ Model hatası veya kapalıysa kural motoruna düşülür (sohbet hiç cevapsız 
 """
 from __future__ import annotations
 
+import contextvars
+import functools
 import json
 import logging
 import re
@@ -227,6 +229,49 @@ TOOLS = {
     "get_executive_summary": (tool_executive_summary, "CEO'nun Türkçe yönetici özeti (bugün ne oldu, kâr, ürünler, stok, reklam, "
                               "yapılan/engellenen aksiyonlar, onay bekleyenler, sonraki 3 iş).", {}),
 }
+
+
+# Orkestratör sohbet motorunu çağırdığında her araç kullanımı ai_tool_calls'a yazılır (kanıt izi). Bağlam yoksa davranış aynı.
+TOOL_LOG: contextvars.ContextVar = contextvars.ContextVar("trendhub_chat_tool_log", default=None)
+
+
+def _logged(name: str, fn):
+    @functools.wraps(fn)
+    def wrapper(conn, *args, **kwargs):
+        ctx = TOOL_LOG.get()
+        if ctx is None:
+            return fn(conn, *args, **kwargs)
+        import time as _t
+        import uuid as _u
+
+        from sqlalchemy import text as _text
+
+        from . import sanitize
+        t0, status, err, res = _t.monotonic(), "succeeded", None, None
+        try:
+            res = fn(conn, *args, **kwargs)
+            return res
+        except Exception as exc:
+            status, err = "failed", f"{exc.__class__.__name__}: {str(exc)[:300]}"
+            raise
+        finally:
+            data = json.loads(json.dumps(res, default=str)) if res is not None else {}
+            with ctx["engine"].begin() as c:
+                c.execute(_text("""INSERT INTO ai_tool_calls(call_uid, request_id, run_id, agent_code, tool, access, risk_level, arguments,
+                                                             status, completed_at, duration_ms, result_summary, result, result_hash, error)
+                                   VALUES (:u, :r, :run, 'ceo', :t, 'READ', 'LOW', CAST(:a AS JSONB), :s, NOW(), :ms, :sum,
+                                           CAST(:res AS JSONB), :h, :e)"""),
+                          {"u": _u.uuid4().hex, "r": ctx["request_id"], "run": ctx["run_id"], "t": f"chat.{name}",
+                           "a": sanitize.to_json({"args": list(args), **kwargs}), "s": status, "ms": int((_t.monotonic() - t0) * 1000),
+                           "sum": f"sohbet aracı {name}: {status}", "res": sanitize.to_json(sanitize.bounded(sanitize.redact(data))),
+                           "h": sanitize.digest(data), "e": err})
+    return wrapper
+
+
+for _name, (_fn, _desc, _schema) in list(TOOLS.items()):
+    _w = _logged(_name, _fn)
+    TOOLS[_name] = (_w, _desc, _schema)
+    globals()[_fn.__name__] = _w
 
 
 def call_tool(conn: Connection, name: str, args: dict) -> dict:

@@ -154,6 +154,15 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
         stale_orders = [q for q in data_quality(conn) if q["code"] == "orders_stale"]
         if stale_orders:
             checks.append(_check("stale_orders", "block", stale_orders[0]["message"] + " Para harcayan öneri bayat veriyle onaylanmaz."))
+    from . import governor, profit_guard
+    if action in profit_guard.SCALING_ACTIONS:
+        if p["entity_type"] == "product":
+            guard_pids = [p["entity_id"]]
+        else:
+            guard_pids = [r[0] for r in conn.execute(text("SELECT product_id FROM ad_campaign_products WHERE campaign_id = :c"),
+                                                     {"c": p["entity_id"]})]
+        checks += profit_guard.check(conn, p, guard_pids)
+    checks += governor.check(conn, p)
     cap = d(p.get("required_capital"))
     if cap > 0:
         key = SPEND_AUTHORITY.get(p["agent_code"])
@@ -411,6 +420,11 @@ def approve(conn: Connection, pid: int, user, note: str | None, ip: str | None) 
                          execution_result = CAST(:r AS JSONB), risk_checks = CAST(:c AS JSONB), risk_level = :l,
                          executed_at = CASE WHEN :s = 'executed' THEN NOW() END, updated_at = NOW() WHERE id = :id"""),
                  {"s": status, "u": user.id, "n": note, "r": _json(result), "c": _json(checks), "l": level, "id": pid})
+    if status in ("approved", "executed"):
+        from . import governor
+        governor.reserve(conn, p)
+        if status == "executed":
+            governor.commit(conn, pid)
     from .decisions import record
     record(conn, proposal=p, actor="owner", decision="approved", user_id=user.id, snapshot=_snapshot(conn, p),
            executed=status == "executed", reason=note, override=override, override_reason=note if override else None)
@@ -456,6 +470,8 @@ def mark_executed(conn: Connection, pid: int, user, note: str | None, ip: str | 
                          execution_result = COALESCE(execution_result, '{}'::jsonb) || CAST(:r AS JSONB), updated_at = NOW()
                          WHERE id = :id"""), {"u": user.id, "r": _json({"manual_note": note}), "id": pid})
     conn.execute(text("UPDATE ai_decisions SET executed_at = NOW() WHERE proposal_id = :p AND decision = 'approved'"), {"p": pid})
+    from . import governor
+    governor.commit(conn, pid)
     if p["action_type"] in ("ads.increase_budget", "ads.decrease_budget") and p["params"].get("new_daily_budget") is not None:
         # Platformda elle değiştirilen bütçe TrendHub kaydına da yansır (bir sonraki öneri doğru temelden başlasın)
         conn.execute(text("UPDATE ad_campaigns SET daily_budget = :b WHERE id = :id"),
@@ -512,6 +528,7 @@ def retire_stale(conn: Connection, agent: str, run_id: int) -> int:
     ids = [r[0] for r in conn.execute(text("""
         UPDATE ai_proposals SET status = 'superseded', updated_at = NOW()
          WHERE agent_code = :a AND status IN ('pending_approval', 'blocked') AND (run_id IS NULL OR run_id <> :r)
+           AND request_id IS NULL   -- kullanıcı/CEO isteğiyle açılan öneri döngü tarafından kapatılmaz
         RETURNING id"""), {"a": agent, "r": run_id})]
     from .actions import sync_proposal
     for pid in ids:

@@ -20,7 +20,7 @@ from .config import Window, d, today
 from .proposals import activity, expire_old
 
 log = logging.getLogger("trendhub.ai")
-from . import growth  # noqa: E402
+from . import growth, operations  # noqa: E402
 
 # Ortak döngü sırası: VERİ NORMALİZASYONU (run_cycle başında) → KÂR → ÜRÜN/STOK → FİYAT/KAMPANYA → REKLAM/PAZARLAMA/SOSYAL
 # → CEO HAKEMLİĞİ → GUARDRAIL (risk motoru her öneride) → ÖNERİ/AKSİYON → DENETİM KAYDI → SONUÇ → GERİ BİLDİRİM.
@@ -29,7 +29,8 @@ AGENT_ORDER = (("inventory", agents.run_inventory), ("product_profit", agents.ru
                ("product_tracking", growth.run_product_tracking), ("pricing", growth.run_pricing),
                ("campaign", growth.run_campaign), ("advertising", agents.run_advertising),
                ("marketing", growth.run_marketing), ("social_media", growth.run_social),
-               ("customer_experience", growth.run_customer_experience), ("capital", agents.run_capital))
+               ("customer_experience", growth.run_customer_experience), ("operations", operations.run_operations),
+               ("capital", agents.run_capital))
 CYCLE_LOCK = 7342301
 
 
@@ -89,12 +90,18 @@ def _run_cycle_locked(engine: Engine, trigger: str, out: dict) -> dict:
             out["risk_anomalies"] = len(agents.scan_anomalies(conn))
             conn.execute(text("UPDATE ai_agents SET last_run_at = NOW(), last_status = 'ok', last_error = NULL WHERE code = 'risk'"))
             out["expired"] = expire_old(conn)
+            from .governor import release_stale
+            out["budget_released"] = release_stale(conn)
         with engine.begin() as conn:
             from .ceo_review import resolve_conflicts
             out["ceo_blocked_conflicts"] = resolve_conflicts(conn, ceo.run_id)
         with engine.begin() as conn:
             from .decisions import evaluate_outcomes
             out["outcomes_written"] = evaluate_outcomes(conn)
+            from .memory import refresh_lessons
+            out["lessons_updated"] = refresh_lessons(conn)
+            from .experiments import measure_experiments
+            out["experiments_measured"] = measure_experiments(conn)
         with engine.begin() as conn:
             brief = build_brief(conn)
             store_brief(conn, brief)

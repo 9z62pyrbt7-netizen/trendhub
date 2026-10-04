@@ -75,7 +75,7 @@ os.environ.update({
 })
 run_migrations(_APP_DB)
 
-DATA_TABLES = ["ai_actions", "platform_events", "customer_questions", "marketplace_returns", "marketplace_finance_entries", "ai_decision_outcomes", "ai_decisions", "ai_activity", "ai_risk_events", "ai_proposals", "ai_agent_runs",
+DATA_TABLES = ["ai_creatives", "ai_experiments", "ai_incidents", "ai_budget_ledger", "ai_agent_errors", "ai_evidence", "ai_tool_calls", "ai_agent_messages", "ai_agent_tasks", "ai_requests", "ai_actions", "platform_events", "customer_questions", "marketplace_returns", "marketplace_finance_entries", "ai_decision_outcomes", "ai_decisions", "ai_activity", "ai_risk_events", "ai_proposals", "ai_agent_runs",
                "ai_owner_preferences", "ai_capital_accounts", "ai_chat_messages", "ai_briefs", "ai_inventory_snapshots", "notification_outbox", "einvoice_records", "storefront_password_resets", "storefront_customer_sessions",
                "storefront_customer_addresses", "storefront_customers", "storefront_payment_events", "stock_reservations", "storefront_cart_items", "storefront_carts",
                "storefront_orders", "storefront_products", "listing_publications", "publish_requests", "alerts", "marketplace_connections", "ad_performance",

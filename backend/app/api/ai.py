@@ -633,12 +633,51 @@ def chat_send(body: ChatIn, user: CurrentUser = Depends(viewer), conn: Connectio
         c=conv, u=user.id)][::-1]
     conn.execute(text("INSERT INTO ai_chat_messages(user_id, conversation_id, role, content) VALUES (:u, :c, 'user', :m)"),
                  {"u": user.id, "c": conv, "m": body.message})
-    res = chat.answer(conn, body.message, history)
+    from ..services.ai import orchestrator
+    eng = get_engine()
+    p = orchestrator.plan(eng, body.message, "chat")
+    if p["intent"] == "other":
+        # Uzman görevi gerektirmeyen soru: mevcut CEO sohbet motoru (konuşma geçmişiyle). Araç izi istek kaydına yazılır.
+        res = _chat_with_trace(eng, conn, body.message, history, user.id, conv)
+    else:
+        if p["intent"].startswith("action") and not config.can(user.role, "propose"):
+            raise HTTPException(403, "Aksiyon isteği (öneri oluşturma) için operatör yetkisi gerekir.")
+        o = orchestrator.handle(eng, body.message, user_id=user.id, source="chat", conversation_id=conv)
+        res = {"answer": o["answer"], "engine": "orchestrator", "request_id": o["request_id"], "status": o["status"],
+               "intent": o["intent"], "verification": o["verification"], "usage": {},
+               "tools_used": list(dict.fromkeys(c["tool"] for t in o["tasks"] for c in t["tool_calls"])),
+               "sources": [f"{t['agent']}.{t['task_type']} ({t['status']})" for t in o["tasks"]]}
     conn.execute(text("""INSERT INTO ai_chat_messages(user_id, conversation_id, role, content, engine, tools_used, usage)
                          VALUES (:u, :c, 'assistant', :m, :e, CAST(:t AS JSONB), CAST(:us AS JSONB))"""),
                  {"u": user.id, "c": conv, "m": res["answer"], "e": res["engine"], "t": json.dumps(res["tools_used"]),
                   "us": json.dumps(res["usage"])})
     return {"conversation_id": conv, **res}
+
+
+def _chat_with_trace(eng, conn: Connection, message: str, history: list[dict], user_id: int, conv: str) -> dict:
+    """Sohbet motoru cevabı + istek kaydı (ai_requests) + kullanılan araçların kaydı (ai_tool_calls)."""
+    import time as _time
+    import uuid as _uuid
+    from ..services.ai import sanitize
+    with eng.begin() as c:
+        rid = c.execute(text("""INSERT INTO ai_requests(request_uid, user_id, source, conversation_id, message, intent, status)
+                                VALUES (:u, :us, 'chat', :cv, :m, 'chat', 'running') RETURNING id"""),
+                        {"u": _uuid.uuid4().hex, "us": user_id, "cv": conv, "m": sanitize.clean_text(message, 2000)}).scalar()
+    token = chat.TOOL_LOG.set({"engine": eng, "request_id": rid, "run_id": None})
+    t0 = _time.monotonic()
+    try:
+        res = chat.answer(conn, message, history)
+    finally:
+        chat.TOOL_LOG.reset(token)
+    ms = int((_time.monotonic() - t0) * 1000)
+    if res.get("engine") == "claude":
+        res.setdefault("usage", {})["latency_ms"] = ms
+    with eng.begin() as c:
+        c.execute(text("""UPDATE ai_requests SET status = 'completed', answer = :a, finished_at = NOW(), duration_ms = :ms,
+                                 verification = CAST(:v AS JSONB) WHERE id = :i"""),
+                  {"a": res["answer"], "ms": ms, "i": rid,
+                   "v": json.dumps({"overall": "UNVERIFIED", "mode": "chat_engine", "note": "Sohbet motoru; bağımsız doğrulama yapılmadı"})})
+    return {**res, "request_id": rid}
 
 
 @router.get("/chat/{conv}")

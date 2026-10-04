@@ -39,7 +39,7 @@ docker compose exec -T api alembic history | head -20
 
 ## Dal gelince yapılacak birleştirme
 - `production-snapshot` + `e29800e` (+ bu hazırlık) birleştirilir. Çakışmalarda production'ın veri entegrasyonları ve reklam atıf düzeltmesi esas alınır.
-- V3 migration'ı `0013_agent_operations` → `0014_agent_operations` olarak yeniden adlandırılır. `down_revision` production'daki `0013_ad_attribution` revizyon kimliği olur. Production migration'larına dokunulmaz.
+- V3 migration'ı `0013_agent_operations` → `0014_agent_operations`, V4 ajan çalışma zamanı `0014_agent_runtime` → `0015_agent_runtime` olarak yeniden adlandırılır. `0014_agent_operations`'ın `down_revision`'ı production'daki `0013_ad_attribution` revizyon kimliği, `0015_agent_runtime`'ınki `0014_agent_operations` olur. Production migration'larına dokunulmaz.
 - Testler çalıştırılır: production testleri + V3 testleri + migration testi (production yedeğinin geri yüklenmiş kopyası üzerinde) + atıf regresyonu.
 - Deploy etmeden önce sayım karşılaştırması: order, listing, cost, finance ve ad kayıt sayıları migration öncesi ve sonrası birebir aynı olmalı.
 - Deploy sunucuda yapılır; bu ortamdan yapılamaz. Sunucuda Claude Code (Remote Control) oturumu açılırsa adımları oradan birlikte yürütürüz.
