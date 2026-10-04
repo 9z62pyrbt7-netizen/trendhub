@@ -375,11 +375,13 @@ def test_rbac_and_screens(engine, conn, client_factory):
     assert c.put("/api/ai/settings", json={"enabled": False}, headers=H).status_code == 403
     assert c.post("/api/ai/chat", json={"message": "özet"}, headers=H).status_code == 200
     ag = {a["code"]: a for a in c.get("/api/ai/agents").json()}
-    assert ag["social_media"]["health"] == "UNAVAILABLE" and "Meta" in ag["social_media"]["unavailable_reason"]
+    # V3: Sosyal medya ajanı içerik planı üretir (yayın yapmaz); veri kaynağı olmayan ajanlar emekliye ayrıldı
+    assert ag["social_media"]["health"] != "UNAVAILABLE"
+    assert ag["experiments"]["health"] == "UNAVAILABLE" and "Kaldırıldı" in ag["experiments"]["unavailable_reason"]
     assert c.get("/api/ai/scorecard").json()["go_live"] is None
     c.post("/api/auth/logout", headers=H)
     login("admin", "Admin-Password-123")
-    assert c.patch("/api/ai/agents/social_media", json={"enabled": True}, headers=H).status_code == 409
+    assert c.patch("/api/ai/agents/experiments", json={"enabled": True}, headers=H).status_code == 409
     assert c.patch("/api/ai/agents/risk", json={"enabled": False}, headers=H).status_code == 409
     assert c.put("/api/ai/settings", json={"thresholds": {"star_margin": 3}}, headers=H).status_code == 422
     assert c.put("/api/ai/settings", json={"thresholds": {"star_margin": 0.25}, "inventory_model": "own_stock"}, headers=H).status_code == 200

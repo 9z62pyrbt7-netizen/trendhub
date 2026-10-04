@@ -167,10 +167,12 @@ def test_2_ceo_measures_its_own_accuracy_and_7_owner_override(engine, conn, api)
     assert row and dec.override and "risk" in dec.override_reason
     assert conn.execute(text("SELECT COUNT(*) FROM audit_logs WHERE action = 'ai.owner_override'")).scalar() == 1
 
-    # CEO karşı + HIGH risk → owner override YOK
+    # CEO karşı + HIGH risk → owner override YOK (günlük bütçe limiti bu senaryoda bağımsız test edilir; burada yükseltilir)
+    api.put("/api/ai/settings", json={"thresholds": {"daily_ad_budget_limit": 10000}}, headers=H)
     _, big = _profitable_campaign(conn, "BUYUK", before_units=3, after_units=3, budget="1000")   # +300 TL/gün → HIGH
     cycle(engine)
-    hp = conn.execute(text("SELECT id, risk_level, ceo_stance, status FROM ai_proposals WHERE entity_id = :c"), {"c": big}).one()
+    hp = conn.execute(text("SELECT id, risk_level, ceo_stance, status, risk_checks FROM ai_proposals WHERE entity_type = 'campaign' AND entity_id = :c"),
+                      {"c": big}).one()
     assert hp.risk_level == "high" and hp.ceo_stance == "oppose" and hp.status == "pending_approval"
     r = api.post(f"/api/ai/proposals/{hp.id}/approve", json={"note": "Yine de istiyorum, sorumluluk bende"}, headers=H)
     assert r.status_code == 409 and "sahip onayıyla bile uygulanamaz" in r.json()["detail"]
@@ -371,7 +373,7 @@ def test_8_single_id_trail_from_agent_to_outcome(engine, conn, api):
     sell(conn, pid, price="600", n=6, days_ago=4, tag="a")
     cid = campaign(conn, "İz sürülen", [pid], revenue_per_day="1500", clicks=60)
     cycle(engine)
-    prop = conn.execute(text("SELECT id FROM ai_proposals WHERE entity_id = :c"), {"c": cid}).scalar()
+    prop = conn.execute(text("SELECT id FROM ai_proposals WHERE entity_type = 'campaign' AND entity_id = :c"), {"c": cid}).scalar()
     api.post(f"/api/ai/proposals/{prop}/approve", json={"note": "deneyelim"}, headers=H)
     api.post(f"/api/ai/proposals/{prop}/executed", json={"note": "panelde 130 yaptım"}, headers=H)
     shift_decision(conn, conn.execute(text("SELECT id FROM ai_decisions WHERE proposal_id = :p"), {"p": prop}).scalar())

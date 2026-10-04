@@ -301,8 +301,10 @@ def run_advertising(conn: Connection, ctx: RunContext) -> dict:
             n += 1
     if any(c["verdict"] == "INSUFFICIENT_DATA" for c in camps):
         ctx.warnings.append("Bazı kampanyalarda veri yetersiz")
+    from .growth import propose_ad_products
+    new_ads = propose_ad_products(conn, ctx)
     retired = retire_stale(conn, "advertising", ctx.run_id)
-    ctx.output = {"campaigns": len(camps), "verdicts": counts, "proposals": n, "retired": retired}
+    ctx.output = {"campaigns": len(camps), "verdicts": counts, "proposals": n, "new_ad_proposals": new_ads, "retired": retired}
     activity(conn, f"{len(camps)} aktif kampanya analiz edildi; {n} öneri", agent="advertising", kind="run", run_id=ctx.run_id)
     return ctx.output
 

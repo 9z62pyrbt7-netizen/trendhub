@@ -190,6 +190,13 @@ def tool_data_sources(conn: Connection) -> dict:
     return {"sources": [{k: x.get(k) for k in keep} for x in data_sources(conn)]}
 
 
+def tool_executive_summary(conn: Connection) -> dict:
+    """CEO yönetici özeti: bugün, satış, net kâr (kaynağıyla), iyi/zararlı ürünler, stok, reklam adayları, aksiyonlar, onaylar."""
+    from .ceo_review import executive_summary, latest_summary
+    from .reconcile import coverage
+    return latest_summary(conn) or executive_summary(conn, coverage(conn))
+
+
 def tool_brief(conn: Connection) -> dict:
     from .ceo import build_brief
     return build_brief(conn)
@@ -217,6 +224,8 @@ TOOLS = {
     "get_customer_signals": (tool_customer_signals, "Gerçek müşteri soruları (kategori) ve iade sebepleri; ürün sayfası bilgi eksikleri.",
                              {"days": {"type": "integer"}}),
     "get_data_sources": (tool_data_sources, "Veri kaynaklarının tazeliği; finans/iade/soru verisi güncel mi.", {}),
+    "get_executive_summary": (tool_executive_summary, "CEO'nun Türkçe yönetici özeti (bugün ne oldu, kâr, ürünler, stok, reklam, "
+                              "yapılan/engellenen aksiyonlar, onay bekleyenler, sonraki 3 iş).", {}),
 }
 
 
@@ -268,6 +277,7 @@ SOURCES = {
     "get_daily_brief": "CEO günlük özeti",
     "get_customer_signals": "Trendyol Soru-Cevap + Trendyol İadeler (gerçek kayıtlar)",
     "get_data_sources": "Kaynak tazeliği (sync_state)",
+    "get_executive_summary": "CEO yönetici özeti (ajan döngüsü)",
 }
 
 
@@ -487,6 +497,10 @@ def rules_answer(conn: Connection, question: str, last_tools: list[str] | None =
         if not r["items"]:
             return "Bekleyen öneri yok.", used
         return "\n".join(f"• [{x['status']}] {x['title']} — {x['reason'][:160]}" for x in r["items"][:10]), used
+    if any(w in q for w in ("yönetici özeti", "durum raporu", "sonraki iş", "ne yapmalıyım")):
+        from .ceo_review import ordered_sections
+        sm = use("get_executive_summary")
+        return "\n".join(f"{h}\n" + "\n".join(f"• {x}" for x in lines) for h, lines in ordered_sections(sm)), used
     b = use("get_daily_brief")
     lines = ["Bugün bilmen gerekenler:"] + [f"{i + 1}. {it['text']}" for i, it in enumerate(b["items"])]
     if "bugün" not in q and "ne oldu" not in q and "özet" not in q:

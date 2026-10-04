@@ -28,6 +28,9 @@ STOREFRONT_MAINTENANCE = "storefront.maintenance"
 STOREFRONT_MAINTENANCE_EVERY_MINUTES = 10
 STOREFRONT_NOTIFY = "storefront.notify"
 AI_CYCLE = "ai.cycle"
+AI_DAILY_REVIEW = "ai.daily_review"
+AI_WEEKLY_REVIEW = "ai.weekly_review"
+AI_DAILY_HOUR = 8          # Türkiye saatiyle bu saatten sonra günde bir kez
 DEFAULT_LOOKBACK_DAYS = 14
 DEEP_LOOKBACK_DAYS = 30   # Trendyol getShipmentPackages en fazla 1 ay geriye izin verir
 MAX_LOOKBACK_DAYS = 30
@@ -45,6 +48,8 @@ JOB_LABELS_TR = {
     STOREFRONT_MAINTENANCE: "Web mağazası bakımı (ödeme beklemeleri, sepetler, kargo bildirimi, tedarikçi taslakları, e-fatura)",
     STOREFRONT_NOTIFY: "Web siparişi bildirimleri (e-posta/SMS)",
     AI_CYCLE: "AI Control Center döngüsü (analiz + öneri; hiçbir aksiyon uygulamaz)",
+    AI_DAILY_REVIEW: "AI günlük değerlendirme (karar sonuçları + yönetici özeti)",
+    AI_WEEKLY_REVIEW: "AI haftalık strateji değerlendirmesi (ajan performansı)",
     **platform_sync.JOB_LABELS_TR,
 }
 
@@ -186,6 +191,12 @@ def execute(engine: Engine, job: dict, settings=None) -> dict:
     if t == AI_CYCLE:
         from .ai.ceo import run_cycle
         return run_cycle(engine)
+    if t == AI_DAILY_REVIEW:
+        from .ai.ceo_review import daily_review
+        return daily_review(engine)
+    if t == AI_WEEKLY_REVIEW:
+        from .ai.ceo_review import weekly_review
+        return weekly_review(engine)
     if t == STOREFRONT_NOTIFY:
         from . import order_notifications
         return order_notifications.deliver_pending(engine.begin)
@@ -309,6 +320,34 @@ def schedule_event_processing(conn) -> int | None:
         return None
     return jobs.enqueue(conn, platform_sync.EVENTS_PROCESS, payload={}, idempotency_key=platform_sync.EVENTS_PROCESS,
                         max_attempts=3)
+
+
+def schedule_ai_reviews(conn, now=None) -> list[int]:
+    """Günlük (her gün 08:00 TR sonrası bir kez) ve haftalık (pazartesi) değerlendirme. Tarih anahtarlı: aynı gün
+    ikinci kez oluşmaz; worker yeniden başlasa da kayıt DB'de olduğu için kaybolmaz ve tekrarlanmaz."""
+    from datetime import datetime
+
+    from . import app_settings
+    from .ai.config import TZ
+    if not app_settings.get(conn, "ai.enabled", True):
+        return []
+    now = now or datetime.now(TZ)
+    created = []
+    plan = [(AI_DAILY_REVIEW, now.date().isoformat())]
+    if now.weekday() == 0:
+        plan.append((AI_WEEKLY_REVIEW, now.date().isoformat()))
+    if now.hour < AI_DAILY_HOUR:
+        return []
+    for job_type, day in plan:
+        key = f"{job_type}:{day}"
+        done = conn.execute(text("""SELECT 1 FROM sync_jobs WHERE idempotency_key = :k
+                                     AND status IN ('queued', 'running', 'succeeded') LIMIT 1"""), {"k": key}).first()
+        if done:
+            continue
+        jid = jobs.enqueue(conn, job_type, payload={"date": day}, idempotency_key=key, max_attempts=2)
+        if jid:
+            created.append(jid)
+    return created
 
 
 def schedule_ai_cycle(conn) -> int | None:

@@ -63,13 +63,26 @@ def ensure_store(conn: Connection, marketplace_code: str, external_id: str, name
 
 
 def _find_product(conn: Connection, sku: str | None, barcode: str | None) -> int | None:
+    """Katalog SKU/barkod → ilan → tedarikçi ürünü sırasıyla, büyük/küçük harf ve boşluk duyarsız eşleşme.
+    Anahtar birden fazla ürüne gidiyorsa eşleştirilmez (yanlış ürüne kâr yazılmaz)."""
+    queries = []
     if sku:
-        pid = conn.execute(text("SELECT id FROM products WHERE sku = :s ORDER BY id LIMIT 1"), {"s": sku}).scalar()
-        if pid:
-            return pid
+        queries += [("SELECT MIN(id), COUNT(DISTINCT id) FROM products WHERE UPPER(BTRIM(sku)) = UPPER(BTRIM(:v))", sku)]
     if barcode:
-        return conn.execute(text("SELECT id FROM products WHERE barcode = :b ORDER BY id LIMIT 1"),
-                            {"b": barcode}).scalar()
+        queries += [("SELECT MIN(id), COUNT(DISTINCT id) FROM products WHERE UPPER(BTRIM(barcode)) = UPPER(BTRIM(:v))", barcode),
+                    ("SELECT MIN(product_id), COUNT(DISTINCT product_id) FROM marketplace_listings "
+                     "WHERE product_id IS NOT NULL AND UPPER(BTRIM(barcode)) = UPPER(BTRIM(:v))", barcode),
+                    ("SELECT MIN(product_id), COUNT(DISTINCT product_id) FROM supplier_products "
+                     "WHERE product_id IS NOT NULL AND UPPER(BTRIM(barcode)) = UPPER(BTRIM(:v))", barcode)]
+    if sku:
+        queries += [("SELECT MIN(product_id), COUNT(DISTINCT product_id) FROM marketplace_listings "
+                     "WHERE product_id IS NOT NULL AND UPPER(BTRIM(sku)) = UPPER(BTRIM(:v))", sku),
+                    ("SELECT MIN(product_id), COUNT(DISTINCT product_id) FROM supplier_products "
+                     "WHERE product_id IS NOT NULL AND UPPER(BTRIM(supplier_sku)) = UPPER(BTRIM(:v))", sku)]
+    for q, v in queries:
+        pid, n = conn.execute(text(q), {"v": v}).one()
+        if pid and n == 1:
+            return pid
     return None
 
 

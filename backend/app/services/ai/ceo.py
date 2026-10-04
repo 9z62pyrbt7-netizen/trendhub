@@ -20,8 +20,17 @@ from .config import Window, d, today
 from .proposals import activity, expire_old
 
 log = logging.getLogger("trendhub.ai")
+from . import growth  # noqa: E402
+
+# Ortak döngü sırası: VERİ NORMALİZASYONU (run_cycle başında) → KÂR → ÜRÜN/STOK → FİYAT/KAMPANYA → REKLAM/PAZARLAMA/SOSYAL
+# → CEO HAKEMLİĞİ → GUARDRAIL (risk motoru her öneride) → ÖNERİ/AKSİYON → DENETİM KAYDI → SONUÇ → GERİ BİLDİRİM.
+# Stok ve kâr ajanları önce çalışır; sonraki ajanlar onların sonucunu (stok riski, sınıf) okur.
 AGENT_ORDER = (("inventory", agents.run_inventory), ("product_profit", agents.run_product_profit),
-               ("advertising", agents.run_advertising), ("capital", agents.run_capital))
+               ("product_tracking", growth.run_product_tracking), ("pricing", growth.run_pricing),
+               ("campaign", growth.run_campaign), ("advertising", agents.run_advertising),
+               ("marketing", growth.run_marketing), ("social_media", growth.run_social),
+               ("customer_experience", growth.run_customer_experience), ("capital", agents.run_capital))
+CYCLE_LOCK = 7342301
 
 
 def run_cycle(engine: Engine, trigger: str = "schedule") -> dict:
@@ -30,6 +39,23 @@ def run_cycle(engine: Engine, trigger: str = "schedule") -> dict:
     with engine.begin() as conn:
         if not config.enabled(conn):
             return {"skipped": "ai.enabled=false"}
+    # Aynı anda iki döngü (zamanlayıcı + elle "şimdi çalıştır") aynı öneriyi iki kez üretmesin: oturum kilidi
+    lock = engine.connect()
+    try:
+        got = lock.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": CYCLE_LOCK}).scalar()
+        lock.commit()   # oturum kilidi transaction'dan bağımsızdır; bağlantı "idle in transaction" kalmasın
+        if not got:
+            return {"skipped": "Başka bir AI döngüsü çalışıyor (tekrar eden döngü engellendi)"}
+        return _run_cycle_locked(engine, trigger, out)
+    finally:
+        try:
+            lock.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": CYCLE_LOCK})
+            lock.commit()
+        finally:
+            lock.close()
+
+
+def _run_cycle_locked(engine: Engine, trigger: str, out: dict) -> dict:
     with engine.begin() as conn:
         # Worker yeniden başladıysa yarıda kalan çalışmalar sonsuza dek 'running' görünmesin
         stale = conn.execute(text("""UPDATE ai_agent_runs SET status = 'error', finished_at = NOW(),
@@ -42,7 +68,10 @@ def run_cycle(engine: Engine, trigger: str = "schedule") -> dict:
             activity(conn, "Önceki çalışma yarıda kesilmiş (worker yeniden başladı); hata olarak işaretlendi", agent=code,
                      kind="run", level="error")
     with agents.agent_run(engine, "ceo", trigger) as ceo:
-        ceo.sources += [c for c, _ in AGENT_ORDER]
+        ceo.sources += ["veri normalizasyonu"] + [c for c, _ in AGENT_ORDER]
+        from .reconcile import coverage, normalize
+        with engine.begin() as conn:
+            out["normalization"] = normalize(conn)
         for code, fn in AGENT_ORDER:
             with engine.begin() as conn:
                 if not agents.agent_enabled(conn, code):
@@ -61,11 +90,21 @@ def run_cycle(engine: Engine, trigger: str = "schedule") -> dict:
             conn.execute(text("UPDATE ai_agents SET last_run_at = NOW(), last_status = 'ok', last_error = NULL WHERE code = 'risk'"))
             out["expired"] = expire_old(conn)
         with engine.begin() as conn:
+            from .ceo_review import resolve_conflicts
+            out["ceo_blocked_conflicts"] = resolve_conflicts(conn, ceo.run_id)
+        with engine.begin() as conn:
             from .decisions import evaluate_outcomes
             out["outcomes_written"] = evaluate_outcomes(conn)
         with engine.begin() as conn:
             brief = build_brief(conn)
             store_brief(conn, brief)
+            from .ceo_review import executive_summary
+            cov = coverage(conn)
+            out["coverage"] = {k: cov[k] for k in ("sales_lines", "unmatched_lines", "missing_cost_lines", "classes", "decidable_products")}
+            summary = executive_summary(conn, cov)
+            conn.execute(text("UPDATE ai_briefs SET summary = CAST(:s AS JSONB) WHERE brief_date = :d"),
+                         {"s": json.dumps(summary, ensure_ascii=False, default=str), "d": brief["date"]})
+            out["summary"] = summary
             out["brief_items"] = len(brief["items"])
             activity(conn, f"Günlük özet güncellendi ({len(brief['items'])} madde)", agent="ceo", kind="brief", run_id=ceo.run_id)
         ceo.output = out

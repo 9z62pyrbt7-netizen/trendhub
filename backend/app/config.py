@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     ai_model: str = "claude-opus-5-5"
 
+    # Meta Marketing API (reklam). Boşsa reklam önerileri yalnızca "uygulanabilir öneri" olarak kalır; sahte işlem yapılmaz.
+    meta_access_token: str = ""
+    meta_ad_account_id: str = ""
+
     # E-fatura/e-arşiv sağlayıcısı: "" (kapalı). Uygulanmış sağlayıcı yoktur; bkz. app/services/einvoice.py
     einvoice_provider: str = ""
 

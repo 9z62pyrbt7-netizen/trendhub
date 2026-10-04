@@ -68,7 +68,8 @@ def test_smoke_job_whitelist_matches_internal_jobs_only():
     smoke = open(os.path.join(ROOT, "scripts", "smoke_test.sh"), encoding="utf-8").read()
     allowed = set(re.findall(r"""-e '"job_type":"([^"]+)"'""", smoke))
     internal = {sync_service.ALERTS_SCAN, sync_service.STOREFRONT_MAINTENANCE, sync_service.STOREFRONT_NOTIFY,
-                sync_service.AI_CYCLE, platform_sync.EVENTS_PROCESS}
+                sync_service.AI_CYCLE, platform_sync.EVENTS_PROCESS, sync_service.AI_DAILY_REVIEW,
+                sync_service.AI_WEEKLY_REVIEW}
     external = {sync_service.ORDERS_SYNC, sync_service.ORDERS_DEEP_SYNC, sync_service.LISTINGS_SYNC,
                 sync_service.INTEGRATION_CHECK, sync_service.SUPPLIER_SYNC, "listing.publish", *platform_sync.RESOURCE}
     assert allowed == internal

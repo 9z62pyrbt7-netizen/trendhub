@@ -29,15 +29,27 @@ STATUS_TR = {"pending_approval": "Onay bekliyor", "blocked": "Risk motoru bloke 
 
 # Ajan → izinli aksiyonlar (en az yetki). Listede olmayan aksiyon risk motorunda BLOKE edilir.
 ALLOWED_ACTIONS = {
-    "advertising": {"ads.increase_budget", "ads.decrease_budget", "ads.pause"},
+    "advertising": {"ads.increase_budget", "ads.decrease_budget", "ads.pause", "ads.create_campaign"},
     "product_profit": {"product.review_loss", "product.fix_missing_cost"},
     "inventory": {"inventory.restock", "inventory.supplier_stock_risk", "inventory.dead_stock"},
+    "pricing": {"pricing.change_price"},
+    "campaign": {"campaign.discount"},
+    "product_tracking": {"tracking.alert"},
+    "marketing": {"marketing.plan"},
+    "social_media": {"social.content_plan"},
+    "customer_experience": {"cx.info_gap"},
 }
+# Sermaye (para) isteyebilen ajanlar ve tek öneri üst sınırının eşik anahtarı. Diğer ajanlar para isteyemez.
+SPEND_AUTHORITY = {"advertising": "advertising_max_capital_per_proposal", "inventory": "inventory_max_capital_per_proposal"}
+PRODUCT_SPEND_ACTIONS = {"ads.create_campaign", "campaign.discount", "pricing.change_price"}
 ACTION_TR = {
     "ads.increase_budget": "Reklam bütçesini artır", "ads.decrease_budget": "Reklam bütçesini azalt",
     "ads.pause": "Reklamı durdur", "product.review_loss": "Zarar eden ürünü gözden geçir",
     "product.fix_missing_cost": "Ürün maliyetini gir", "inventory.restock": "Stok al",
     "inventory.supplier_stock_risk": "Tedarikçi stoğu tükeniyor", "inventory.dead_stock": "Satmayan stok",
+    "ads.create_campaign": "Ürüne reklam aç", "pricing.change_price": "Fiyatı değiştir", "campaign.discount": "İndirim kampanyası",
+    "tracking.alert": "Ürün performans değişimi", "marketing.plan": "Pazarlama planı", "social.content_plan": "Sosyal medya içerik planı",
+    "cx.info_gap": "Ürün sayfası bilgi eksiği",
 }
 
 
@@ -69,7 +81,7 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
     if at_approval and config.emergency_stop(conn):
         checks.append(_check("emergency_stop", "block", "Acil durdurma aktif: hiçbir yazma işlemi onaylanamaz."))
 
-    if action.startswith("ads."):
+    if action.startswith("ads.") and p["entity_type"] == "campaign":
         from .data import campaign_performance, inventory_status
         camp = next((c for c in campaign_performance(conn, Window(th["ads_window_days"])) if c["id"] == p["entity_id"]), None)
         if camp is None:
@@ -133,13 +145,24 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
             return checks, "critical"
         level = "medium" if action == "inventory.restock" else "low"
 
-    if action in ("ads.increase_budget", "inventory.restock"):
+    if action in PRODUCT_SPEND_ACTIONS:
+        level = _product_guardrails(conn, p, th, checks)
+    if action in ("ads.increase_budget", "ads.create_campaign"):
+        _ad_budget_guardrail(conn, p, th, checks)
+    if action in ("ads.increase_budget", "inventory.restock", "ads.create_campaign", "pricing.change_price", "campaign.discount"):
         from .data import data_quality
         stale_orders = [q for q in data_quality(conn) if q["code"] == "orders_stale"]
         if stale_orders:
             checks.append(_check("stale_orders", "block", stale_orders[0]["message"] + " Para harcayan öneri bayat veriyle onaylanmaz."))
     cap = d(p.get("required_capital"))
-    if action in ("ads.increase_budget", "inventory.restock") or cap > 0:
+    if cap > 0:
+        key = SPEND_AUTHORITY.get(p["agent_code"])
+        if key is None:
+            checks.append(_check("unauthorized_spend", "block", f"{p['agent_code']} ajanının para harcama yetkisi yok."))
+        elif cap > d(th[key]):
+            checks.append(_check("agent_spend_limit", "block",
+                                 f"Ajan başına harcama yetkisi aşıldı: {tl(cap)} > {tl(th[key])} (tek öneri sınırı)."))
+    if action in ("ads.increase_budget", "inventory.restock", "ads.create_campaign") or cap > 0:
         from ..platform.sources import finance_status
         fs = finance_status(conn)
         # Trendyol finans verisi bir kez alınmışsa güncelliği zorunludur; bayatsa para harcayan öneri onaylanmaz.
@@ -164,6 +187,84 @@ def evaluate(conn: Connection, p: dict, *, at_approval: bool = False) -> tuple[l
     if any(c["severity"] == "block" for c in checks):
         level = max(level, "high", key=RISK_ORDER.index)
     return checks, level
+
+
+def _product_guardrails(conn: Connection, p: dict, th: dict, checks: list) -> str:
+    """Ürün düzeyinde para/fiyat aksiyonları: kâr modeli DB'den yeniden hesaplanır (ajanın rakamına güvenilmez)."""
+    from .data import inventory_status
+    from .economics import max_safe_discount, simulate, unit_economics
+    exists = conn.execute(text("SELECT 1 FROM products WHERE id = :i"), {"i": p["entity_id"]}).first()
+    if not exists:
+        checks.append(_check("entity_missing", "block", "Ürün bulunamadı (öneri geçersiz)."))
+        return "critical"
+    action, params = p["action_type"], p.get("params") or {}
+    e = unit_economics(conn, p["entity_id"])
+    if e["missing"]:
+        checks.append(_check("needs_data", "block", "NEEDS_DATA: " + ", ".join(
+            {"cost": "ürün maliyeti bilinmiyor", "price": "satış fiyatı yok/0", "product": "ürün yok"}[m] for m in e["missing"])
+            + "; tahminle karar verilmez."))
+        return "high"
+    floor_profit, floor_margin = d(th["min_unit_profit"]), d(th["min_net_margin"])
+    if action == "pricing.change_price":
+        old, new = d(params.get("old_price")), d(params.get("new_price"))
+        if new <= 0:
+            checks.append(_check("invalid_price", "block", "Yeni fiyat 0 veya negatif olamaz."))
+            return "critical"
+        if old <= 0 or abs(new - old) / old > d(th["max_price_change_pct"]) + Decimal("0.0001"):
+            checks.append(_check("price_step", "block",
+                                 f"Fiyat değişimi tek adımda en fazla %{d(th['max_price_change_pct']) * 100:.0f} olabilir."))
+        sim_new, sim_old = simulate(e, new), simulate(e, old)
+        if new < old and (sim_new["unit_profit"] < floor_profit or (sim_new["net_margin"] or 0) < floor_margin):
+            checks.append(_check("below_min_profit", "block",
+                                 f"Yeni fiyatta birim net kâr {tl(sim_new['unit_profit'])}, marj %{(sim_new['net_margin'] or 0) * 100:.1f}; "
+                                 f"alt sınır {tl(floor_profit)} / %{floor_margin * 100:.0f}."))
+        if new > old and sim_new["unit_profit"] <= sim_old["unit_profit"]:
+            checks.append(_check("no_profit_gain", "block", "Fiyat artışı birim net kârı artırmıyor."))
+        return "medium"
+    if action == "campaign.discount":
+        rate = d(params.get("discount_rate"))
+        sim = simulate(e, d(e["price"]) * (1 - rate))
+        if sim["unit_profit"] < floor_profit or (sim["net_margin"] or 0) < floor_margin:
+            safe = max_safe_discount(e, th)
+            checks.append(_check("campaign_loss", "block",
+                                 f"%{rate * 100:.0f} indirimle birim net kâr {tl(sim['unit_profit'])} (marj %{(sim['net_margin'] or 0) * 100:.1f}); "
+                                 f"alt sınır {tl(floor_profit)} / %{floor_margin * 100:.0f}. En fazla güvenli indirim: "
+                                 + (f"%{safe * 100:.0f}." if safe else "yok.")))
+    if action in ("ads.create_campaign", "campaign.discount"):
+        if e["unit_profit"] is None or e["unit_profit"] <= 0:
+            checks.append(_check("negative_margin", "block", f"Ürün birim başına {tl(e['unit_profit'])} kâr ediyor; zarar eden ürün ölçeklenmez."))
+        inv = next(iter(inventory_status(conn, [p["entity_id"]])), None)
+        if inv is None or inv["available"] < int(th["stock_safety_units"]) or inv["stockout_risk"]:
+            checks.append(_check("stock_risk", "block",
+                                 "DO_NOT_SCALE: kullanılabilir stok güvenlik sınırının altında veya tükenmek üzere "
+                                 f"(kullanılabilir {inv['available'] if inv else 0}, sınır {th['stock_safety_units']})."))
+    return "medium"
+
+
+def ad_budget_usage(conn: Connection, exclude_proposal: int | None = None) -> dict:
+    """Günlük reklam bütçesi kullanımı: aktif kampanya bütçeleri + açık/onaylı artış önerileri + yeni kampanya önerileri."""
+    th = thresholds(conn)
+    active = d(conn.execute(text("SELECT COALESCE(SUM(daily_budget), 0) FROM ad_campaigns WHERE status = 'active'")).scalar())
+    pending = d(conn.execute(text("""
+        SELECT COALESCE(SUM(CASE WHEN action_type = 'ads.increase_budget' THEN (params->>'delta_per_day')::numeric
+                                 ELSE (params->>'daily_budget')::numeric END), 0)
+          FROM ai_proposals WHERE action_type IN ('ads.increase_budget', 'ads.create_campaign')
+           AND status IN ('pending_approval', 'approved') AND (CAST(:ex AS BIGINT) IS NULL OR id <> :ex)"""), {"ex": exclude_proposal}).scalar())
+    today_spend = d(conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM ad_spend WHERE spend_date = :t"), {"t": config.today()}).scalar())
+    limit = d(th["daily_ad_budget_limit"])
+    return {"limit": limit, "active_daily_budgets": active, "pending_increases": pending, "committed": active + pending,
+            "headroom": limit - active - pending, "spend_today": today_spend}
+
+
+def _ad_budget_guardrail(conn: Connection, p: dict, th: dict, checks: list) -> None:
+    u = ad_budget_usage(conn, exclude_proposal=p.get("id"))
+    params = p.get("params") or {}
+    add = d(params.get("delta_per_day")) if p["action_type"] == "ads.increase_budget" else d(params.get("daily_budget"))
+    if d(th["daily_ad_budget_limit"]) <= 0:
+        checks.append(_check("needs_data", "block", "NEEDS_DATA: günlük toplam reklam bütçe limiti tanımlı değil."))
+    elif u["committed"] + add > u["limit"]:
+        checks.append(_check("budget_limit", "block",
+                             f"Günlük toplam reklam bütçe limiti aşılır: mevcut taahhüt {tl(u['committed'])} + {tl(add)} > limit {tl(u['limit'])}."))
 
 
 # ------------------------------------------------------------------ oluşturma
@@ -233,6 +334,9 @@ def propose(conn: Connection, *, agent: str, action_type: str, entity_type: str,
                      kind="risk", level="success", proposal_id=pid, run_id=run_id)
     for sid in superseded:
         activity(conn, "Önceki öneri yenisiyle değişti", agent=agent, kind="proposal", proposal_id=sid, run_id=run_id)
+    from .actions import sync_proposal
+    for x in (pid, *superseded):
+        sync_proposal(conn, x)
     return pid
 
 
@@ -321,6 +425,8 @@ def approve(conn: Connection, pid: int, user, note: str | None, ip: str | None) 
     log_audit(conn, actor=user.username, user_id=user.id, action="ai.proposal_approved", entity_type="ai_proposal",
               entity_id=pid, ip=ip, details={"action_type": p["action_type"], "entity": f"{p['entity_type']}:{p['entity_id']}",
                                              "params": p["params"], "mode": result.get("mode")})
+    from .actions import sync_proposal
+    sync_proposal(conn, pid)
     return {"status": status, "execution": result}
 
 
@@ -335,6 +441,8 @@ def reject(conn: Connection, pid: int, user, note: str | None, ip: str | None) -
     activity(conn, f"Sahip reddetti: {p['title']}", agent="ceo", kind="approval", level="warning", proposal_id=pid, user_id=user.id)
     log_audit(conn, actor=user.username, user_id=user.id, action="ai.proposal_rejected", entity_type="ai_proposal",
               entity_id=pid, ip=ip, details={"action_type": p["action_type"], "note": note})
+    from .actions import sync_proposal
+    sync_proposal(conn, pid)
 
 
 def mark_executed(conn: Connection, pid: int, user, note: str | None, ip: str | None) -> None:
@@ -357,6 +465,12 @@ def mark_executed(conn: Connection, pid: int, user, note: str | None, ip: str | 
     activity(conn, f"Uygulandı (manuel): {p['title']}", kind="action", level="success", proposal_id=pid, user_id=user.id)
     log_audit(conn, actor=user.username, user_id=user.id, action="ai.proposal_executed", entity_type="ai_proposal",
               entity_id=pid, ip=ip, details={"mode": "manual", "note": note})
+    from .actions import log as action_log, sync_proposal
+    sync_proposal(conn, pid)
+    action_log(conn, agent=p["agent_code"], action_type=f"execute:{p['action_type']}", status="EXECUTED",
+               reason="Sahip platformda elle uyguladığını bildirdi (TrendHub platformu doğrulamadı)", entity_type=p["entity_type"],
+               entity_id=p["entity_id"], actual_action=f"manuel (sahip: {user.username})", input_data={"params": p["params"]},
+               proposal_id=pid, result={"mode": "manual_owner_confirmed", "note": note})
 
 
 # Action Engine: aksiyon türü → platform executor'ı. V1'de pazaryerine/reklam platformuna yazan executor yok
@@ -368,6 +482,9 @@ MANUAL_STEPS = {
     "ads.increase_budget": "Reklam panelinde kampanyanın günlük bütçesini {new_daily_budget} TL yapın, sonra 'Uyguladım' deyin.",
     "ads.decrease_budget": "Reklam panelinde kampanyanın günlük bütçesini {new_daily_budget} TL yapın, sonra 'Uyguladım' deyin.",
     "ads.pause": "Reklam panelinde kampanyayı durdurun, sonra 'Uyguladım' deyin.",
+    "ads.create_campaign": "Reklam panelinde bu ürün için günlük {daily_budget} TL bütçeli kampanya açın, sonra 'Uyguladım' deyin.",
+    "pricing.change_price": "Trendyol panelinde fiyatı {old_price} TL → {new_price} TL yapın, sonra 'Uyguladım' deyin.",
+    "campaign.discount": "Trendyol panelinde en fazla %{discount_pct} indirim tanımlayın (min fiyat {min_price} TL), sonra 'Uyguladım' deyin.",
 }
 
 
@@ -396,8 +513,10 @@ def retire_stale(conn: Connection, agent: str, run_id: int) -> int:
         UPDATE ai_proposals SET status = 'superseded', updated_at = NOW()
          WHERE agent_code = :a AND status IN ('pending_approval', 'blocked') AND (run_id IS NULL OR run_id <> :r)
         RETURNING id"""), {"a": agent, "r": run_id})]
+    from .actions import sync_proposal
     for pid in ids:
         activity(conn, "Koşul ortadan kalktı; öneri kapatıldı", agent=agent, kind="proposal", proposal_id=pid, run_id=run_id)
+        sync_proposal(conn, pid)
     return len(ids)
 
 

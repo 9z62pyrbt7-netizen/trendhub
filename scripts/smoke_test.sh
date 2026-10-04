@@ -65,7 +65,7 @@ step "credential yokken hiçbir senkron işi planlanmaz"
 # Yalnızca iç (dışarıya istek atmayan) işler beklenir: uyarı taraması, web mağazası bakımı/bildirimi, AI döngüsü ve
 # platform olay kuyruğu (events.process: webhook/polling olaylarını DB içinde işler). Pazaryeri/tedarikçi işi olmamalı.
 jobs=$(curl -fsS -b "$JAR" "$BASE_URL/api/system/jobs?page_size=200")
-others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' -e '"job_type":"ai.cycle"' -e '"job_type":"events.process"' || true)
+others=$(echo "$jobs" | grep -o '"job_type":"[^"]*"' | grep -v -e '"job_type":"alerts.scan"' -e '"job_type":"storefront.maintenance"' -e '"job_type":"storefront.notify"' -e '"job_type":"ai.cycle"' -e '"job_type":"events.process"' -e '"job_type":"ai.daily_review"' -e '"job_type":"ai.weekly_review"' || true)
 [ -z "$others" ] || fail "beklenmeyen iş var: $others"
 
 step "dashboard ve panel"

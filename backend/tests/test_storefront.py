@@ -1,4 +1,5 @@
 """Trendçantanız web mağazası: katalog, kanallar arası stok, sepet, sipariş akışı, panel API'si, SEO ve güvenlik."""
+import hashlib
 import io
 import json
 import re
@@ -22,7 +23,9 @@ def add_product(c, *, sku, name="Kapitone Omuz Çantası", price="1299.90", stoc
                              stock_updated_at, created_at, updated_at)
         VALUES (:sku, :bc, :name, :cat, :model, CAST(:imgs AS JSONB), :cost, :price, :stock, 20, :active,
                 NOW() - make_interval(hours => :h), NOW(), NOW()) RETURNING id"""),
-        {"sku": sku, "bc": "869" + str(abs(hash(sku)))[:10].zfill(10), "name": name, "cat": category, "model": model,
+        # Barkod DETERMİNİSTİK olmalı: hash() süreç başına rastgeledir (PYTHONHASHSEED); rastgele barkod sayfadaki gtin'de
+        # görünüp sızıntı testinde ("987") yanlış alarm veriyordu.
+        {"sku": sku, "bc": "869" + str(int(hashlib.sha256(sku.encode()).hexdigest(), 16))[:10], "name": name, "cat": category, "model": model,
          "imgs": json.dumps(imgs), "cost": cost, "price": price, "stock": stock, "active": active,
          "h": stock_updated_hours_ago}).scalar()
     if color:
@@ -195,7 +198,8 @@ def test_cart_json_never_leaks_cost_or_supplier(store, conn):
     fresh()
     store.post("/api/store/cart/add", json={"product_id": pid}, headers=H)
     body = store.get("/api/store/cart").text + store.get(f"/urun/x-p{pid}", follow_redirects=True).text
-    assert "987" not in body and "canta_bayim" not in body.lower() and "supplier" not in body.lower()
+    assert not any(v in body for v in ("987.65", "987,65", "987.6", "987,6", "98765")), "maliyet sızdı"
+    assert "canta_bayim" not in body.lower() and "supplier" not in body.lower()
 
 
 # ------------------------------------------------------------------ sipariş akışı

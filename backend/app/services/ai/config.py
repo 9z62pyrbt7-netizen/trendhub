@@ -34,6 +34,17 @@ DEFAULT_THRESHOLDS: dict = {
     "cash_stale_days": 7,           # elle girilen kasa bilgisi bu kadar gün güncellenmediyse uyarı
     "payout_window_days": 7,        # vadesi bu kadar gün içinde olan ödenmemiş hakediş = "bekleyen ödeme"
     "cx_min_sample": 10,            # ürün başına yüzde hesaplamak için en az soru/iade sayısı
+    # ---- para güvenliği (guardrails) ----
+    "daily_ad_budget_limit": 1500,  # aktif kampanyaların toplam günlük bütçesi + önerilen artışlar bu tutarı aşamaz (TL)
+    "advertising_max_capital_per_proposal": 5000,   # reklam ajanının tek öneride isteyebileceği en fazla sermaye
+    "inventory_max_capital_per_proposal": 20000,    # stok ajanının tek öneride isteyebileceği en fazla sermaye
+    "min_unit_profit": 20,          # ürün başına en az net kâr (TL) — fiyat/kampanya bu sınırın altına inemez
+    "min_net_margin": 0.10,         # en az net marj (fiyat/kampanya tabanı)
+    "max_price_change_pct": 0.10,   # tek değişiklikte en fazla fiyat değişimi
+    "max_price_changes_per_cycle": 5,   # tek döngüde fiyat değişikliği önerilebilecek en fazla ürün
+    "stock_safety_units": 2,        # bu adetten az kullanılabilir stokta reklam/kampanya yok
+    "tracking_change_pct": 0.30,    # ürün takibi: 7 gün / önceki 7 gün değişim eşiği
+    "tracking_min_units": 5,        # ürün takibi: karşılaştırma için iki dönemden birinde en az adet
 }
 INVENTORY_MODELS = {"dropship": "Dropshipping (stok tedarikçide; stok sermayesi gerekmez)",
                     "own_stock": "Kendi stoğu (stok sermaye bağlar)"}
@@ -68,7 +79,8 @@ def validate_thresholds(values: dict) -> dict:
             raise ValueError(f"Bilinmeyen eşik: {k}")
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or v > 1_000_000:
             raise ValueError(f"{k}: 0 veya pozitif sayı olmalı")
-        if k in ("star_margin", "profitable_margin", "ads_target_margin_after_ads", "ads_max_budget_step") and v > 1:
+        if k in ("star_margin", "profitable_margin", "ads_target_margin_after_ads", "ads_max_budget_step", "min_net_margin",
+                 "max_price_change_pct", "tracking_change_pct") and v > 1:
             raise ValueError(f"{k}: oran 0–1 arasında olmalı (ör. 0.10 = %10)")
         out[k] = v
     return out

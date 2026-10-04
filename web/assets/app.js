@@ -2383,7 +2383,7 @@ async function sfSettings(box) {
 }
 
 // ---- AI Control Center (öneri + onay; V1'de hiçbir platform aksiyonu otomatik uygulanmaz)
-const AI_TABS = [['brief', 'Özet'], ['chat', 'CEO ile Konuş'], ['approvals', 'Onaylar'], ['profit', 'Kâr Merkezi'], ['ads', 'Reklam'],
+const AI_TABS = [['command', 'Komuta Merkezi'], ['brief', 'Özet'], ['chat', 'CEO ile Konuş'], ['approvals', 'Onaylar'], ['profit', 'Kâr Merkezi'], ['ads', 'Reklam'],
   ['inventory', 'Stok'], ['capital', 'Sermaye'], ['finance', 'Finans / Nakit'], ['cx', 'Müşteri Deneyimi'], ['sources', 'Veri Kaynakları'],
   ['journal', 'Karar Günlüğü'], ['activity', 'Ajan Hareketleri'], ['risk', 'Risk Merkezi'],
   ['agents', 'Ajanlar'], ['settings', 'Ayarlar']];
@@ -2402,7 +2402,7 @@ const briefList = (items) => (items && items.length ? html`<ol class="brief-list
 PAGES.ai = {
   title: 'AI Control Center', icon: 'ai',
   async render(params) {
-    const tab = params.get('tab') || 'brief';
+    const tab = params.get('tab') || 'command';
     const ov = await api('/api/ai/overview');
     setHeader('AI Control Center', 'Amaç: sermayeyi kontrollü riskle kullanıp sürdürülebilir NET KÂRI artırmak. Ajanlar önerir, sen onaylarsın.',
       can('operator') ? html`<button class="btn" id="ai-run">Ajanları şimdi çalıştır</button>` : '');
@@ -2432,9 +2432,9 @@ PAGES.ai = {
       try { await api('/api/ai/emergency-stop', { method: 'POST', body: { active: false } }); toast('Acil durdurma kaldırıldı'); refresh(); } catch (err) { fail(err); }
     });
     const box = $('#ai-body');
-    const fn = { brief: aiBrief, chat: aiChat, approvals: aiApprovals, profit: aiProfit, ads: aiAds, inventory: aiInventory, capital: aiCapital,
+    const fn = { command: aiCommand, brief: aiBrief, chat: aiChat, approvals: aiApprovals, profit: aiProfit, ads: aiAds, inventory: aiInventory, capital: aiCapital,
       finance: aiFinance, cx: aiCx, sources: aiSources,
-      journal: aiJournal, activity: aiActivity, risk: aiRisk, agents: aiAgents, settings: aiSettings }[tab] || aiBrief;
+      journal: aiJournal, activity: aiActivity, risk: aiRisk, agents: aiAgents, settings: aiSettings }[tab] || aiCommand;
     return fn(box, ov);
   },
 };
@@ -2528,7 +2528,8 @@ async function aiApprovals(box, ov, page = 1, status = 'open') {
       ${can('admin') ? html`<div class="actions">
         ${p.status === 'pending_approval' ? html`<button class="btn btn-primary btn-sm" data-ok="${p.id}" data-oppose="${p.ceo_stance === 'oppose' ? '1' : ''}">${p.ceo_stance === 'oppose' ? 'CEO\'ya rağmen onayla' : p.requires_approval ? 'ONAYLA' : 'Ele aldım'}</button><button class="btn btn-sm" data-no="${p.id}">REDDET</button>` : ''}
         ${p.status === 'blocked' ? html`<button class="btn btn-sm" data-no="${p.id}">Kapat</button>` : ''}
-        ${p.status === 'approved' ? html`<button class="btn btn-primary btn-sm" data-done="${p.id}">Uyguladım</button>` : ''}</div>` : ''}
+        ${p.status === 'approved' ? html`<button class="btn btn-sm" data-exec="${p.id}" title="Bağlı platformda uygular; bağlantı yoksa SKIPPED, hata varsa FAILED kaydeder">Sistem uygulasın</button>
+          <button class="btn btn-primary btn-sm" data-done="${p.id}">Uyguladım</button>` : ''}</div>` : ''}
     </div>`)}${pager(d, (pg) => aiApprovals(box, ov, pg, status))}` : empty('Kayıt yok', 'Bu durumda öneri yok.')}</div>`);
   $('#aip-status').addEventListener('change', (e) => aiApprovals(box, ov, 1, e.target.value));
   const act = async (path, label, ask) => {
@@ -2540,6 +2541,13 @@ async function aiApprovals(box, ov, page = 1, status = 'open') {
     b.dataset.oppose ? 'CEO bu karara karşı. Yine de devam etmek için gerekçeni yaz (en az 10 karakter; override olarak kaydedilir):' : 'Not (isteğe bağlı):')));
   $$('[data-no]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.no}/reject`, 'Reddedildi', 'Neden reddediyorsun? (CEO öğrenir)')));
   $$('[data-done]', box).forEach((b) => b.addEventListener('click', () => act(`/api/ai/proposals/${b.dataset.done}/executed`, 'Uygulandı olarak kaydedildi', 'Platformda ne yaptın? (isteğe bağlı)')));
+  $$('[data-exec]', box).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Öneri bağlı platformda uygulansın mı? (Bağlantı yoksa hiçbir şey değişmez ve SKIPPED kaydedilir.)')) return;
+    try {
+      const r = await api(`/api/ai/proposals/${b.dataset.exec}/execute`, { method: 'POST' });
+      toast(`${ACT_STATUS[r.status][0]}: ${r.error || r.reason}`); aiApprovals(box, ov, page, status);
+    } catch (e) { fail(e); }
+  }));
   $$('[data-trail]', box).forEach((a) => a.addEventListener('click', async (e) => {
     e.preventDefault();
     const t = await api(`/api/ai/proposals/${a.dataset.trail}/trail`);
@@ -2717,6 +2725,54 @@ async function aiSources(box) {
         ${d.recent_events.length ? html`<ul class="small mt">${d.recent_events.slice(0, 8).map((e) => html`<li>${dateTime(e.received_at)} · ${e.source} · <b>${e.event_type}</b> · ${e.status}</li>`)}</ul>` : html`<p class="muted small">Henüz olay yok.</p>`}
         <p class="small muted">Trendyol webhook'u yalnızca sipariş paketi statülerini taşır; iade, finans ve soru olayları polling ile üretilir. Her olayda CEO çalıştırılmaz.</p></div>
     </div>`);
+}
+
+const ACT_STATUS = { EXECUTED: ['Uygulandı', 'tone-good'], PROPOSED: ['Önerildi', 'tone-info'], BLOCKED: ['Engellendi', 'tone-bad'],
+  FAILED: ['Başarısız', 'tone-bad'], SKIPPED: ['Atlandı', ''] };
+const actBadge = (st) => html`<span class="badge ${(ACT_STATUS[st] || ['', ''])[1]}">${(ACT_STATUS[st] || [st])[0]}</span>`;
+
+async function aiCommand(box, ov) {
+  const d = await api('/api/ai/command');
+  const k = d.kpis;
+  const c = d.actions.counts_24h;
+  const cov = d.coverage;
+  const sec = d.summary ? (d.summary.order || Object.keys(d.summary.sections)).map((h) => [h, d.summary.sections[h] || []]) : [];
+  const last = d.ceo.last_cycle;
+  box.innerHTML = renderVal(html`
+    <div class="grid grid-4 ai-kpis">
+      ${kpi('CEO', last ? (last.status === 'error' ? 'HATA' : 'Çalışıyor') : 'Henüz çalışmadı', last ? `Son döngü ${dateTime(last.started_at)}` : 'Ajanları çalıştırın', last && last.status === 'error' ? 'neg' : '')}
+      ${kpi('Net kâr (7 gün)', k.orders_7d ? money0(k.net_profit_7d) : '—', k.orders_7d ? `Kaynak: ${d.summary ? ({ ACTUAL: 'gerçek', PARTIAL: 'kısmen gerçek', ESTIMATED: 'tahmini', NO_DATA: 'veri yok' }[d.summary.profit_basis] || '') : ''}` : 'Veri yok', signClass(k.net_profit_7d))}
+      ${kpi('Reklam bütçesi (günlük)', `${money0(d.budget.committed)} / ${money0(d.budget.limit)}`, `Kalan ${money0(d.budget.headroom)} · bugün harcanan ${money0(d.budget.spend_today)}`, Number(d.budget.headroom) < 0 ? 'neg' : '')}
+      ${kpi('Onay bekleyen', num(d.counts.pending), d.counts.to_apply ? `${d.counts.to_apply} onaylı uygulanmayı bekliyor` : html`<a href="#/ai?tab=approvals">Onaylara git →</a>`, d.counts.pending ? 'warn-text' : '')}
+    </div>
+    <div class="card mt"><div class="card-head"><div><h2>Aksiyonlar (son 24 saat)</h2><p>Uygulandı yalnızca gerçek platform/DB işlemi başarılıysa yazılır. Platform bağlı değilse öneri "Atlandı" olur, sahte işlem yapılmaz.</p></div></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">${Object.keys(ACT_STATUS).map((s) => html`<span>${actBadge(s)} <b>${num(c[s] || 0)}</b></span>`)}</div>
+      ${d.actions.recent.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Zaman</th><th>Ajan</th><th>Aksiyon</th><th>Durum</th><th>Gerekçe / sonuç</th></tr></thead><tbody>
+        ${d.actions.recent.slice(0, 15).map((a) => html`<tr><td class="small">${dateTime(a.created_at)}</td><td>${a.agent_name}</td><td class="small">${a.action_type}</td><td>${actBadge(a.status)}</td>
+          <td class="small">${a.error ? html`<span class="neg">${a.error}</span> · ` : ''}${a.actual_action ? html`<b>${a.actual_action}</b> · ` : ''}${(a.reason || '').slice(0, 220)}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small mt">Henüz aksiyon kaydı yok.</p>`}</div>
+    ${d.summary ? html`<div class="card mt"><div class="card-head"><div><h2>CEO yönetici özeti</h2><p>${d.summary.date}</p></div></div>
+      <div class="grid grid-2">${sec.map(([h, lines]) => html`<div><h3 class="small">${h}</h3><ul class="small">${lines.map((l) => html`<li>${l}</li>`)}</ul></div>`)}</div></div>` : ''}
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Ajan sağlığı ve performansı (30 gün)</h3><div class="table-wrap mt"><table><thead><tr><th>Ajan</th><th>Durum</th><th class="r">Çalışma / hata</th><th class="r">Öneri</th><th class="r">Onay</th><th class="r">Başarı</th></tr></thead><tbody>
+        ${d.performance.map((p) => { const a = d.agents.find((x) => x.code === p.agent) || {}; const h = AI_HEALTH[a.health] || ['—', ''];
+          return html`<tr><td>${p.name}</td><td><span class="badge ${h[1]}">${h[0]}</span></td><td class="r num">${num(p.runs)} / ${num(p.errors)}</td><td class="r num">${num(p.proposals)}</td>
+          <td class="r num">${p.approval_rate === null ? '—' : pct(p.approval_rate)}</td><td class="r num">${p.success_rate === null ? html`<span class="muted small">ölçülmedi</span>` : pct(p.success_rate)}</td></tr>`; })}
+      </tbody></table></div></div>
+      <div class="card"><h3>Veri kapsamı (sınıflandırma neden boş olabilir?)</h3>
+        <dl class="kv small mt"><dt>Satış kalemi (${cov.window.days} gün)</dt><dd>${num(cov.sales_lines)}</dd><dt>Ürünle eşleşmeyen</dt><dd class="${cov.unmatched_lines ? 'neg' : ''}">${num(cov.unmatched_lines)} (${money0(cov.unmatched_revenue)})</dd>
+          <dt>Maliyeti eksik kalem</dt><dd class="${cov.missing_cost_lines ? 'neg' : ''}">${num(cov.missing_cost_lines)}</dd><dt>Karar verilebilen ürün</dt><dd>${num(cov.decidable_products)}</dd>
+          <dt>Sınıflar</dt><dd>${Object.entries(cov.classes).map(([kk, v]) => `${kk}: ${v}`).join(' · ') || '—'}</dd></dl>
+        ${cov.issues.map((i) => html`<div class="notice warn small mt">${i}</div>`)}</div>
+    </div>
+    <div class="grid grid-2 mt">
+      <div class="card"><h3>Reklam için en iyi ürünler</h3>${d.ad_candidates.length ? html`<div class="table-wrap mt"><table><thead><tr><th>Ürün</th><th class="r">Birim net kâr</th><th class="r">Stok</th><th>Durum</th></tr></thead><tbody>
+        ${d.ad_candidates.map((x) => html`<tr><td>${x.name}<span class="muted small" style="display:block">${x.class}</span></td><td class="r num">${money(x.unit_profit)}</td><td class="r num">${num(x.available)}</td>
+          <td class="small">${x.blocked ? html`<span class="neg">Engelli: ${x.blocked}</span>` : (x.has_active_campaign ? 'Aktif reklam var' : 'Uygun')}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small mt">Kârlı + stoklu + maliyeti bilinen ürün yok.</p>`}
+        <p class="small muted">Reklam platformları: ${d.ad_platforms.map((p) => `${p.name}: ${p.connected ? 'bağlı' : 'bağlı değil'}`).join(' · ')}</p></div>
+      <div class="card"><h3>Stok riski</h3>${d.stock_risks.length ? html`<ul class="small mt">${d.stock_risks.map((i) => html`<li><b>${i.name}</b>: ${i.available} adet${i.days_of_inventory !== null ? `, ~${i.days_of_inventory} gün` : ''} — reklam/kampanya ölçeklenmez</li>`)}</ul>` : html`<p class="muted small mt">Tükenme riski yok.</p>`}
+        <h3 class="mt">Hatalar (24 saat)</h3>${d.errors.agent_runs.length || d.errors.failed_actions.length ? html`<ul class="small">${d.errors.agent_runs.map((e) => html`<li class="neg">${e.agent_code}: ${e.error}</li>`)}${d.errors.failed_actions.map((e) => html`<li class="neg">${e.action_type}: ${e.error}</li>`)}</ul>` : html`<p class="muted small">Hata yok.</p>`}</div>
+    </div>
+    ${d.approvals.length ? html`<div class="card mt"><h3>Onayını bekleyenler</h3><ul class="small mt">${d.approvals.map((a) => html`<li>#${a.id} ${a.title} <span class="badge ${AI_RISK_TONE[a.risk_level]}">${a.risk_level}</span></li>`)}</ul><a href="#/ai?tab=approvals">Onaylara git →</a></div>` : ''}`);
 }
 
 async function aiJournal(box, ov, page = 1) {

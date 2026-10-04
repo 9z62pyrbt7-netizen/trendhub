@@ -306,7 +306,9 @@ def test_question_ingestion_classification_and_cx(engine, conn, ty, api):
     assert out["created"] == 16
     stored = conn.execute(text("SELECT * FROM customer_questions")).mappings().all()
     blob = json.dumps([dict(r) for r in stored], default=str)
-    assert "Ayşe Kaya" not in blob and "555" not in blob.replace("1555", "") and "0532" not in blob and "ayse@example.com" not in blob
+    texts = json.dumps([[r["question_text"], r["answer_text"], r["product_name"]] for r in stored], ensure_ascii=False)
+    assert "Ayşe Kaya" not in blob and "0532 123 45 67" not in blob and "ayse@example.com" not in blob
+    assert "555" not in texts and not any(k in stored[0] for k in ("customer_id", "user_name"))   # müşteri id/adı saklanmaz
     assert "[telefon]" in blob and "[e-posta]" in blob
     assert all(r["product_id"] in (p1, p2) for r in stored)
     cats = {r["question_text"]: r["category"] for r in stored}
@@ -360,7 +362,9 @@ def test_webhook_duplicate_delivery_and_pii(engine, conn, client_factory, monkey
     assert r2.status_code == 200 and r2.json()["duplicates"] == 1
     assert conn.execute(text("SELECT COUNT(*) FROM platform_events")).scalar() == 1
     payload = json.dumps(conn.execute(text("SELECT payload FROM platform_events")).scalar(), ensure_ascii=False)
-    assert "Zeynep" not in payload and "Gizli sokak" not in payload and "z@example.com" not in payload and "0532" not in payload
+    # Tam telefon numarası aranır: "0532" gibi kısa bir parça, yükteki milisaniye zaman damgasında (orderDate) tesadüfen
+    # geçebilir ve yanlış alarm verir (tam süreli koşuda gözlendi).
+    assert "Zeynep" not in payload and "Gizli sokak" not in payload and "z@example.com" not in payload and "05321234567" not in payload
     # HTTP isteğinde iş yapılmadı: sipariş henüz yok, olay kuyrukta, işleme işi kuyrukta
     assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == 0
     assert conn.execute(text("SELECT COUNT(*) FROM sync_jobs WHERE job_type = 'events.process'")).scalar() == 1
@@ -551,7 +555,7 @@ def test_pii_is_not_sent_to_llm(engine, conn, ty, client_factory, monkeypatch):
     with engine.begin() as c:
         for name in chat.TOOLS:
             payload = chat.tool_payload_for_llm(c, name, {"amount": 1000} if name == "get_ad_budget_plan" else {})
-            assert "Zeynep" not in payload and "0532" not in payload and "765 43 21" not in payload, name
+            assert "Zeynep" not in payload and "0532 765 43 21" not in payload and "765 43 21" not in payload, name
     with pytest.raises(pii.PIILeak):
         pii.assert_no_pii("Müşteri: Zeynep Arslan Demir", ["Zeynep Arslan Demir"])
     with pytest.raises(pii.PIILeak):
@@ -576,7 +580,7 @@ def test_pii_is_not_sent_to_llm(engine, conn, ty, client_factory, monkeypatch):
     assert r["engine"] == "claude"
     everything = "\n".join(sent)
     assert "Ölçü / ebat" in everything or "size" in everything                    # veri gitti
-    assert "Zeynep" not in everything and "0532" not in everything                # kişisel veri gitmedi
+    assert "Zeynep" not in everything and "765 43 21" not in everything           # kişisel veri gitmedi
 
 
 # ======================================================================== SMOKE (salt okunur, PII yok)

@@ -211,6 +211,77 @@ def executed(pid: int, body: DecisionIn, request: Request, user: CurrentUser = D
     return {"ok": True}
 
 
+@router.post("/proposals/{pid}/execute")
+def execute_proposal(pid: int, request: Request, user: CurrentUser = Depends(admin)):
+    """Onaylı öneriyi gerçek platformda uygulamayı dener. Sonuç: EXECUTED / FAILED / SKIPPED / BLOCKED (her durumda kayıt
+    commit edilir; başarısızlık asla EXECUTED yazılmaz)."""
+    from ..services.ai import actions as ai_actions
+    with get_engine().begin() as conn:
+        try:
+            return ai_actions.execute(conn, pid, user, client_ip(request))
+        except ai_actions.ExecutionError as exc:
+            err = exc
+    raise HTTPException(err.status, str(err))
+
+
+@router.get("/actions")
+def list_actions(status: str | None = Query(None, pattern="^(EXECUTED|PROPOSED|BLOCKED|FAILED|SKIPPED)$"),
+                 limit: int = Query(100, ge=1, le=500), _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    from ..services.ai import actions as ai_actions
+    return {"items": ai_actions.recent(conn, limit, status), "counts_24h": ai_actions.counts(conn, 24),
+            "labels": ai_actions.STATUS_TR}
+
+
+class DiscountCheckIn(BaseModel):
+    product_id: int
+    discount_rate: Decimal = Field(gt=0, lt=1)
+
+
+@router.post("/campaign/check")
+def campaign_check(body: DiscountCheckIn, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """Planlanan indirimin net kâra etkisi (salt hesap; hiçbir şey uygulanmaz)."""
+    from ..services.ai.growth import check_discount
+    return check_discount(conn, body.product_id, body.discount_rate)
+
+
+@router.get("/coverage")
+def get_coverage(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    from ..services.ai.reconcile import coverage
+    return coverage(conn)
+
+
+@router.get("/command")
+def command_center(_: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
+    """AI Komuta Merkezi: CEO durumu, son döngü, ajan sağlığı, aksiyonlar (durumlarına göre), hatalar, net kâr, bütçe,
+    sınıflandırma kapsamı, stok riski, reklam adayları, onay bekleyenler, ajan performansı, yönetici özeti."""
+    from ..services.ai import actions as ai_actions
+    from ..services.ai import ads_platforms
+    from ..services.ai.ceo_review import agent_performance, executive_summary, latest_summary
+    from ..services.ai.data import inventory_status
+    from ..services.ai.growth import ad_candidates
+    from ..services.ai.reconcile import coverage
+    counts = row(conn, """SELECT COUNT(*) FILTER (WHERE status = 'pending_approval' AND requires_approval) AS pending,
+                                 COUNT(*) FILTER (WHERE status = 'pending_approval' AND NOT requires_approval) AS tasks,
+                                 COUNT(*) FILTER (WHERE status = 'approved') AS to_apply,
+                                 COUNT(*) FILTER (WHERE status = 'blocked') AS blocked FROM ai_proposals""")
+    cov = coverage(conn)
+    last = row(conn, """SELECT id, started_at, finished_at, status, error, output->'normalization' AS normalization
+                          FROM ai_agent_runs WHERE agent_code = 'ceo' ORDER BY id DESC LIMIT 1""")
+    errors = rows(conn, """SELECT agent_code, error, started_at FROM ai_agent_runs WHERE status = 'error'
+                            AND started_at > NOW() - INTERVAL '24 hours' ORDER BY id DESC LIMIT 10""")
+    failed = ai_actions.recent(conn, 10, "FAILED")
+    return {"ceo": {"last_cycle": last, "emergency_stop": config.emergency_stop(conn), "enabled": config.enabled(conn)},
+            "agents": agent_list(conn), "kpis": kpis(conn, counts), "counts": counts,
+            "actions": {"counts_24h": ai_actions.counts(conn, 24), "recent": ai_actions.recent(conn, 30), "labels": ai_actions.STATUS_TR},
+            "errors": {"agent_runs": errors, "failed_actions": failed},
+            "budget": {**proposals.ad_budget_usage(conn), "capital": {k: capital.position(conn)[k] for k in ("usable", "justified", "unused")}},
+            "coverage": cov, "stock_risks": [i for i in inventory_status(conn) if i["stockout_risk"]][:10],
+            "ad_candidates": ad_candidates(conn)[:10], "performance": agent_performance(conn),
+            "approvals": rows(conn, """SELECT id, agent_code, title, risk_level, required_capital, created_at FROM ai_proposals
+                                        WHERE status = 'pending_approval' AND requires_approval ORDER BY id DESC LIMIT 20"""),
+            "summary": latest_summary(conn) or executive_summary(conn, cov), "ad_platforms": ads_platforms.status()}
+
+
 @router.get("/proposals/{pid}/trail")
 def proposal_trail(pid: int, _: CurrentUser = Depends(viewer), conn: Connection = Depends(get_conn)):
     """Tek öneri kimliği üzerinden tüm zincir: ajan → kâr doğrulaması → CEO → risk → onay → uygulama → sonuç ölçümü."""
