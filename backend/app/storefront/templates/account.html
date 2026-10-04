@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block page_class %}account{% endblock %}
+{% block content %}
+<section class="section account-page">
+  <div class="container container--narrow">
+    <p class="eyebrow">Hesabım</p>
+    <h1 class="page-title">Sipariş takibi</h1>
+    <p class="account-page__intro">Trendçantanız'da alışveriş için üyelik gerekmez. Siparişinizin durumunu, onay e-postanızdaki
+      veya sipariş sayfanızdaki <strong>sipariş numarası</strong> ve siparişte kullandığınız <strong>e-posta</strong> ile görüntüleyebilirsiniz.</p>
+    <form class="form lookup" data-lookup-form novalidate>
+      <div class="form__row">
+        <label class="field"><span>Sipariş numarası</span><input name="code" required maxlength="20" placeholder="TC000000XXXXX" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+        <label class="field"><span>E-posta</span><input name="email" type="email" required maxlength="254" autocomplete="email" inputmode="email"></label>
+      </div>
+      <p class="form-message form-message--error" data-lookup-error hidden role="alert"></p>
+      <button type="submit" class="btn btn--dark btn--lg" data-lookup-submit><span data-add-label>Siparişi Görüntüle</span></button>
+    </form>
+    <div class="lookup__result" data-lookup-result aria-live="polite"></div>
+    <p class="small muted mt">Sorunuz mu var? <a href="/iletisim">Bize ulaşın</a>.</p>
+  </div>
+</section>
+{% endblock %}

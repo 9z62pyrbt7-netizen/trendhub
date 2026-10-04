@@ -52,6 +52,16 @@ with eng.begin() as c:
                       {"s": sid, "p": pid, "ssku": f"CB{pid:05d}", "bc": barcode, "n": name, "col": color.capitalize(), "pc": f"CBM{m:03d}",
                        "cost": round(price * .45, 2), "stock": stock, "imgs": json.dumps(imgs)})
             pids.append((pid, price, name))
+    # Uç durum ürünleri (tasarım testleri): tek görselli + çok uzun adlı; tamamen stoksuz
+    edge = [("TC-EDGE-LONG", "Ekstra Uzun İsimli Yumuşak Dokulu Ayarlanabilir Askılı Fermuarlı Çok Bölmeli Günlük Kullanım İçin Geniş Omuz Çantası", 1, 6),
+            ("TC-EDGE-OUT", "Tükenmiş Test Çantası", 2, 0)]
+    for sku, name, nimg, stock in edge:
+        imgs = [f"{IMG}/m5-{sorted({f.split('-')[1] for f in files if f.startswith('m5-')})[0]}-{k}.jpg" for k in range(nimg)]
+        c.execute(text("""INSERT INTO products(sku, barcode, name, brand, category, description, images, cost, sale_price, stock, vat_rate, is_active,
+                                               stock_updated_at, created_at, updated_at)
+                          VALUES (:sku, :bc, :name, 'Trendçantanız', 'Kadın > Çanta > Omuz Çantası', '<p>Test ürünü.</p>', CAST(:imgs AS JSONB), 300, 999.90,
+                                  :stock, 20, TRUE, NOW() - INTERVAL '3 hours', NOW() - INTERVAL '90 days', NOW())"""),
+                  {"sku": sku, "bc": f"86{random.randint(10**10, 10**11-1)}", "name": name, "imgs": json.dumps(imgs), "stock": stock})
     ty = c.execute(text("SELECT id FROM marketplaces WHERE code='trendyol'")).scalar()
     store = c.execute(text("INSERT INTO stores(marketplace_id, name, external_id) VALUES (:m,'Trendyol Mağaza','123') RETURNING id"), {"m": ty}).scalar()
     weights = {1: 9, 4: 6, 0: 4, 7: 3, 10: 2}

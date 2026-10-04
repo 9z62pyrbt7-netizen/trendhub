@@ -316,3 +316,23 @@ def find_public(conn: Connection, code: str, token: str | None) -> dict | None:
     if sfo is None or not secrets.compare_digest(sfo["access_token_hash"], _hash(token)):
         return None
     return dict(sfo)
+
+
+def find_by_contact(conn: Connection, code: str, email: str) -> dict | None:
+    """Sipariş takibi (üyeliksiz): sipariş numarası + siparişte kullanılan e-posta birlikte eşleşmelidir.
+
+    Yalnızca durum ve ürün özetini döndürür; adres, telefon ve ödeme ayrıntıları dönmez."""
+    code = (code or "").strip().upper()
+    email = (email or "").strip().lower()
+    if not re.match(r"^TC\d{6}[A-Z0-9]{5}$", code) or not EMAIL_RE.match(email):
+        return None
+    sfo = conn.execute(text("""
+        SELECT so.public_code, so.status, so.payment_method, so.email, so.lines, so.items_total, so.shipping_fee, so.total,
+               so.city, so.created_at, o.internal_status
+          FROM storefront_orders so LEFT JOIN orders o ON o.id = so.order_id
+         WHERE so.public_code = :c"""), {"c": code}).mappings().first()
+    if sfo is None or not secrets.compare_digest(str(sfo["email"] or "").strip().lower().encode(), email.encode()):
+        return None
+    out = dict(sfo)
+    out.pop("email", None)
+    return out

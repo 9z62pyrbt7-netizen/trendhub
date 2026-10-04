@@ -7,7 +7,7 @@
 <meta name="description" content="{{ description }}">
 <link rel="canonical" href="{{ canonical }}">
 {% if noindex %}<meta name="robots" content="noindex,follow">{% endif %}
-<meta name="theme-color" content="#FBF8F3">
+<meta name="theme-color" content="#F5F1EA">
 <meta property="og:site_name" content="{{ BRAND }}">
 <meta property="og:locale" content="tr_TR">
 <meta property="og:type" content="{{ og_type }}">
@@ -28,29 +28,35 @@
 <a class="skip-link" href="#icerik">İçeriğe geç</a>
 {% if cfg.announcement %}<div class="announcement"><p class="announcement__inner">{{ cfg.announcement }}</p></div>{% endif %}
 
-<div class="section-header">
 <header class="header{% block header_class %}{% endblock %}" data-header>
-  <div class="header__inner container">
+  <div class="header__bar">
     <div class="header__left">
-      <button type="button" class="header__icon header__burger" data-drawer-open="menu" aria-controls="MenuDrawer" aria-expanded="false" aria-label="Menü">{% include "icons/menu.svg" %}</button>
+      <button type="button" class="icon-btn header__burger" data-drawer-open="menu" aria-controls="MenuDrawer" aria-expanded="false" aria-label="Menü">{% include "icons/menu.svg" %}</button>
       <nav class="header__nav" aria-label="Ana menü">
         <ul class="nav">
-          <li class="nav__item nav__item--has-children">
-            <a class="nav__link{% if path.startswith('/kategori') or path == '/urunler' %} is-active{% endif %}" href="/urunler">Kategoriler {% include "icons/chevron-down.svg" %}</a>
-            <div class="nav__dropdown"><ul>
-              <li><a href="/urunler">Tüm Çantalar</a></li>
-              {% for c in nav_categories %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}
-            </ul></div>
+          <li class="nav__item nav__item--mega">
+            <a class="nav__link{% if path.startswith('/kategori') or path == '/urunler' %} is-active{% endif %}" href="/urunler" aria-haspopup="true">Çantalar</a>
+            {% if nav_categories %}
+            <div class="mega" role="group" aria-label="Kategoriler">
+              <div class="mega__inner">
+                <ul class="mega__list">
+                  <li><a href="/urunler">Tüm Çantalar</a></li>
+                  {% for c in nav_categories %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}
+                </ul>
+              </div>
+            </div>
+            {% endif %}
           </li>
           <li class="nav__item"><a class="nav__link{% if path == '/yeni-gelenler' %} is-active{% endif %}" href="/yeni-gelenler">Yeni Gelenler</a></li>
-          <li class="nav__item"><a class="nav__link{% if path == '/cok-satanlar' %} is-active{% endif %}" href="/cok-satanlar">Çok Satanlar</a></li>
+          <li class="nav__item"><a class="nav__link{% if path == '/cok-satanlar' %} is-active{% endif %}" href="/cok-satanlar">{{ "Çok Satanlar" if nav_has_sales else "Öne Çıkanlar" }}</a></li>
         </ul>
       </nav>
     </div>
-    <div class="header__brand"><a href="/" class="header__logo wordmark">TRENDÇANTANIZ</a></div>
+    <a href="/" class="header__logo wordmark">TRENDÇANTANIZ</a>
     <div class="header__right">
-      <button type="button" class="header__icon" data-search-open aria-controls="SearchPanel" aria-expanded="false" aria-label="Ara">{% include "icons/search.svg" %}</button>
-      <a class="header__icon header__cart" href="/sepet" data-cart-open>
+      <button type="button" class="icon-btn" data-search-open aria-controls="SearchPanel" aria-expanded="false" aria-label="Ara">{% include "icons/search.svg" %}</button>
+      <a class="icon-btn header__account" href="/hesabim" aria-label="Hesabım">{% include "icons/user.svg" %}</a>
+      <a class="icon-btn header__cart" href="/sepet" data-cart-open>
         {% include "icons/bag.svg" %}
         <span class="cart-count{% if not cart_count %} is-empty{% endif %}" data-cart-count aria-hidden="true">{{ cart_count }}</span>
         <span class="visually-hidden">Sepet, <span data-cart-count-label>{{ cart_count }} ürün</span></span>
@@ -58,39 +64,40 @@
     </div>
   </div>
   <div class="search-panel" id="SearchPanel" data-search-panel hidden>
-    <div class="container search-panel__inner">
+    <div class="search-panel__inner">
       <form action="/ara" method="get" role="search" class="search-form">
         <label class="visually-hidden" for="HeaderSearch">Ara</label>
         {% include "icons/search.svg" %}
-        <input id="HeaderSearch" class="search-form__input" type="search" name="q" placeholder="Çanta, renk veya model ara" autocomplete="off" spellcheck="false" data-predictive-input>
-        <button type="button" class="header__icon" data-search-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
+        <input id="HeaderSearch" class="search-form__input" type="search" name="q" placeholder="Çanta, renk veya model ara" autocomplete="off" spellcheck="false" enterkeyhint="search" data-predictive-input>
+        <button type="button" class="icon-btn" data-search-close aria-label="Aramayı kapat">{% include "icons/close.svg" %}</button>
       </form>
       <div class="predictive" data-predictive-results aria-live="polite"></div>
     </div>
   </div>
 </header>
-</div>
 
 <div class="drawer drawer--left" id="MenuDrawer" data-drawer="menu" aria-hidden="true">
   <div class="drawer__overlay" data-drawer-close></div>
-  <div class="drawer__panel" role="dialog" aria-modal="true" aria-label="Menü" tabindex="-1">
+  <div class="drawer__panel menu-panel" role="dialog" aria-modal="true" aria-label="Menü" tabindex="-1">
     <div class="drawer__head">
       <span class="wordmark wordmark--sm">TRENDÇANTANIZ</span>
-      <button type="button" class="header__icon" data-drawer-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
+      <button type="button" class="icon-btn" data-drawer-close aria-label="Menüyü kapat">{% include "icons/close.svg" %}</button>
     </div>
-    <nav class="drawer__body mobile-nav" aria-label="Ana menü">
-      <ul>
-        <li><a href="/yeni-gelenler">Yeni Gelenler</a></li>
-        <li><a href="/cok-satanlar">Çok Satanlar</a></li>
+    <nav class="drawer__body mobile-nav" aria-label="Mobil menü">
+      <ul class="mobile-nav__main">
         <li><a href="/urunler">Tüm Çantalar</a></li>
-        {% if nav_categories %}
-        <li><details open><summary>Kategoriler {% include "icons/plus.svg" %}</summary>
-          <ul class="mobile-nav__sub">{% for c in nav_categories %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}</ul>
-        </details></li>
-        {% endif %}
+        <li><a href="/yeni-gelenler">Yeni Gelenler</a></li>
+        <li><a href="/cok-satanlar">{{ "Çok Satanlar" if nav_has_sales else "Öne Çıkanlar" }}</a></li>
       </ul>
+      {% if nav_categories %}
+      <p class="mobile-nav__label">Kategoriler</p>
+      <ul class="mobile-nav__sub">
+        {% for c in nav_categories %}<li><a href="/kategori/{{ c.slug }}"><span>{{ c.label }}</span><span class="mobile-nav__count">{{ c.count }}</span></a></li>{% endfor %}
+      </ul>
+      {% endif %}
     </nav>
     <div class="drawer__foot mobile-nav__foot">
+      <a href="/hesabim" class="mobile-nav__util">{% include "icons/user.svg" %} Hesabım · Sipariş takibi</a>
       <a href="/iletisim" class="mobile-nav__util">{% include "icons/chat.svg" %} İletişim</a>
       {% include "partials/social.html" %}
     </div>
@@ -105,8 +112,7 @@
   <div class="container">
     <div class="footer__top">
       <div class="footer__brand">
-        <a href="/" class="wordmark wordmark--lg">TRENDÇANTANIZ</a>
-        <p class="footer__tagline">Tarzını yanında taşı.</p>
+        <p class="footer__tagline">Tarzını <em>taşı.</em></p>
         {% include "partials/social.html" %}
       </div>
       <nav class="footer__col" aria-label="Alışveriş">
@@ -114,29 +120,31 @@
         <ul>
           <li><a href="/urunler">Tüm Çantalar</a></li>
           <li><a href="/yeni-gelenler">Yeni Gelenler</a></li>
-          <li><a href="/cok-satanlar">Çok Satanlar</a></li>
           {% for c in nav_categories[:4] %}<li><a href="/kategori/{{ c.slug }}">{{ c.label }}</a></li>{% endfor %}
         </ul>
       </nav>
-      <nav class="footer__col" aria-label="Bilgi">
-        <p class="footer__heading">Bilgi</p>
+      <nav class="footer__col" aria-label="Yardım">
+        <p class="footer__heading">Yardım</p>
         <ul>
-          {% for slug, (label, _req) in LEGAL_PAGES.items() %}{% if cfg.legal.get(slug) %}<li><a href="/sayfa/{{ slug }}">{{ label }}</a></li>{% endif %}{% endfor %}
+          <li><a href="/hesabim">Sipariş takibi</a></li>
           <li><a href="/iletisim">İletişim</a></li>
+          {% for slug, (label, _req) in LEGAL_PAGES.items() %}{% if cfg.legal.get(slug) %}<li><a href="/sayfa/{{ slug }}">{{ label }}</a></li>{% endif %}{% endfor %}
         </ul>
       </nav>
-      <div class="footer__contact">
-        <p class="footer__heading">Müşteri Hizmetleri</p>
-        {% if cfg.seller.phone %}<p><a href="tel:{{ cfg.seller.phone|replace(' ', '') }}">{{ cfg.seller.phone }}</a></p>{% endif %}
-        {% if cfg.seller.email %}<p><a href="mailto:{{ cfg.seller.email }}">{{ cfg.seller.email }}</a></p>{% endif %}
-        {% if cfg.social.whatsapp %}<p><a href="https://wa.me/{{ cfg.social.whatsapp }}" target="_blank" rel="noopener">WhatsApp destek</a></p>{% endif %}
-        <p class="footer__note">Ödemeler şifreli bağlantı üzerinden alınır. Fiyatlara KDV dahildir.</p>
+      <div class="footer__col footer__contact">
+        <p class="footer__heading">Bize ulaşın</p>
+        <ul>
+          {% if cfg.seller.phone %}<li><a href="tel:{{ cfg.seller.phone|replace(' ', '') }}">{{ cfg.seller.phone }}</a></li>{% endif %}
+          {% if cfg.seller.email %}<li><a href="mailto:{{ cfg.seller.email }}">{{ cfg.seller.email }}</a></li>{% endif %}
+          {% if cfg.social.whatsapp %}<li><a href="https://wa.me/{{ cfg.social.whatsapp }}" target="_blank" rel="noopener">WhatsApp</a></li>{% endif %}
+        </ul>
       </div>
     </div>
+    <div class="footer__wordmark" aria-hidden="true"></div>
     <div class="footer__bottom">
       <p>&copy; {{ year() }} {{ cfg.seller.title or BRAND }}</p>
       {% if cfg.seller.mersis %}<p>MERSİS: {{ cfg.seller.mersis }}</p>{% endif %}
-      <p class="footer__pay" aria-label="Para birimi">Tüm fiyatlar Türk Lirası (₺)</p>
+      <p>Fiyatlar Türk Lirası, KDV dahildir.</p>
     </div>
   </div>
 </footer>

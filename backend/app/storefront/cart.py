@@ -141,6 +141,8 @@ def as_json(cv: CartView) -> dict:
         "items_total": str(cv.items_total), "shipping": str(cv.shipping), "total": str(cv.total),
         "items_total_fmt": store_config.fmt_try(cv.items_total), "shipping_fmt": store_config.fmt_try(cv.shipping),
         "total_fmt": store_config.fmt_try(cv.total),
+        "free_shipping_remaining_fmt": store_config.fmt_try(cv.free_shipping_remaining)
+        if cv.free_shipping_remaining and cv.free_shipping_remaining > 0 else None,
         "lines": [{"product_id": line.variant.id, "title": line.variant.title, "url": line.variant.url,
                    "image": img_url(line.variant.images[0], 240) if line.variant.images else None,
                    "color": line.variant.color, "size": line.variant.size, "quantity": line.quantity,

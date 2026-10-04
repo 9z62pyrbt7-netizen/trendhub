@@ -1,141 +1,149 @@
 {% extends "base.html" %}
 {% import "partials/macros.html" as m %}
 {% block page_class %}home{% endblock %}
-{% block header_class %} header--transparent{% endblock %}
-{% block preload %}{% if hero and hero.images %}<link rel="preload" as="image" href="{{ img(hero.images[0], 800) }}" imagesrcset="{{ srcset(hero.images[0], (480, 640, 800, 1000, 1200)) }}" imagesizes="(min-width: 990px) 44vw, 88vw" fetchpriority="high">{% endif %}{% endblock %}
+{% block header_class %} header--overlay{% endblock %}
+{% block preload %}{% if hero and hero.images %}<link rel="preload" as="image" href="{{ img(hero.images[0], 800) }}" imagesrcset="{{ srcset(hero.images[0], (480, 640, 800, 1000, 1200)) }}" imagesizes="(min-width: 990px) 46vw, 92vw" fetchpriority="high">{% endif %}{% endblock %}
 {% block content %}
 
-<section class="hero hero--motion" data-hero aria-label="Trendçantanız">
-  <div class="hero__track" data-hero-track>
-    <div class="hero__stage" data-hero-stage>
-      <div class="hero__bg" aria-hidden="true"><span class="hero__arc"></span></div>
-      <p class="hero__wordmark" aria-hidden="true">TREND<span class="hero__wm-break"></span>ÇANTANIZ</p>
-
-      <div class="hero__product" data-hero-product>
-        {% if hero and hero.images %}
-        <a class="hero__product-link" href="{{ hero.url }}" tabindex="-1" aria-hidden="true">
-          <img class="hero__img" src="{{ img(hero.images[0], 800) }}" srcset="{{ srcset(hero.images[0], (480, 640, 800, 1000, 1200)) }}"
-               sizes="(min-width: 990px) 44vw, 88vw" alt="{{ hero.title }}" width="1000" height="1250" fetchpriority="high" loading="eager" decoding="async" data-cutout>
-        </a>
-        <span class="hero__shadow" aria-hidden="true"></span>
-        {% endif %}
+{# A — HERO: gerçek ürün (panel seçimi → gerçek çok satan → en çok görselli stoktaki ürün) #}
+<section class="hero" data-hero aria-labelledby="hero-title">
+  <div class="hero__inner">
+    <div class="hero__copy" data-hero-copy>
+      <p class="hero__brand">TRENDÇANTANIZ</p>
+      <h1 class="hero__title" id="hero-title">Tarzını <em>taşı.</em></h1>
+      <div class="hero__ctas">
+        <a class="btn btn--dark btn--lg" href="/urunler"><span>Çantaları Keşfet</span>{% include "icons/arrow-right.svg" %}</a>
+        {% if new_arrivals %}<a class="link-arrow hero__sub" href="/yeni-gelenler">Yeni gelenler{% include "icons/arrow-right.svg" %}</a>{% endif %}
       </div>
-
-      <div class="hero__copy container">
-        <div class="hero__intro" data-hero-intro>
-          <p class="eyebrow">Kadın çanta koleksiyonu</p>
-          <h1 class="hero__title"><span class="visually-hidden">Trendçantanız — </span>Tarzını yanında taşı.</h1>
-          <div class="hero__ctas">
-            {% if hero %}<a class="btn btn--dark" href="{{ hero.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>{% endif %}
-            <a class="btn btn--ghost" href="/urunler">Koleksiyonu Keşfet</a>
-          </div>
-        </div>
-        {% if hero %}
-        <div class="hero__detail" data-hero-detail>
-          <p class="eyebrow">{% if hero.sold %}En çok tercih edilen{% else %}Öne çıkan{% endif %}</p>
-          <h2 class="hero__detail-title"><a href="{{ hero.url }}">{{ hero.title }}</a></h2>
-          {{ m.price(hero, 'hero__price') }}
-          {% if hero.colors|length > 1 %}<p class="hero__meta">{{ hero.colors|length }} renk seçeneği</p>{% elif hero.rep.color %}<p class="hero__meta">{{ hero.rep.color }}</p>{% endif %}
-          <div class="hero__ctas">
-            {% if hero.in_stock and hero.variants|length == 1 %}
-            <button type="button" class="btn btn--dark" data-quick-add="{{ hero.rep.id }}"><span data-add-label>Sepete Ekle</span>{% include "icons/bag.svg" %}</button>
-            <a class="btn btn--ghost" href="{{ hero.url }}">Ürünü İncele</a>
-            {% else %}
-            <a class="btn btn--dark" href="{{ hero.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-      </div>
-      <span class="hero__cue" aria-hidden="true"><span></span></span>
     </div>
+    {% if hero and hero.images %}
+    <figure class="hero__visual" data-hero-visual>
+      <a class="hero__media" href="{{ hero.url }}" tabindex="-1" aria-hidden="true">
+        <span class="hero__halo" aria-hidden="true"></span>
+        <img class="hero__img" src="{{ img(hero.images[0], 800) }}" srcset="{{ srcset(hero.images[0], (480, 640, 800, 1000, 1200)) }}"
+             sizes="(min-width: 990px) 46vw, 92vw" alt="{{ hero.title }}" width="1000" height="1250" fetchpriority="high" loading="eager" decoding="async" data-cutout>
+      </a>
+      <figcaption class="hero__caption">
+        <a href="{{ hero.url }}"><span class="hero__caption-name">{{ hero.title }}</span><span class="hero__caption-price">{{ fmt_try(hero.price) }}{% if hero.price_varies %}'den başlayan{% endif %}</span></a>
+      </figcaption>
+    </figure>
+    {% endif %}
   </div>
+  <span class="hero__cue" aria-hidden="true"></span>
 </section>
 
-{% if bestsellers %}
-  {{ m.rail(bestsellers, "Çok Satanlar", eyebrow="Son 90 günün favorileri", view_all="/cok-satanlar", id="cok-satanlar") }}
-{% elif featured %}
-  {{ m.rail(featured, "Öne Çıkanlar", eyebrow="Koleksiyondan seçtiklerimiz", view_all="/urunler", id="one-cikanlar") }}
-{% else %}
-  <section class="section"><div class="container empty"><p class="empty__title">Koleksiyonumuz çok yakında burada.</p></div></section>
+{% if not total_groups %}
+<section class="section"><div class="container empty"><p class="empty__title">Koleksiyonumuz çok yakında burada.</p></div></section>
 {% endif %}
 
-{% if total_groups %}
-<section class="section tiles" aria-labelledby="kategoriler-title">
+{# B — YENİ GELENLER: kademeli editoryal dizilim (mobilde kaydırılabilir şerit) #}
+{% if new_arrivals %}
+<section class="section showcase" aria-labelledby="yeni-title">
   <div class="container">
-    <div class="section-head" data-reveal>
-      <div><p class="eyebrow">Koleksiyonlar</p><h2 class="section-title" id="kategoriler-title">Her ana bir çanta</h2></div>
-      <a class="link-arrow" href="/urunler">Tüm çantalar{% include "icons/arrow-right.svg" %}</a>
-    </div>
-    <ul class="tiles__grid" role="list">
-      {% if categories|length >= 2 %}
-        {% for c in categories %}
-        {% set g0 = c.groups[0] %}
-        <li class="tiles__item" data-reveal style="--i: {{ loop.index0 }}">
-          <a class="tile" href="/kategori/{{ c.slug }}">
-            <span class="tile__media">{% if g0.images %}<img class="tile__img" src="{{ img(g0.images[0], 640) }}" srcset="{{ srcset(g0.images[0], (320, 480, 640, 800)) }}" sizes="(min-width: 990px) 33vw, 80vw" alt="" width="800" height="1000" loading="lazy" decoding="async" data-cutout>{% endif %}</span>
-            <span class="tile__body"><span class="tile__title">{{ c.label }}</span><span class="tile__meta">{{ c.count }} model {% include "icons/arrow-right.svg" %}</span></span>
-          </a>
-        </li>
-        {% endfor %}
-      {% else %}
-        {% set tiles = [("Tüm Çantalar", "/urunler"), ("Yeni Gelenler", "/yeni-gelenler")] + ([("Çok Satanlar", "/cok-satanlar")] if has_sales else []) %}
-        {% set pool = bestsellers or featured %}
-        {% for label, href in tiles %}
-        {% set g0 = pool[loop.index0 % pool|length] if pool else None %}
-        {% set src = (g0.images[loop.index0 % g0.images|length]) if g0 and g0.images else None %}
-        <li class="tiles__item" data-reveal style="--i: {{ loop.index0 }}">
-          <a class="tile" href="{{ href }}">
-            <span class="tile__media">{% if src %}<img class="tile__img" src="{{ img(src, 640) }}" srcset="{{ srcset(src, (320, 480, 640, 800)) }}" sizes="(min-width: 990px) 33vw, 80vw" alt="" width="800" height="1000" loading="lazy" decoding="async" data-cutout>{% endif %}</span>
-            <span class="tile__body"><span class="tile__title">{{ label }}</span><span class="tile__meta">Keşfet {% include "icons/arrow-right.svg" %}</span></span>
-          </a>
-        </li>
-        {% endfor %}
-      {% endif %}
+    {{ m.section_head("Yeni Gelenler", "yeni", eyebrow="Koleksiyona son eklenenler", link="/yeni-gelenler") }}
+    <ul class="showcase__grid" role="list">
+      {% for g in new_arrivals %}
+      <li class="showcase__item" data-reveal style="--i: {{ loop.index0 % 4 }}">{{ m.card(g, '(min-width: 990px) 23vw, (min-width: 600px) 44vw, 72vw', index=loop.index0) }}</li>
+      {% endfor %}
     </ul>
   </div>
 </section>
 {% endif %}
 
-{% if editorial %}
-<section class="editorial" aria-labelledby="editorial-title">
-  <div class="editorial__inner container">
-    <div class="editorial__visual">
-      <div class="editorial__main" data-parallax="0.06">
-        <img class="editorial__img" src="{{ img(editorial.images[1], 1000) }}" srcset="{{ srcset(editorial.images[1], (480, 640, 800, 1000, 1200)) }}" sizes="(min-width: 990px) 52vw, 92vw" alt="{{ editorial.title }}" width="1000" height="1250" loading="lazy" decoding="async" data-cutout>
+{# C — ÜRÜN HİKÂYESİ: sahne sabit kalır, kaydırdıkça ürün öne gelir ve metin bölüm bölüm değişir #}
+{% if story %}
+{% set simgs = story.images[:3] %}
+<section class="story" data-story aria-labelledby="story-title" style="--n: {{ 3 }}">
+  <div class="story__track" data-story-track>
+    <div class="story__stage">
+      <div class="story__visual">
+        <a class="story__media" href="{{ story.url }}" tabindex="-1" aria-hidden="true">
+          <span class="story__arch" aria-hidden="true"></span>
+          {% for src in simgs %}
+          <img class="story__img{% if loop.first %} is-active{% endif %}" data-story-img="{{ loop.index0 }}" src="{{ img(src, 1000) }}" srcset="{{ srcset(src, (480, 640, 800, 1000, 1200)) }}"
+               sizes="(min-width: 990px) 44vw, 86vw" alt="{% if loop.first %}{{ story.title }}{% endif %}" width="1000" height="1250" loading="lazy" decoding="async" data-cutout>
+          {% endfor %}
+        </a>
       </div>
-      {% if editorial.images|length > 2 %}
-      <div class="editorial__inset" data-parallax="-0.1" data-reveal>
-        <img class="editorial__img" src="{{ img(editorial.images[2], 480) }}" sizes="(min-width: 990px) 20vw, 40vw" alt="" width="600" height="600" loading="lazy" decoding="async">
+      <div class="story__copy">
+        <div class="story__chapter is-active" data-story-chapter="0">
+          <p class="eyebrow">{{ story.category or "Seçkiden" }}</p>
+          <h2 class="story__title" id="story-title">Sade çizgi,<br><em>güçlü duruş.</em></h2>
+        </div>
+        <div class="story__chapter" data-story-chapter="1" aria-hidden="true">
+          <p class="eyebrow">Detaylar</p>
+          <p class="story__title">Her açıdan<br><em>zarif.</em></p>
+        </div>
+        <div class="story__chapter story__chapter--product" data-story-chapter="2">
+          <p class="eyebrow">{% if story.colors|length > 1 %}{{ story.colors|length }} renk seçeneği{% elif story.rep.color %}{{ story.rep.color }}{% else %}Trendçantanız{% endif %}</p>
+          <h3 class="story__name"><a href="{{ story.url }}">{{ story.title }}</a></h3>
+          {{ m.price(story, 'story__price') }}
+          <div class="story__ctas">
+            <a class="btn btn--dark" href="{{ story.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>
+            {% if story.in_stock and story.variants|length == 1 %}<button type="button" class="btn btn--ghost" data-quick-add="{{ story.rep.id }}"><span data-add-label>Sepete Ekle</span></button>{% endif %}
+          </div>
+        </div>
       </div>
-      {% endif %}
-      <p class="editorial__caption" aria-hidden="true">Trendçantanız — Editoryal</p>
-    </div>
-    <div class="editorial__copy" data-reveal>
-      <p class="eyebrow">Sezonun parçası</p>
-      <h2 class="editorial__title" id="editorial-title">Günden geceye<em>tek çanta.</em></h2>
-      <p class="editorial__text">{{ editorial.category or "Çanta" }} koleksiyonumuzdan, her kombine eşlik eden sade ve güçlü bir duruş.</p>
-      <div class="editorial__product">
-        <span class="editorial__product-name">{{ editorial.title }}</span>
-        {{ m.price(editorial) }}
-      </div>
-      <a class="btn btn--dark" href="{{ editorial.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>
+      <ol class="story__steps" aria-hidden="true">
+        <li class="is-active" data-story-step="0"><span>01</span></li>
+        <li data-story-step="1"><span>02</span></li>
+        <li data-story-step="2"><span>03</span></li>
+      </ol>
     </div>
   </div>
 </section>
 {% endif %}
 
-{% if new_arrivals %}
-  {{ m.rail(new_arrivals, "Yeni Gelenler", eyebrow="Taze seçki", view_all="/yeni-gelenler", id="yeni-gelenler") }}
-{% endif %}
-
-<section class="section statement" aria-label="Marka">
-  <div class="container statement__inner" data-reveal>
-    <p class="eyebrow">Trendçantanız</p>
-    <p class="statement__text">Her gün yanında taşıdığın şey, <em>tarzının</em> en sade hâli olmalı.</p>
-    <a class="link-arrow" href="/urunler">Tüm çantaları gör{% include "icons/arrow-right.svg" %}</a>
+{# D — KATEGORİLER: yalnızca katalogda gerçekten bulunan kategoriler #}
+{% if categories|length >= 2 %}
+<section class="section cats" data-rail aria-labelledby="kategoriler-title">
+  <div class="container">{{ m.section_head("Kategoriler", "kategoriler", eyebrow="Aradığın formu bul", link="/urunler", link_label="Tüm çantalar", arrows=categories|length > 4) }}</div>
+  <div class="cats__viewport{% if categories|length > 4 %} cats__viewport--scroll{% endif %}" data-rail-viewport>
+    <ul class="cats__list" role="list" style="--count: {{ [categories|length, 4]|min }}">
+      {% for c in categories %}
+      {% set g0 = c.groups[0] %}
+      <li class="cats__item rail__item" data-reveal style="--i: {{ loop.index0 % 4 }}">
+        <a class="cat" href="/kategori/{{ c.slug }}">
+          <span class="cat__media">{% if g0.images %}{{ m.picture(g0.images[0], '', '(min-width: 990px) 24vw, 62vw', (320, 480, 640, 800), 640, 'cat__img') }}{% endif %}</span>
+          <span class="cat__body"><span class="cat__title">{{ c.label }}</span><span class="cat__meta">{{ c.count }} model</span></span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
   </div>
 </section>
+{% endif %}
 
+{# E — ÇOK SATANLAR (yalnızca gerçek satış verisiyle) / yoksa ÖNE ÇIKANLAR #}
+{% if picks %}
+  {% if bestsellers %}
+    {{ m.rail(picks, "Çok Satanlar", eyebrow="Son 90 günün favorileri", view_all="/cok-satanlar", id="cok-satanlar") }}
+  {% else %}
+    {{ m.rail(picks, "Öne Çıkanlar", eyebrow="Seçkimizden", view_all="/cok-satanlar", id="one-cikanlar") }}
+  {% endif %}
+{% endif %}
+
+{# F — İKİNCİ EDİTORYAL BÖLÜM #}
+{% if editorial and editorial.images %}
+{% set eimg = editorial.images[1] if editorial.images|length > 1 else editorial.images[0] %}
+<section class="feature" aria-labelledby="feature-title">
+  <div class="feature__visual" data-parallax-scale>
+    <a class="feature__media" href="{{ editorial.url }}" tabindex="-1" aria-hidden="true">
+      {{ m.picture(eimg, editorial.title, '(min-width: 990px) 56vw, 100vw', (480, 640, 800, 1000, 1200), 1000, 'feature__img') }}
+    </a>
+  </div>
+  <div class="feature__copy" data-reveal>
+    <p class="eyebrow">{{ editorial.category or "Seçkiden" }}</p>
+    <h2 class="feature__title" id="feature-title">Günden geceye,<br><em>tek çanta.</em></h2>
+    <div class="feature__product">
+      <a class="feature__name" href="{{ editorial.url }}">{{ editorial.title }}</a>
+      {{ m.price(editorial) }}
+    </div>
+    <a class="btn btn--dark" href="{{ editorial.url }}"><span>Ürünü İncele</span>{% include "icons/arrow-right.svg" %}</a>
+  </div>
+</section>
+{% endif %}
+
+{# G — GÜVEN #}
 {% include "partials/trust.html" %}
 {% endblock %}

@@ -1,52 +1,57 @@
+{# Tekrarlanan arayüz parçaları. Yalnızca gerçek veri gösterilir: indirim yalnızca panelde girilen
+   üstü çizili fiyattan, stok yalnızca kanallar arası kullanılabilir stoktan gelir. #}
+
 {% macro price(item, cls='') -%}
 {% set cmp = item.compare_at if item.compare_at is defined else item.rep.compare_at %}
 {% set p = item.price %}
 <div class="price{% if cmp %} price--sale{% endif %} {{ cls }}" data-price>
   {% if item.price_varies is defined and item.price_varies %}
-    <span class="price__current">{{ fmt_try(p) }}'den başlayan</span>
+    <span class="price__current">{{ fmt_try(p) }}<span class="price__from">'den başlayan</span></span>
   {% else %}
     <span class="visually-hidden">{% if cmp %}İndirimli fiyat{% else %}Fiyat{% endif %}</span>
     <span class="price__current" data-price-current>{{ fmt_try(p) }}</span>
     <span class="price__compare"{% if not cmp %} hidden{% endif %}><span class="visually-hidden">Önceki fiyat</span><s data-price-compare>{% if cmp %}{{ fmt_try(cmp) }}{% endif %}</s></span>
-    {% set pct = item.discount_pct if item.discount_pct is defined else item.rep.discount_pct %}
-    <span class="price__badge" data-price-badge{% if not pct %} hidden{% endif %}>{% if pct %}-%{{ pct }}{% endif %}</span>
   {% endif %}
 </div>
 {%- endmacro %}
 
-{% macro card(g, sizes='(min-width: 1200px) 24vw, (min-width: 750px) 34vw, 74vw', priority=False, index=0) -%}
+{# Ürün görseli: beyaz fonlu tedarikçi fotoğrafları `multiply` ile zemine karışır (kutusuz, dekupe görünüm). #}
+{% macro picture(src, alt='', sizes='100vw', widths=(320, 480, 640, 800, 1000), w=640, cls='', priority=False, width=800, height=1000) -%}
+<img class="{{ cls }}" src="{{ img(src, w) }}" srcset="{{ srcset(src, widths) }}" sizes="{{ sizes }}" alt="{{ alt }}" width="{{ width }}" height="{{ height }}"
+     {% if priority %}fetchpriority="high" loading="eager"{% else %}loading="lazy"{% endif %} decoding="async" data-cutout>
+{%- endmacro %}
+
+{% macro card(g, sizes='(min-width: 1200px) 24vw, (min-width: 750px) 34vw, 78vw', priority=False, index=0, cls='') -%}
 {% set first = g.images[0] if g.images else None %}
 {% set second = g.images[1] if g.images|length > 1 else None %}
-<article class="card{% if not g.in_stock %} card--soldout{% endif %}" data-product-card style="--i: {{ index }}">
+<article class="card{% if not g.in_stock %} card--soldout{% endif %}{% if second %} card--has-alt{% endif %} {{ cls }}" data-product-card style="--i: {{ index }}">
   <div class="card__media">
-    <a class="card__media-link" href="{{ g.url }}" data-card-link tabindex="-1" aria-hidden="true">
+    <a class="card__media-link" href="{{ g.url }}" tabindex="-1" aria-hidden="true">
       {% if first %}
-      <img class="card__img card__img--primary" src="{{ img(first, 640) }}" srcset="{{ srcset(first, (320, 480, 640, 800)) }}" sizes="{{ sizes }}"
-           alt="{{ g.title }}" width="800" height="1000" {% if priority %}fetchpriority="high" loading="eager"{% else %}loading="lazy"{% endif %} decoding="async" data-cutout>
-      {% if second %}<img class="card__img card__img--secondary" src="{{ img(second, 640) }}" srcset="{{ srcset(second, (320, 480, 640, 800)) }}" sizes="{{ sizes }}" alt="" width="800" height="1000" loading="lazy" decoding="async">{% endif %}
+      {{ picture(first, g.title, sizes, (320, 480, 640, 800), 640, 'card__img card__img--primary', priority) }}
+      {% if second %}<img class="card__img card__img--secondary" src="{{ img(second, 640) }}" srcset="{{ srcset(second, (320, 480, 640, 800)) }}" sizes="{{ sizes }}" alt="" width="800" height="1000" loading="lazy" decoding="async" data-cutout>{% endif %}
+      {% else %}
+      <span class="card__noimg" aria-hidden="true">TRENDÇANTANIZ</span>
       {% endif %}
     </a>
-    <span class="card__badges">
-      {% if not g.in_stock %}<span class="badge badge--muted">Tükendi</span>
-      {% elif g.rep.discount_pct %}<span class="badge badge--sale">İndirim</span>{% endif %}
-    </span>
-    <div class="card__actions">
-      {% if g.in_stock and g.variants|length == 1 %}
-      <button type="button" class="card__quick" data-quick-add="{{ g.rep.id }}" aria-label="Sepete ekle: {{ g.title }}">
-        <span class="card__quick-label" data-add-label>Sepete Ekle</span>{% include "icons/plus.svg" %}
-      </button>
-      {% else %}
-      <a class="card__quick" href="{{ g.url }}" aria-label="İncele: {{ g.title }}"><span class="card__quick-label">{% if g.in_stock %}Seçenekleri gör{% else %}İncele{% endif %}</span>{% include "icons/arrow-right.svg" %}</a>
-      {% endif %}
-    </div>
+    {% if not g.in_stock %}<span class="card__flag">Tükendi</span>
+    {% elif g.rep.discount_pct %}<span class="card__flag card__flag--sale">İndirim</span>{% endif %}
+    {% if g.in_stock and g.variants|length == 1 %}
+    <button type="button" class="card__quick" data-quick-add="{{ g.rep.id }}" aria-label="Sepete ekle: {{ g.title }}">
+      {% include "icons/plus.svg" %}<span class="card__quick-label" data-add-label>Sepete Ekle</span>
+    </button>
+    {% else %}
+    <a class="card__quick" href="{{ g.url }}" aria-label="{% if g.in_stock %}Seçenekleri gör{% else %}İncele{% endif %}: {{ g.title }}">
+      {% include "icons/arrow-right.svg" %}<span class="card__quick-label">{% if g.in_stock %}Seçenekler{% else %}İncele{% endif %}</span>
+    </a>
+    {% endif %}
   </div>
   <div class="card__body">
-    {% if g.category %}<p class="card__cat">{{ g.category }}</p>{% endif %}
-    <h3 class="card__title"><a href="{{ g.url }}" data-card-link>{{ g.title }}</a></h3>
+    <h3 class="card__title"><a href="{{ g.url }}">{{ g.title }}</a></h3>
     {{ price(g, 'card__price') }}
     {% set colors = g.colors %}
     {% if colors|length > 1 %}
-    <ul class="card__swatches" aria-label="Renk seçenekleri">
+    <ul class="card__swatches" aria-label="{{ colors|length }} renk seçeneği">
       {% for c in colors[:5] %}
       <li><a class="swatch{% if loop.first %} is-active{% endif %}{% if not c.in_stock %} is-unavailable{% endif %}" href="{{ c.url }}" style="--swatch: {{ c.hex }}" title="{{ c.name }}"
              data-card-swatch {% if c.image %}data-image="{{ img(c.image, 640) }}"{% endif %}><span class="visually-hidden">{{ c.name }}</span></a></li>
@@ -58,26 +63,30 @@
 </article>
 {%- endmacro %}
 
+{% macro section_head(heading, id, eyebrow=None, link=None, link_label='Tümünü gör', arrows=False) -%}
+<div class="section-head" data-reveal>
+  <div class="section-head__text">
+    {% if eyebrow %}<p class="eyebrow">{{ eyebrow }}</p>{% endif %}
+    <h2 class="section-title" id="{{ id }}-title">{{ heading }}</h2>
+  </div>
+  <div class="section-head__aside">
+    {% if arrows %}
+    <div class="rail__arrows" data-rail-arrows hidden>
+      <button type="button" class="round-btn" data-rail-prev aria-label="Önceki ürünler">{% include "icons/arrow-left.svg" %}</button>
+      <button type="button" class="round-btn" data-rail-next aria-label="Sonraki ürünler">{% include "icons/arrow-right.svg" %}</button>
+    </div>
+    {% endif %}
+    {% if link %}<a class="link-arrow" href="{{ link }}">{{ link_label }}{% include "icons/arrow-right.svg" %}</a>{% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
 {% macro rail(groups, heading, eyebrow=None, view_all=None, id='rail') -%}
 <section class="section rail" data-rail aria-labelledby="{{ id }}-title">
-  <div class="container">
-    <div class="section-head" data-reveal>
-      <div>
-        {% if eyebrow %}<p class="eyebrow">{{ eyebrow }}</p>{% endif %}
-        <h2 class="section-title" id="{{ id }}-title">{{ heading }}</h2>
-      </div>
-      <div class="section-head__aside">
-        <div class="rail__arrows" data-rail-arrows hidden>
-          <button type="button" class="round-btn" data-rail-prev aria-label="Önceki">{% include "icons/arrow-left.svg" %}</button>
-          <button type="button" class="round-btn" data-rail-next aria-label="Sonraki">{% include "icons/arrow-right.svg" %}</button>
-        </div>
-        {% if view_all %}<a class="link-arrow" href="{{ view_all }}">Tümünü gör{% include "icons/arrow-right.svg" %}</a>{% endif %}
-      </div>
-    </div>
-  </div>
+  <div class="container">{{ section_head(heading, id, eyebrow, view_all, arrows=True) }}</div>
   <div class="rail__viewport" data-rail-viewport>
-    <ul class="rail__list" data-count="{{ groups|length }}" role="list">
-      {% for g in groups %}<li class="rail__item" data-reveal style="--i: {{ loop.index0 }}">{{ card(g, index=loop.index0) }}</li>{% endfor %}
+    <ul class="rail__list" role="list">
+      {% for g in groups %}<li class="rail__item" data-reveal style="--i: {{ loop.index0 % 4 }}">{{ card(g, '(min-width: 1200px) 22vw, (min-width: 750px) 36vw, 74vw', index=loop.index0) }}</li>{% endfor %}
     </ul>
   </div>
 </section>

@@ -1,14 +1,26 @@
-<section class="section section--tight trust" aria-label="Alışveriş güvenceleri">
+{# Yalnızca mağaza ayarlarında gerçekten tanımlı olan güvenceler gösterilir. #}
+{% set items = [("lock", "Güvenli Ödeme", "Şifreli bağlantı; kart bilgileriniz sitemizde saklanmaz.", None)] %}
+{% if cfg.free_shipping_threshold is not none and cfg.shipping_fee > 0 %}
+  {% set items = items + [("truck", "Kargo", fmt_try(cfg.free_shipping_threshold) ~ " ve üzeri siparişlerde ücretsiz.", "/sayfa/teslimat-bilgileri" if cfg.legal.get('teslimat-bilgileri') else None)] %}
+{% elif cfg.shipping_fee == 0 %}
+  {% set items = items + [("truck", "Ücretsiz Kargo", "Tüm siparişlerde kargo ücretsiz.", "/sayfa/teslimat-bilgileri" if cfg.legal.get('teslimat-bilgileri') else None)] %}
+{% endif %}
+{% set items = items + [("check", "Kolay Sipariş", "Üyelik gerekmeden birkaç adımda.", None)] %}
+{% if cfg.cash_on_delivery_enabled %}
+  {% set items = items + [("bag", "Kapıda Ödeme", "Dilerseniz ödemeyi teslimatta yapın.", None)] %}
+{% elif cfg.legal.get('iade-ve-degisim') %}
+  {% set items = items + [("return", "İade ve Değişim", "Koşulları inceleyin.", "/sayfa/iade-ve-degisim")] %}
+{% endif %}
+<section class="trust" aria-label="Alışveriş güvenceleri">
   <div class="container">
     <ul class="trust__list" role="list">
-      <li class="trust__item" data-reveal><span class="trust__icon">{% include "icons/lock.svg" %}</span><span class="trust__text"><strong>Güvenli Alışveriş</strong><span>Şifreli bağlantı, kişisel verileriniz korunur</span></span></li>
-      <li class="trust__item" data-reveal style="--i: 1"><span class="trust__icon">{% include "icons/check.svg" %}</span><span class="trust__text"><strong>Kolay Sipariş</strong><span>Üyelik gerekmeden birkaç adımda</span></span></li>
-      {% if cfg.seller.phone or cfg.seller.email or cfg.social.whatsapp %}
-      <li class="trust__item" data-reveal style="--i: 2"><span class="trust__icon">{% include "icons/chat.svg" %}</span><span class="trust__text"><strong>Müşteri Desteği</strong><span>Sorularınız için bize ulaşın</span></span><a class="trust__link" href="/iletisim" aria-label="Müşteri desteği"></a></li>
-      {% endif %}
-      {% if cfg.legal.get('iade-ve-degisim') %}
-      <li class="trust__item" data-reveal style="--i: 3"><span class="trust__icon">{% include "icons/return.svg" %}</span><span class="trust__text"><strong>İade ve Değişim</strong><span>Koşulları inceleyin</span></span><a class="trust__link" href="/sayfa/iade-ve-degisim" aria-label="İade ve değişim koşulları"></a></li>
-      {% endif %}
+      {% for icon, title, text, href in items %}
+      <li class="trust__item" data-reveal style="--i: {{ loop.index0 }}">
+        <span class="trust__icon">{% include "icons/" ~ icon ~ ".svg" %}</span>
+        <p class="trust__title">{% if href %}<a href="{{ href }}">{{ title }}</a>{% else %}{{ title }}{% endif %}</p>
+        <p class="trust__text">{{ text }}</p>
+      </li>
+      {% endfor %}
     </ul>
   </div>
 </section>
