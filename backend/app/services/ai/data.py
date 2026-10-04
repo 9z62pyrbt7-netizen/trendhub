@@ -113,8 +113,13 @@ def campaign_performance(conn: Connection, window: Window, margin_window: Window
         SELECT campaign_id, SUM(amount) AS spend, MAX(spend_date) AS last_spend_date, COUNT(DISTINCT spend_date) AS days
           FROM ad_spend WHERE spend_date >= :start_date AND spend_date <= :end_date GROUP BY campaign_id""", **window.params())}
     # Aynı gün için birden fazla kaynak varsa tek kaynak alınır (api > csv > manual); çift sayım yapılmaz.
-    perf = {r["campaign_id"]: r for r in rows(conn, """
-        SELECT campaign_id, SUM(impressions) AS impressions, SUM(clicks) AS clicks,
+    # Production şeması doğrudan/dolaylı atıf kolonlarını taşıyabilir (Trendyol reklam XLSX: direct_/indirect_*).
+    # Varsa okunur; dolaylı satış/ciro ürün kârlılığının kanıtı SAYILMAZ (ad_verdict).
+    attribution = has_attribution_columns(conn)
+    attr_sql = ("SUM(direct_orders) AS direct_orders, SUM(indirect_orders) AS indirect_orders, "
+                "SUM(direct_revenue) AS direct_revenue, SUM(indirect_revenue) AS indirect_revenue,") if attribution else ""
+    perf = {r["campaign_id"]: r for r in rows(conn, f"""
+        SELECT campaign_id, SUM(impressions) AS impressions, SUM(clicks) AS clicks, {attr_sql}
                SUM(attributed_orders) AS orders, SUM(attributed_revenue) AS revenue, MAX(perf_date) AS last_perf_date,
                COUNT(*) AS days
           FROM (SELECT DISTINCT ON (campaign_id, perf_date) * FROM ad_performance
@@ -139,10 +144,14 @@ def campaign_performance(conn: Connection, window: Window, margin_window: Window
         impressions = int(pf["impressions"]) if pf.get("impressions") is not None else None
         orders = int(pf["orders"]) if pf.get("orders") is not None else None
         margin = finance_view.ratio(pb, ns)
-        contribution = finance_view.q2(rev * margin) if rev is not None and margin is not None else None
+        # Atıf ayrımı varsa kâr kanıtı yalnızca DOĞRUDAN cirodan hesaplanır (dolaylı ciro ROAS'ta görünür, kârda sayılmaz)
+        rev_profit = _q(pf.get("direct_revenue")) if (attribution and pf and rev is not None) else rev
+        contribution = finance_view.q2(rev_profit * margin) if rev_profit is not None and margin is not None else None
         ad_net = contribution - spend_amt if contribution is not None else None
+        direct = {k: pf.get(k) for k in ("direct_orders", "indirect_orders", "direct_revenue", "indirect_revenue")} if attribution else {}
         out.append({
-            **c, "product_ids": pids, "spend": spend_amt, "spend_days": int(sp.get("days") or 0),
+            **c, **direct, "attribution_split": bool(attribution and pf), "product_ids": pids, "spend": spend_amt,
+            "spend_days": int(sp.get("days") or 0),
             "last_spend_date": sp.get("last_spend_date"), "last_perf_date": pf.get("last_perf_date"),
             "impressions": impressions, "clicks": clicks, "attributed_orders": orders, "attributed_revenue": rev,
             "ctr": finance_view.ratio(clicks, impressions) if clicks is not None and impressions else None,
@@ -151,12 +160,17 @@ def campaign_performance(conn: Connection, window: Window, margin_window: Window
             "roas": finance_view.ratio(rev, spend_amt) if rev is not None and spend_amt else None,
             "product_margin_before_ads": margin, "missing_cost": missing_cost,
             "contribution_before_ads": contribution, "ad_net_profit": ad_net,
-            "net_margin_after_ads": finance_view.ratio(ad_net, rev) if ad_net is not None and rev else None,
+            "net_margin_after_ads": finance_view.ratio(ad_net, rev_profit) if ad_net is not None and rev_profit else None,
         })
     return out
 
 
 # ------------------------------------------------------------------ stok
+def has_attribution_columns(conn: Connection) -> bool:
+    return conn.execute(text("""SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'ad_performance'
+                                  AND column_name IN ('direct_orders', 'indirect_orders', 'direct_revenue', 'indirect_revenue')""")).scalar() == 4
+
+
 def inventory_status(conn: Connection, product_ids: list[int] | None = None) -> list[dict]:
     """Satış hızı, kanallar arası kullanılabilir stok, tedarikçi stoğu, kalan gün."""
     th = thresholds(conn)

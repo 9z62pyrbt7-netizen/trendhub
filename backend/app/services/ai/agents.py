@@ -221,6 +221,11 @@ def run_inventory(conn: Connection, ctx: RunContext) -> dict:
 def ad_verdict(c: dict, th: dict, stock_risk: bool) -> tuple[str, str]:
     if c["attributed_revenue"] is None:
         return "INSUFFICIENT_DATA", "Platform/kullanıcı bildirimli reklam satışı yok; reklamın kâr etkisi ölçülemez."
+    if c.get("attribution_split") and int(c.get("direct_orders") or 0) == 0:
+        # KORUNACAK KURAL: satışların tamamı dolaylıysa reklamın ürün kârlılığına etkisi kanıtlanamaz → PAUSE/artış YOK.
+        return "INSUFFICIENT_DATA", (f"Doğrudan satış 0, dolaylı satış {int(c.get('indirect_orders') or 0)} "
+                                     f"(dolaylı ciro {tl(c.get('indirect_revenue') or 0)}). Dolaylı satış ürün kârlılığının kanıtı "
+                                     "sayılmaz; reklam için durdur/artır kararı verilmez.")
     if not c["product_ids"]:
         return "INSUFFICIENT_DATA", "Kampanyaya ürün bağlanmamış; ürün marjı bilinmeden net kâr hesaplanamaz."
     if c["missing_cost"] or c["product_margin_before_ads"] is None:

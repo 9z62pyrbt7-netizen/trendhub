@@ -391,3 +391,65 @@ def test_summary_order_survives_jsonb_roundtrip(engine, conn, api):
     stored = api.get("/api/ai/command").json()["summary"]
     titles = [h for h, _ in ordered_sections(stored)]
     assert titles[0] == "BUGÜN NE OLDU?" and titles[-1] == "SONRAKİ EN ÖNEMLİ 3 İŞ?" and len(titles) == 11
+
+
+# ======================================================================== production reklam atıf düzeltmesi (korunmalı)
+def _attribution_schema(conn):
+    """Production şemasını taklit eder (0013_ad_attribution): ad_performance + doğrudan/dolaylı kolonlar."""
+    for col in ("direct_orders INTEGER", "indirect_orders INTEGER", "direct_revenue NUMERIC(14,2)", "indirect_revenue NUMERIC(14,2)"):
+        conn.execute(text(f"ALTER TABLE ad_performance ADD COLUMN IF NOT EXISTS {col}"))
+
+
+@pytest.fixture
+def attribution_schema(engine):
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        _attribution_schema(c)
+    yield
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        for col in ("direct_orders", "indirect_orders", "direct_revenue", "indirect_revenue"):
+            c.execute(text(f"ALTER TABLE ad_performance DROP COLUMN IF EXISTS {col}"))
+
+
+def _real_campaign(conn, pid, *, direct_orders, indirect_orders, direct_revenue, indirect_revenue):
+    """Canlıdaki gerçek kampanya: 'Ürün-30.09.2026 20:42' — harcama 2270.76, atfedilen ciro 5795, ROAS 2.5520."""
+    acc = conn.execute(text("INSERT INTO ad_accounts(channel, name) VALUES ('trendyol_ads', 'TY') RETURNING id")).scalar()
+    cid = conn.execute(text("INSERT INTO ad_campaigns(account_id, name, daily_budget) VALUES (:a, 'Ürün-30.09.2026 20:42', 400) RETURNING id"),
+                       {"a": acc}).scalar()
+    conn.execute(text("INSERT INTO ad_campaign_products(campaign_id, product_id) VALUES (:c, :p)"), {"c": cid, "p": pid})
+    conn.execute(text("INSERT INTO ad_spend(campaign_id, spend_date, amount) VALUES (:c, CURRENT_DATE - 1, 2270.76)"), {"c": cid})
+    conn.execute(text("""INSERT INTO ad_performance(campaign_id, perf_date, impressions, clicks, attributed_orders, attributed_revenue,
+                                                    direct_orders, indirect_orders, direct_revenue, indirect_revenue, source)
+                         VALUES (:c, CURRENT_DATE - 1, 40000, 900, :n, 5795, :do, :io, :dr, :ir, 'csv')"""),
+                 {"c": cid, "n": direct_orders + indirect_orders, "do": direct_orders, "io": indirect_orders, "dr": direct_revenue,
+                  "ir": indirect_revenue})
+    return cid
+
+
+def test_all_indirect_sales_campaign_is_insufficient_data_not_pause(engine, conn, attribution_schema):
+    from app.services.ai import agents
+    cash(conn)
+    pid = product(conn, "ADV-REAL", cost="500", price="1159")
+    sell(conn, pid, price="1159", n=5, days_ago=2, tag="adv")
+    cid = _real_campaign(conn, pid, direct_orders=0, indirect_orders=5, direct_revenue=0, indirect_revenue=5795)
+    c = next(x for x in agents.advertising_analysis(conn) if x["id"] == cid)
+    assert c["roas"] == Decimal("2.5520") and c["direct_orders"] == 0 and c["indirect_orders"] == 5
+    assert c["verdict"] == "INSUFFICIENT_DATA" and "Dolaylı satış ürün kârlılığının kanıtı" in c["verdict_reason"]
+    cycle(engine)
+    assert conn.execute(text("SELECT COUNT(*) FROM ai_proposals WHERE entity_type = 'campaign' AND entity_id = :c"
+                             " AND action_type IN ('ads.pause', 'ads.increase_budget', 'ads.decrease_budget')"), {"c": cid}).scalar() == 0
+
+
+def test_mixed_attribution_uses_only_direct_revenue_as_profit_evidence(engine, conn, attribution_schema):
+    from app.services.ai import agents
+    pid = product(conn, "ADV-MIX", cost="500", price="1159")
+    sell(conn, pid, price="1159", n=5, days_ago=2, tag="mix")
+    cid = _real_campaign(conn, pid, direct_orders=1, indirect_orders=4, direct_revenue=1159, indirect_revenue=4636)
+    c = next(x for x in agents.advertising_analysis(conn) if x["id"] == cid)
+    assert c["roas"] == Decimal("2.5520")                                    # platform ROAS toplam atıfla gösterilir
+    assert c["contribution_before_ads"] < Decimal("1159")                    # kâr kanıtı yalnızca doğrudan 1159 TL üzerinden
+    assert c["ad_net_profit"] == c["contribution_before_ads"] - Decimal("2270.76")
+
+
+def test_without_attribution_columns_behaviour_is_unchanged(engine, conn):
+    from app.services.ai.data import has_attribution_columns
+    assert has_attribution_columns(conn) is False
