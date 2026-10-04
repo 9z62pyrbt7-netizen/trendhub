@@ -6,154 +6,166 @@
 <meta property="product:price:currency" content="TRY">
 <meta property="product:availability" content="{{ 'in stock' if v.in_stock else 'out of stock' }}">
 {% endblock %}
-{% block preload %}{% if v.images %}<link rel="preload" as="image" href="{{ img(v.images[0], 1000) }}" imagesrcset="{{ srcset(v.images[0]) }}" imagesizes="(min-width: 990px) 56vw, 100vw" fetchpriority="high">{% endif %}{% endblock %}
+{% block preload %}{% if v.images %}<link rel="preload" as="image" href="{{ img(v.images[0], 1000) }}" imagesrcset="{{ srcset(v.images[0]) }}" imagesizes="(min-width: 990px) 54vw, 100vw" fetchpriority="high">{% endif %}{% endblock %}
 {% block content %}
+{% set imgs = v.images[:12] %}
 <section class="product" data-product data-product-id="{{ v.id }}">
-  <div class="container">
-    <nav class="breadcrumb" aria-label="Sayfa yolu">
-      <ol>
-        <li><a href="/">Ana sayfa</a></li>
-        {% if group.category %}<li><a href="/kategori/{{ slugify(group.category) }}">{{ group.category }}</a></li>{% endif %}
-        <li aria-current="page">{{ v.title }}</li>
-      </ol>
-    </nav>
-
-    <div class="product__grid">
-      <div class="product__gallery" data-gallery>
-        <ul class="gallery" data-gallery-track role="list" aria-label="Ürün görselleri">
-          {% for src in v.images[:12] %}
-          <li class="gallery__item">
-            <button type="button" class="gallery__zoom" data-zoom-open="{{ loop.index0 }}" aria-label="Görseli büyüt">
-              <img class="gallery__img" src="{{ img(src, 1000) }}" srcset="{{ srcset(src) }}" sizes="(min-width: 1200px) 34vw, (min-width: 990px) 52vw, 100vw"
-                   alt="{{ v.title }}{% if not loop.first %} — görsel {{ loop.index }}{% endif %}" width="1000" height="1000"
-                   {% if loop.first %}fetchpriority="high" loading="eager"{% else %}loading="lazy"{% endif %} decoding="async" data-cutout>
-            </button>
-          </li>
-          {% endfor %}
-        </ul>
-        {% if v.images|length > 1 %}
-        <div class="gallery__nav" aria-hidden="true">
-          <span class="gallery__counter"><span data-gallery-index>1</span> / <span data-gallery-total>{{ v.images[:12]|length }}</span></span>
-          <span class="gallery__dots" data-gallery-dots>{% for _ in v.images[:12] %}<span class="gallery__dot{% if loop.first %} is-active{% endif %}"></span>{% endfor %}</span>
-        </div>
-        {% endif %}
+  <div class="product__grid">
+    <div class="product__gallery" data-gallery>
+      <ul class="gallery gallery--{{ 'single' if imgs|length < 2 else 'multi' }}" data-gallery-track role="list" aria-label="Ürün görselleri">
+        {% for src in imgs %}
+        <li class="gallery__item">
+          <button type="button" class="gallery__zoom" data-zoom-open="{{ loop.index0 }}" aria-label="Görseli büyüt ({{ loop.index }} / {{ imgs|length }})">
+            <img class="gallery__img" src="{{ img(src, 1000) }}" srcset="{{ srcset(src) }}"
+                 sizes="{% if loop.first or imgs|length < 3 %}(min-width: 990px) 54vw{% else %}(min-width: 990px) 27vw{% endif %}, 100vw"
+                 alt="{{ v.title }}{% if not loop.first %} — görsel {{ loop.index }}{% endif %}" width="1000" height="1250"
+                 {% if loop.first %}fetchpriority="high" loading="eager"{% else %}loading="lazy"{% endif %} decoding="async" data-cutout>
+          </button>
+        </li>
+        {% else %}
+        <li class="gallery__item"><span class="card__noimg" aria-hidden="true">TRENDÇANTANIZ</span></li>
+        {% endfor %}
+      </ul>
+      {% if imgs|length > 1 %}
+      <div class="gallery__nav" aria-hidden="true">
+        <span class="gallery__counter"><span data-gallery-index>1</span> / {{ imgs|length }}</span>
+        <span class="gallery__dots">{% for _ in imgs %}<span class="gallery__dot{% if loop.first %} is-active{% endif %}"></span>{% endfor %}</span>
       </div>
+      {% endif %}
+    </div>
 
-      <div class="product__info">
-        <div class="product__sticky">
-          {% if group.category %}<p class="eyebrow">{{ group.category }}</p>{% endif %}
-          <h1 class="product__title" data-product-title>{{ v.title }}</h1>
-          <div class="product__price-row">{{ m.price(v, 'price--lg') }}</div>
-          <p class="product__tax">KDV dahil. {% if cfg.free_shipping_threshold is not none and cfg.shipping_fee > 0 %}{{ fmt_try(cfg.free_shipping_threshold) }} ve üzeri siparişlerde kargo ücretsiz.{% elif cfg.shipping_fee > 0 %}Kargo ücreti: {{ fmt_try(cfg.shipping_fee) }}.{% endif %}</p>
+    <div class="product__info">
+      <div class="product__sticky">
+        <nav class="breadcrumb" aria-label="Sayfa yolu">
+          <ol>
+            <li><a href="/">Ana sayfa</a></li>
+            {% if group.category %}<li><a href="/kategori/{{ slugify(group.category) }}">{{ group.category }}</a></li>{% endif %}
+            <li aria-current="page"><span>{{ v.title }}</span></li>
+          </ol>
+        </nav>
+        <h1 class="product__title" data-product-title>{{ v.title }}</h1>
+        <div class="product__price-row">
+          {{ m.price(v, 'price--lg') }}
+          <p class="product__tax">KDV dahil</p>
+        </div>
 
-          <div class="product__form">
-            {% set colors = group.colors %}
-            {% if colors|length > 1 %}
-            <fieldset class="variants__group">
-              <legend class="variants__legend">Renk: <span data-selected-color>{{ v.color or '' }}</span></legend>
-              <div class="variants__values variants__values--swatch">
-                {% for c in colors %}
-                <a class="swatch swatch--lg{% if c.name == v.color %} is-active{% endif %}{% if not c.in_stock %} is-unavailable{% endif %}" href="{{ c.url }}"
-                   style="--swatch: {{ c.hex }}" title="{{ c.name }}{% if not c.in_stock %} (tükendi){% endif %}" data-variant-link aria-current="{{ 'true' if c.name == v.color else 'false' }}"><span class="visually-hidden">{{ c.name }}</span></a>
-                {% endfor %}
-              </div>
-            </fieldset>
-            {% elif v.color %}
-            <p class="variants__legend">Renk: <span>{{ v.color }}</span></p>
-            {% endif %}
-            {% set sizes = group.variants|selectattr('size')|list %}
-            {% if sizes|length > 1 %}
-            <fieldset class="variants__group">
-              <legend class="variants__legend">Beden / Ölçü</legend>
-              <div class="variants__values">
-                {% for x in group.variants if x.size and (x.color == v.color or not v.color) %}
-                <a class="pill{% if x.id == v.id %} is-active{% endif %}{% if not x.in_stock %} is-unavailable{% endif %}" href="{{ x.url }}" data-variant-link>{{ x.size }}</a>
-                {% endfor %}
-              </div>
-            </fieldset>
-            {% endif %}
+        <div class="product__form">
+          {% set colors = group.colors %}
+          {% if colors|length > 1 %}
+          <fieldset class="variants__group">
+            <legend class="variants__legend">Renk <span data-selected-color>{{ v.color or '' }}</span></legend>
+            <div class="variants__values variants__values--swatch">
+              {% for c in colors %}
+              <a class="swatch swatch--lg{% if c.name == v.color %} is-active{% endif %}{% if not c.in_stock %} is-unavailable{% endif %}" href="{{ c.url }}"
+                 style="--swatch: {{ c.hex }}" title="{{ c.name }}{% if not c.in_stock %} (tükendi){% endif %}" data-variant-link aria-current="{{ 'true' if c.name == v.color else 'false' }}"><span class="visually-hidden">{{ c.name }}{% if not c.in_stock %} (tükendi){% endif %}</span></a>
+              {% endfor %}
+            </div>
+          </fieldset>
+          {% elif v.color %}
+          <p class="variants__legend">Renk <span>{{ v.color }}</span></p>
+          {% endif %}
+          {% set sizes = group.variants|selectattr('size')|list %}
+          {% if sizes|length > 1 %}
+          <fieldset class="variants__group">
+            <legend class="variants__legend">Ölçü</legend>
+            <div class="variants__values">
+              {% for x in group.variants if x.size and (x.color == v.color or not v.color) %}
+              <a class="pill{% if x.id == v.id %} is-active{% endif %}{% if not x.in_stock %} is-unavailable{% endif %}" href="{{ x.url }}" data-variant-link{% if x.id == v.id %} aria-current="true"{% endif %}>{{ x.size }}</a>
+              {% endfor %}
+            </div>
+          </fieldset>
+          {% endif %}
 
-            <p class="stock" data-stock>
-              {% if v.available <= 0 %}<span class="stock__dot stock__dot--out"></span>Şu an stokta yok
-              {% elif v.available <= 3 %}<span class="stock__dot stock__dot--low"></span>Stokta son {{ v.available }} ürün
-              {% else %}<span class="stock__dot"></span>Stokta{% endif %}
-            </p>
+          <p class="stock{% if not v.in_stock %} stock--out{% endif %}" data-stock>
+            {% if v.available <= 0 %}<span class="stock__dot stock__dot--out"></span>Şu an stokta yok
+            {% elif v.available <= 3 %}<span class="stock__dot stock__dot--low"></span>Stokta · son {{ v.available }} adet
+            {% else %}<span class="stock__dot"></span>Stokta{% endif %}
+          </p>
 
-            <form class="buy" data-buy-form>
-              <input type="hidden" name="product_id" value="{{ v.id }}">
-              <div class="qty" data-qty>
-                <button type="button" class="qty__btn" data-qty-minus aria-label="Adedi azalt">{% include "icons/minus.svg" %}</button>
-                <label class="visually-hidden" for="Qty">Adet</label>
-                <input class="qty__input" id="Qty" type="number" name="quantity" value="1" min="1" max="{{ [v.available, 10]|min if v.available > 0 else 1 }}" inputmode="numeric" data-qty-input>
-                <button type="button" class="qty__btn" data-qty-plus aria-label="Adedi artır">{% include "icons/plus.svg" %}</button>
-              </div>
-              <button type="submit" class="btn btn--dark btn--block buy__add" data-add-button data-main-add {% if not v.in_stock %}disabled{% endif %}>
-                <span data-add-label>{% if v.in_stock %}Sepete Ekle{% else %}Tükendi{% endif %}</span>{% include "icons/bag.svg" %}
-              </button>
-            </form>
-            <p class="form-message form-message--error" data-form-error hidden></p>
-          </div>
-
-          <div class="assurance">
-            {% include "icons/lock.svg" %}
-            <div><strong>Güvenli alışveriş.</strong> Siparişiniz şifreli bağlantı üzerinden alınır; kart bilgileriniz sitemizde saklanmaz.</div>
-          </div>
-
-          <div class="accordion">
-            {% set paras = paragraphs(v.description) %}
-            {% if paras %}
-            <details class="accordion__item" open>
-              <summary>Ürün açıklaması{% include "icons/plus.svg" %}</summary>
-              <div class="accordion__content rte">{% for p in paras %}<p>{{ p }}</p>{% endfor %}</div>
-            </details>
-            {% endif %}
-            <details class="accordion__item">
-              <summary>Ürün bilgileri{% include "icons/plus.svg" %}</summary>
-              <div class="accordion__content">
-                <dl class="specs">
-                  {% if v.brand %}<div><dt>Marka</dt><dd>{{ v.brand }}</dd></div>{% endif %}
-                  {% if group.category %}<div><dt>Kategori</dt><dd>{{ group.category }}</dd></div>{% endif %}
-                  {% if v.color %}<div><dt>Renk</dt><dd>{{ v.color }}</dd></div>{% endif %}
-                  {% if v.size %}<div><dt>Ölçü</dt><dd>{{ v.size }}</dd></div>{% endif %}
-                  {% if v.sku %}<div><dt>Ürün kodu</dt><dd>{{ v.sku }}</dd></div>{% endif %}
-                </dl>
-              </div>
-            </details>
-            {% if cfg.legal.get('teslimat-bilgileri') or cfg.legal.get('iade-ve-degisim') %}
-            <details class="accordion__item">
-              <summary>Kargo ve iade{% include "icons/plus.svg" %}</summary>
-              <div class="accordion__content rte">
-                {% if cfg.legal.get('teslimat-bilgileri') %}<p><a href="/sayfa/teslimat-bilgileri">Teslimat bilgileri</a></p>{% endif %}
-                {% if cfg.legal.get('iade-ve-degisim') %}<p><a href="/sayfa/iade-ve-degisim">İade ve değişim koşulları</a></p>{% endif %}
-              </div>
-            </details>
-            {% endif %}
-          </div>
-          {% if cfg.social.whatsapp %}
-          <a class="help-link" href="https://wa.me/{{ cfg.social.whatsapp }}?text={{ ('Merhaba, bu ürün hakkında bilgi almak istiyorum: ' ~ base ~ v.url)|urlencode }}" target="_blank" rel="noopener">{% include "icons/whatsapp.svg" %} Bu ürün hakkında WhatsApp'tan sor</a>
+          <form class="buy" data-buy-form>
+            <input type="hidden" name="product_id" value="{{ v.id }}">
+            <div class="qty" data-qty>
+              <button type="button" class="qty__btn" data-qty-minus aria-label="Adedi azalt" {% if not v.in_stock %}disabled{% endif %}>{% include "icons/minus.svg" %}</button>
+              <label class="visually-hidden" for="Qty">Adet</label>
+              <input class="qty__input" id="Qty" type="number" name="quantity" value="1" min="1" max="{{ [v.available, 10]|min if v.available > 0 else 1 }}" inputmode="numeric" data-qty-input {% if not v.in_stock %}disabled{% endif %}>
+              <button type="button" class="qty__btn" data-qty-plus aria-label="Adedi artır" {% if not v.in_stock %}disabled{% endif %}>{% include "icons/plus.svg" %}</button>
+            </div>
+            <button type="submit" class="btn btn--dark btn--block btn--lg buy__add" data-add-button data-main-add {% if not v.in_stock %}disabled{% endif %}>
+              <span data-add-label>{% if v.in_stock %}Sepete Ekle{% else %}Tükendi{% endif %}</span>
+            </button>
+          </form>
+          <p class="form-message form-message--error" data-form-error hidden></p>
+          {% if not v.in_stock and colors|length > 1 and colors|selectattr('in_stock')|list %}
+          <p class="product__hint">Bu renk şu an tükendi; stokta olan renkleri yukarıdan seçebilirsiniz.</p>
           {% endif %}
         </div>
+
+        <ul class="product__facts" role="list">
+          <li>{% include "icons/truck.svg" %}<span>
+            {% if cfg.free_shipping_threshold is not none and cfg.shipping_fee > 0 %}Kargo {{ fmt_try(cfg.shipping_fee) }} · {{ fmt_try(cfg.free_shipping_threshold) }} ve üzeri ücretsiz
+            {% elif cfg.shipping_fee > 0 %}Kargo ücreti {{ fmt_try(cfg.shipping_fee) }}
+            {% else %}Ücretsiz kargo{% endif %}</span></li>
+          {% set pms = cfg.payment_methods() %}
+          {% if pms %}<li>{% include "icons/lock.svg" %}<span>Güvenli ödeme · {{ pms|map(attribute='label')|join(', ') }}</span></li>{% endif %}
+          {% if cfg.legal.get('iade-ve-degisim') %}<li>{% include "icons/return.svg" %}<span><a href="/sayfa/iade-ve-degisim">İade ve değişim koşulları</a></span></li>{% endif %}
+        </ul>
+
+        <div class="accordion">
+          {% set paras = paragraphs(v.description) %}
+          {% if paras %}
+          <details class="accordion__item" open>
+            <summary>Ürün açıklaması{% include "icons/plus.svg" %}</summary>
+            <div class="accordion__content rte">{% for p in paras %}<p>{{ p }}</p>{% endfor %}</div>
+          </details>
+          {% endif %}
+          <details class="accordion__item">
+            <summary>Ürün bilgileri{% include "icons/plus.svg" %}</summary>
+            <div class="accordion__content">
+              <dl class="specs">
+                {% if v.brand %}<div><dt>Marka</dt><dd>{{ v.brand }}</dd></div>{% endif %}
+                {% if group.category %}<div><dt>Kategori</dt><dd>{{ group.category }}</dd></div>{% endif %}
+                {% if v.color %}<div><dt>Renk</dt><dd>{{ v.color }}</dd></div>{% endif %}
+                {% if v.size %}<div><dt>Ölçü</dt><dd>{{ v.size }}</dd></div>{% endif %}
+                {% if v.sku %}<div><dt>Ürün kodu</dt><dd>{{ v.sku }}</dd></div>{% endif %}
+              </dl>
+            </div>
+          </details>
+          <details class="accordion__item">
+            <summary>Teslimat, iade ve yasal bilgiler{% include "icons/plus.svg" %}</summary>
+            <div class="accordion__content rte">
+              <p>Fiyatlara KDV dahildir. Siparişiniz şifreli bağlantı üzerinden alınır.</p>
+              <ul class="link-list">
+                {% for slug in ('teslimat-bilgileri', 'iade-ve-degisim', 'mesafeli-satis-sozlesmesi', 'on-bilgilendirme-formu') %}
+                {% if cfg.legal.get(slug) %}<li><a href="/sayfa/{{ slug }}">{{ LEGAL_PAGES[slug][0] }}</a></li>{% endif %}
+                {% endfor %}
+                {% if cfg.seller.title %}<li>Satıcı: {{ cfg.seller.title }}</li>{% endif %}
+              </ul>
+            </div>
+          </details>
+        </div>
+        {% if cfg.social.whatsapp %}
+        <a class="help-link" href="https://wa.me/{{ cfg.social.whatsapp }}?text={{ ('Merhaba, bu ürün hakkında bilgi almak istiyorum: ' ~ base ~ v.url)|urlencode }}" target="_blank" rel="noopener">{% include "icons/whatsapp.svg" %} Bu ürünü WhatsApp'tan sorun</a>
+        {% endif %}
       </div>
     </div>
   </div>
 
   <div class="sticky-buy" data-sticky-buy aria-hidden="true">
     <div class="sticky-buy__inner">
-      {% if v.images %}<img class="sticky-buy__img" src="{{ img(v.images[0], 160) }}" alt="" width="48" height="48" loading="lazy">{% endif %}
-      <div class="sticky-buy__text"><span class="sticky-buy__title">{{ v.title }}</span><span class="sticky-buy__price">{{ fmt_try(v.price) }}</span></div>
-      <button type="button" class="btn btn--dark btn--sm" data-sticky-add tabindex="-1" {% if not v.in_stock %}disabled{% endif %}><span data-add-label>{% if v.in_stock %}Sepete Ekle{% else %}Tükendi{% endif %}</span></button>
+      <div class="sticky-buy__text"><span class="sticky-buy__title">{{ v.title }}</span><span class="sticky-buy__price">{{ fmt_try(v.price) }}{% if v.color %} · {{ v.color }}{% endif %}</span></div>
+      <button type="button" class="btn btn--dark" data-sticky-add tabindex="-1" {% if not v.in_stock %}disabled{% endif %}><span data-add-label>{% if v.in_stock %}Sepete Ekle{% else %}Tükendi{% endif %}</span></button>
     </div>
   </div>
 
   <div class="zoom" data-zoom hidden role="dialog" aria-modal="true" aria-label="Ürün görselleri">
-    <button type="button" class="zoom__close header__icon" data-zoom-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
+    <button type="button" class="zoom__close icon-btn" data-zoom-close aria-label="Kapat">{% include "icons/close.svg" %}</button>
     <ul class="zoom__track" data-zoom-track role="list">
-      {% for src in v.images[:12] %}<li><img data-src="{{ img(src, 1600) }}" alt="{{ v.title }}" width="1600" height="1600"></li>{% endfor %}
+      {% for src in imgs %}<li><img data-src="{{ img(src, 1600) }}" alt="{{ v.title }}" width="1600" height="2000"></li>{% endfor %}
     </ul>
   </div>
 </section>
 
-{% if related %}{{ m.rail(related, "Bunları da beğenebilirsin", view_all="/urunler", id="benzer") }}{% endif %}
+{% if related %}{{ m.rail(related, "Bunları da beğenebilirsin", view_all=("/kategori/" ~ slugify(group.category)) if group.category else "/urunler", id="benzer") }}{% endif %}
 {% include "partials/trust.html" %}
 {% endblock %}
 {% block jsonld %}

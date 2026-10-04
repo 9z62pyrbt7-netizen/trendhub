@@ -1,0 +1,24 @@
+{# Sipariş takibi sonucu: adres/telefon gibi kişisel ayrıntılar gösterilmez. #}
+<div class="lookup-card">
+  <p class="eyebrow">Sipariş {{ o.public_code }}</p>
+  <p class="lookup-card__status">{{ fulfilment or STATUS_LABELS.get(o.status, o.status) }}</p>
+  <dl class="specs">
+    <div><dt>Tarih</dt><dd>{{ o.created_at.strftime('%d.%m.%Y') if o.created_at else '' }}</dd></div>
+    <div><dt>Ödeme</dt><dd>{{ {"bank_transfer": "Havale / EFT", "cash_on_delivery": "Kapıda ödeme", "card": "Kart"}.get(o.payment_method, o.payment_method) }} · {{ STATUS_LABELS.get(o.status, o.status) }}</dd></div>
+    {% if o.city %}<div><dt>Teslimat ili</dt><dd>{{ o.city }}</dd></div>{% endif %}
+  </dl>
+  <ul class="mini-lines" role="list">
+    {% for line in o.lines %}
+    <li class="mini-line">
+      <span class="mini-line__media">{% if line.image %}<img src="{{ img(line.image, 160) }}" alt="" width="64" height="80" loading="lazy">{% endif %}<span class="mini-line__qty">{{ line.quantity }}</span></span>
+      <span class="mini-line__title">{{ line.title }}{% if line.color %}<small>{{ line.color }}</small>{% endif %}</span>
+      <span class="mini-line__total">{{ fmt_try(line.line_total) }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="summary">
+    <div class="summary__row"><span>Ara toplam</span><span>{{ fmt_try(o.items_total) }}</span></div>
+    <div class="summary__row"><span>Kargo / hizmet</span><span>{{ fmt_try(o.shipping_fee) }}</span></div>
+    <div class="summary__row summary__total"><span>Toplam</span><span>{{ fmt_try(o.total) }}</span></div>
+  </div>
+</div>

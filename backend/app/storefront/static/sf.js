@@ -2,6 +2,7 @@
 (() => {
   'use strict';
 
+  document.documentElement.classList.add('js');
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -40,7 +41,9 @@
     toastTimer = setTimeout(() => { el.classList.remove('is-visible'); setTimeout(() => { el.hidden = true; }, 400); }, 2800);
   };
 
-  /* ---------- Beyaz fonlu (dekupe) görsel tespiti ---------- */
+  /* ---------- Görsel fonu tespiti ----------
+     Varsayılan: beyaz fonlu tedarikçi fotoğrafı (contain + multiply ile zemine karışır, kutu görünmez).
+     Köşeleri beyaz olmayan fotoğraf (lifestyle) ise çerçeveyi kaplar. */
   const detectCutout = (img) => {
     const apply = () => {
       try {
@@ -52,14 +55,10 @@
         let white = 0;
         for (const [x, y] of pts) {
           const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
-          if (r > 238 && g > 238 && b > 238 && Math.max(r, g, b) - Math.min(r, g, b) < 14) white += 1;
+          if (r > 236 && g > 236 && b > 236 && Math.max(r, g, b) - Math.min(r, g, b) < 14) white += 1;
         }
-        if (white >= 6) {
-          img.classList.add('is-cutout');
-          const hp = img.closest('.hero__product');
-          if (hp) hp.classList.add('is-cutout');
-        }
-      } catch (e) { /* farklı origin: çerçeveli görünüm kalır */ }
+        if (white < 5) img.classList.add('is-photo');
+      } catch (e) { /* farklı origin: varsayılan görünüm kalır */ }
     };
     if (img.complete && img.naturalWidth) apply();
     else img.addEventListener('load', apply, { once: true });
@@ -205,6 +204,11 @@
     const foot = $('[data-cart-drawer-foot]');
     if (!body) return;
     updateCount(d.count);
+    const hint = $('[data-cart-shipping-hint]');
+    if (hint) {
+      hint.hidden = !(d.lines.length && d.free_shipping_remaining_fmt);
+      if (!hint.hidden) hint.textContent = `Ücretsiz kargo için ${d.free_shipping_remaining_fmt} daha ekleyin.`;
+    }
     if (!d.lines.length) {
       body.innerHTML = $('#CartEmptyTpl').innerHTML;
       body.classList.add('cart-empty-wrap');
@@ -222,11 +226,11 @@
           ${l.issue ? `<p class="line__issue">${esc(l.issue)}</p>` : ''}
           <div class="line__controls">
             <div class="qty qty--sm">
-              <button type="button" class="qty__btn" data-set-qty="${l.quantity - 1}" aria-label="Adedi azalt"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M5 12h14"/></svg></button>
+              <button type="button" class="qty__btn" data-set-qty="${l.quantity - 1}" aria-label="Adedi azalt: ${esc(l.title)}"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M5 12h14"/></svg></button>
               <span class="qty__input" aria-live="polite">${l.quantity}</span>
-              <button type="button" class="qty__btn" data-set-qty="${l.quantity + 1}" aria-label="Adedi artır" ${l.quantity >= l.available ? 'disabled' : ''}><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+              <button type="button" class="qty__btn" data-set-qty="${l.quantity + 1}" aria-label="Adedi artır: ${esc(l.title)}" ${l.quantity >= l.available ? 'disabled' : ''}><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
             </div>
-            <button type="button" class="line__remove" data-set-qty="0">Kaldır</button>
+            <button type="button" class="line__remove" data-set-qty="0" aria-label="Sepetten kaldır: ${esc(l.title)}">Kaldır</button>
           </div>
         </div>
         <div class="line__total">${esc(l.total_fmt)}</div>
@@ -451,58 +455,119 @@
     sync();
   });
 
-  /* ---------- Görünür olunca beliren öğeler ---------- */
-  if (!motionOK() || !('IntersectionObserver' in window)) {
-    $$('[data-reveal]').forEach((el) => el.classList.add('is-in'));
-  } else {
-    const io = new IntersectionObserver((entries) => entries.forEach((en) => {
-      if (en.isIntersecting) { en.target.classList.add('is-in'); io.unobserve(en.target); }
-    }), { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
-    $$('[data-reveal]').forEach((el) => io.observe(el));
+  /* ---------- Sipariş takibi (Hesabım) ---------- */
+  const lookup = $('[data-lookup-form]');
+  if (lookup) {
+    lookup.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('[data-lookup-submit]', lookup);
+      const err = $('[data-lookup-error]', lookup);
+      const out = $('[data-lookup-result]');
+      err.hidden = true;
+      const code = lookup.elements.code.value.trim().toUpperCase();
+      const email = lookup.elements.email.value.trim();
+      if (!code || !email) { err.textContent = 'Sipariş numarası ve e-posta gerekli.'; err.hidden = false; return; }
+      setBusy(btn, true);
+      try {
+        const d = await api('/api/store/order-lookup', { code, email });
+        out.innerHTML = d.html;
+        scanCutouts(out);
+        out.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' });
+      } catch (ex) { out.innerHTML = ''; err.textContent = ex.message; err.hidden = false; }
+      finally { setBusy(btn, false); }
+    });
   }
 
-  /* ---------- Hero: kaydırmaya tepki veren ürün ---------- */
-  $$('[data-hero]').forEach((hero) => {
-    const stage = $('[data-hero-stage]', hero);
-    const trackEl = $('[data-hero-track]', hero);
-    if (!stage || !trackEl) return;
-    if (!motionOK()) { hero.classList.remove('hero--motion'); return; }
-    let active = true; let raf = null; let lastP = -1;
-    const render = () => {
-      raf = null;
-      const rect = trackEl.getBoundingClientRect();
-      const total = rect.height - window.innerHeight;
-      const p = total > 0 ? Math.min(1, Math.max(0, -rect.top / total)) : 0;
-      if (Math.abs(p - lastP) < 0.001) return;
-      lastP = p;
-      stage.style.setProperty('--p', p.toFixed(4));
-      hero.classList.toggle('is-detail', p > 0.5);
+  /* ==========================================================================
+     Hareket: yalnızca transform/opacity; tek rAF döngüsü, ekranda olmayan bölüm hesaplanmaz.
+     prefers-reduced-motion açıksa hiçbiri çalışmaz (içerik sade ve sabit gösterilir).
+     ========================================================================== */
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+
+  /* Görünür olunca belirme: ilk ekrandakiler beklemeden görünür (yanıp sönme olmaz) */
+  const reveals = $$('[data-reveal]');
+  if (!motionOK() || !('IntersectionObserver' in window)) {
+    reveals.forEach((el) => el.classList.add('is-in'));
+  } else {
+    const vh = window.innerHeight;
+    const io = new IntersectionObserver((entries) => entries.forEach((en) => {
+      if (en.isIntersecting) { en.target.classList.add('is-in'); io.unobserve(en.target); }
+    }), { rootMargin: '0px 0px -6% 0px', threshold: 0.06 });
+    reveals.forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.top < vh && r.bottom > 0) { el.style.transitionDelay = '0s'; el.classList.add('is-in'); } else io.observe(el);
+    });
+  }
+
+  const scenes = [];
+  const addScene = (el, update) => {
+    const s = { el, update, visible: true };
+    scenes.push(s);
+    if ('IntersectionObserver' in window) {
+      new IntersectionObserver(([en]) => { s.visible = en.isIntersecting; if (s.visible) requestTick(); }, { rootMargin: '10% 0px' }).observe(el);
+    }
+  };
+  let ticking = false;
+  const frame = () => {
+    ticking = false;
+    const vh = window.innerHeight;
+    scenes.forEach((s) => { if (s.visible) s.update(vh); });
+  };
+  function requestTick() { if (!ticking) { ticking = true; requestAnimationFrame(frame); } }
+
+  /* Hero: ürün metinden yavaş hareket eder ve hafifçe büyür (yalnızca masaüstü) */
+  const hero = $('[data-hero]');
+  if (hero && motionOK()) {
+    const img = $('.hero__img', hero);
+    const copy = $('[data-hero-copy]', hero);
+    addScene(hero, (vh) => {
+      if (!isDesktop.matches) { if (img) img.style.transform = ''; if (copy) copy.style.transform = copy.style.opacity = ''; return; }
+      const p = clamp01(window.scrollY / vh);
+      if (img) img.style.transform = `translate3d(0, ${(-p * 8).toFixed(2)}%, 0) scale(${(1 + p * 0.06).toFixed(4)})`;
+      if (copy) { copy.style.transform = `translate3d(0, ${(-p * 90).toFixed(1)}px, 0)`; copy.style.opacity = (1 - p * 0.9).toFixed(3); }
+    });
+  }
+
+  /* Ürün hikâyesi: sahne sabit; ilerlemeye göre ürün öne gelir, görsel ve metin bölüm bölüm değişir */
+  $$('[data-story]').forEach((story) => {
+    if (!motionOK()) { story.classList.add('story--static'); return; }
+    const track = $('[data-story-track]', story);
+    const stage = $('.story__stage', story);
+    const imgs = $$('[data-story-img]', story);
+    const chapters = $$('[data-story-chapter]', story);
+    const steps = $$('[data-story-step]', story);
+    let current = -1;
+    const setChapter = (i) => {
+      if (i === current) return;
+      current = i;
+      chapters.forEach((c, n) => c.classList.toggle('is-active', n === i));
+      steps.forEach((c, n) => c.classList.toggle('is-active', n === i));
+      const k = Math.min(i, imgs.length - 1);
+      imgs.forEach((im, n) => im.classList.toggle('is-active', n === k));
     };
-    const onScroll = () => { if (active && !raf) raf = requestAnimationFrame(render); };
-    if ('IntersectionObserver' in window) new IntersectionObserver(([en]) => { active = en.isIntersecting; if (active) onScroll(); }).observe(trackEl);
-    window.addEventListener('scroll', onScroll, { passive: true });
-    window.addEventListener('resize', () => { lastP = -1; onScroll(); });
-    render();
+    addScene(story, (vh) => {
+      const r = track.getBoundingClientRect();
+      const total = r.height - vh;
+      const p = total > 0 ? clamp01(-r.top / total) : 0;
+      stage.style.setProperty('--p', p.toFixed(4));
+      stage.style.setProperty('--e', easeOut(clamp01(p / 0.4)).toFixed(4));
+      setChapter(p < 0.34 ? 0 : p < 0.67 ? 1 : 2);
+    });
   });
 
-  /* ---------- Paralaks (yalnızca masaüstü) ---------- */
-  const px = $$('[data-parallax]');
-  if (px.length && motionOK() && 'IntersectionObserver' in window) {
-    let raf = null; const visible = new Set();
-    const tick = () => {
-      raf = null;
-      if (!isDesktop.matches) { px.forEach((el) => { el.style.transform = ''; }); return; }
-      const vh = window.innerHeight;
-      visible.forEach((el) => {
-        const r = el.getBoundingClientRect();
-        el.style.transform = `translate3d(0, ${((r.top + r.height / 2 - vh / 2) * Number(el.dataset.parallax || 0)).toFixed(1)}px, 0)`;
-      });
-    };
-    const io = new IntersectionObserver((entries) => {
-      entries.forEach((en) => (en.isIntersecting ? visible.add(en.target) : visible.delete(en.target)));
-      if (!raf) raf = requestAnimationFrame(tick);
+  /* İkinci editoryal: görsel ekrana girerken yavaşça yerine oturur */
+  $$('[data-parallax-scale]').forEach((el) => {
+    if (!motionOK()) return;
+    addScene(el, (vh) => {
+      const r = el.getBoundingClientRect();
+      el.style.setProperty('--s', easeOut(clamp01((vh - r.top) / (vh + r.height * 0.5))).toFixed(4));
     });
-    px.forEach((el) => io.observe(el));
-    window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(tick); }, { passive: true });
+  });
+
+  if (scenes.length) {
+    window.addEventListener('scroll', requestTick, { passive: true });
+    window.addEventListener('resize', requestTick);
+    frame();
   }
 })();

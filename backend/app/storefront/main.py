@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 from pydantic import BaseModel, Field, ValidationError
@@ -86,8 +87,8 @@ def create_app() -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    @app.exception_handler(HTTPException)
-    async def http_error(request: Request, exc: HTTPException):
+    @app.exception_handler(StarletteHTTPException)  # yönlendirme 404'leri de (FastAPI HTTPException bunun alt sınıfı)
+    async def http_error(request: Request, exc: StarletteHTTPException):
         if request.url.path.startswith("/api/"):
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         with transaction() as conn:
@@ -150,6 +151,7 @@ def _ctx(request: Request, conn: Connection, *, title: str | None = None, descri
         "description": description or "Trendçantanız kadın çanta koleksiyonu: omuz, çapraz ve el çantaları. Güvenli ödeme, kolay sipariş.",
         "canonical": base + (canonical if canonical is not None else request.url.path),
         "og_image": image, "noindex": noindex, "og_type": og_type, "cart_count": count, "nav_categories": cats,
+        "nav_has_sales": snap.has_sales,
     }
 
 
@@ -211,6 +213,11 @@ class CartIn(BaseModel):
     quantity: int = Field(1, ge=0, le=cart_svc.MAX_QTY)
 
 
+class OrderLookupIn(BaseModel):
+    code: str = Field("", max_length=20)
+    email: str = Field("", max_length=254)
+
+
 def _routes(app: FastAPI) -> None:
     # ------------------------------------------------------------- sayfalar
     @app.get("/", response_class=HTMLResponse)
@@ -219,14 +226,28 @@ def _routes(app: FastAPI) -> None:
         hero, _reason = catalog.hero(conn, snap)
         best = catalog.bestsellers(snap, 8)
         ctx = _ctx(request, conn, canonical="/", image=hero.images[0] if hero and hero.images else None)
-        exclude = {hero.key} if hero else set()
-        editorial = next((g for g in (best + catalog.featured(snap, 12)) if g.key not in exclude and len(g.images) > 1), None) \
-            or (hero if hero and len(hero.images) > 1 else None)
+        used = {hero.key} if hero else set()
+        pool = best + catalog.featured(snap, 24)
+
+        def pick(min_images: int):
+            g = next((x for x in pool if x.key not in used and len(x.images) >= min_images), None)
+            if g:
+                used.add(g.key)
+            return g
+
+        # Kaydırma hikâyesi (en az 2 görselli ürün) ve ikinci editoryal alan: hero'dan farklı gerçek ürünler
+        story = pick(2) or (hero if hero and len(hero.images) > 1 else None)
+        editorial = pick(1)
+        # Yeni Gelenler: hero ve hikâye ürünü tekrar etmesin (yeterli ürün varsa)
+        fresh = catalog.new_arrivals(snap, 16)
+        new_arrivals = [g for g in fresh if g.key not in used][:8]
+        if len(new_arrivals) < 4:
+            new_arrivals = fresh[:8]
         cats = list(snap.by_category().values())
         ctx.update(hero=hero, bestsellers=best, has_sales=snap.has_sales,
-                   featured=[] if best else catalog.featured(snap, 8),
-                   new_arrivals=catalog.new_arrivals(snap, 8) if len(snap.groups) >= 6 else [],
-                   categories=cats[:6], editorial=editorial, total_groups=len(snap.groups))
+                   picks=best or catalog.featured(snap, 8),
+                   new_arrivals=new_arrivals if len(new_arrivals) >= 3 else [],
+                   categories=cats[:8], story=story, editorial=editorial, total_groups=len(snap.groups))
         return _render("home.html", ctx)
 
     @app.get("/urun/{slug}", response_class=HTMLResponse)
@@ -338,6 +359,23 @@ def _routes(app: FastAPI) -> None:
         ctx.update(o=sfo, fulfilment=LABELS_TR.get(sfo.get("internal_status")) if sfo.get("internal_status") else None)
         return _render("order.html", ctx)
 
+    @app.get("/hesabim", response_class=HTMLResponse)
+    def account_page(request: Request, conn: Connection = Depends(get_conn)):
+        # Üyelik sistemi yoktur (misafir ödeme). Müşteri siparişini numara + e-posta ile takip eder.
+        ctx = _ctx(request, conn, title="Hesabım · Sipariş Takibi", noindex=True)
+        return _render("account.html", ctx)
+
+    @app.post("/api/store/order-lookup")
+    def order_lookup(body: OrderLookupIn, request: Request, conn: Connection = Depends(get_conn)):
+        _rate_limit(f"lookup:{_ip(request)}", 10, 600)
+        sfo = checkout.find_by_contact(conn, body.code, body.email)
+        if sfo is None:
+            return JSONResponse({"detail": "Bu sipariş numarası ve e-posta ile eşleşen bir sipariş bulunamadı."}, status_code=404)
+        from ..domain.order_status import LABELS_TR
+        html = env.get_template("partials/order_lookup.html").render(
+            o=sfo, fulfilment=LABELS_TR.get(sfo.get("internal_status")) if sfo.get("internal_status") else None)
+        return {"ok": True, "html": html}
+
     @app.get("/sayfa/{slug}", response_class=HTMLResponse)
     def legal_page(slug: str, request: Request, conn: Connection = Depends(get_conn)):
         if slug not in LEGAL_PAGES:
@@ -360,7 +398,7 @@ def _routes(app: FastAPI) -> None:
     @app.get("/robots.txt", response_class=PlainTextResponse)
     def robots(request: Request):
         base = store_config.base_url(request)
-        return ("User-agent: *\nDisallow: /sepet\nDisallow: /odeme\nDisallow: /siparis/\nDisallow: /api/\n"
+        return ("User-agent: *\nDisallow: /sepet\nDisallow: /odeme\nDisallow: /hesabim\nDisallow: /siparis/\nDisallow: /api/\n"
                 f"Disallow: /ara\n\nSitemap: {base}/sitemap.xml\n")
 
     @app.get("/sitemap.xml")

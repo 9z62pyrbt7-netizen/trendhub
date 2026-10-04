@@ -436,3 +436,51 @@ def test_slugify_turkish():
     from app.storefront.catalog import category_label, slugify
     assert slugify("Çapraz Çanta Şık & Özel İğne") == "capraz-canta-sik-ozel-igne"
     assert category_label("Kadın > Çanta > Omuz Çantası") == "Omuz Çantası"
+
+
+# ------------------------------------------------------------------ vitrin tasarımı: gerçek veri kuralları
+def test_order_lookup_needs_matching_code_and_email_and_hides_personal_data(store, conn):
+    configure_store(conn)
+    pid = add_product(conn, sku="LK1", name="Takip Çantası", price="900")
+    fresh()
+    r = _checkout(store, pid, payment_method="cash_on_delivery")
+    code = r.json()["public_code"]
+    ok = store.post("/api/store/order-lookup", json={"code": code.lower(), "email": " AYSE@example.com "}, headers=H)
+    assert ok.status_code == 200 and code in ok.json()["html"] and "Takip Çantası" in ok.json()["html"]
+    assert "Caferağa" not in ok.json()["html"] and "0532" not in ok.json()["html"]
+    assert store.post("/api/store/order-lookup", json={"code": code, "email": "baska@example.com"}, headers=H).status_code == 404
+    assert store.post("/api/store/order-lookup", json={"code": "TC000000AAAAA", "email": "ayse@example.com"}, headers=H).status_code == 404
+    assert store.post("/api/store/order-lookup", json={"code": code, "email": "ayse@example.com"}).status_code == 403
+    page = store.get("/hesabim")
+    assert page.status_code == 200 and 'name="robots" content="noindex' in page.text
+
+
+def test_home_sections_never_claim_bestsellers_without_real_sales(store, conn):
+    configure_store(conn)
+    pids = [add_product(conn, sku=f"HS{i}", name=f"Model {i} Omuz Çantası", model=f"HSM{i}") for i in range(6)]
+    fresh()
+    home = store.get("/").text
+    assert "Öne Çıkanlar" in home and "Çok Satanlar" not in home and "Son 90 günün" not in home
+    assert 'data-story' in home and "Yeni Gelenler" in home and 'class="hero' in home
+    # Gerçek satış olunca "Çok Satanlar" görünür
+    marketplace_order(conn, pids[2], 3, status="delivered")
+    fresh()
+    home = store.get("/").text
+    assert "Çok Satanlar" in home and "Son 90 günün favorileri" in home
+
+
+def test_cart_json_free_shipping_hint_is_from_real_settings(store, conn):
+    configure_store(conn, shipping_fee="49.90", free_shipping_threshold="1000")
+    pid = add_product(conn, sku="FS1", price="400")
+    fresh()
+    d = store.post("/api/store/cart/add", json={"product_id": pid, "quantity": 1}, headers=H).json()
+    assert d["free_shipping_remaining_fmt"] == "600,00 ₺"
+    d = store.post("/api/store/cart/update", json={"product_id": pid, "quantity": 3}, headers=H).json()
+    assert d["free_shipping_remaining_fmt"] is None
+
+
+def test_unknown_route_renders_branded_404_but_api_stays_json(store, conn):
+    r = store.get("/boyle-bir-sayfa-yok")
+    assert r.status_code == 404 and "text/html" in r.headers["content-type"] and "Aradığın sayfayı bulamadık" in r.text
+    api = store.get("/api/store/boyle-bir-uc-yok")
+    assert api.status_code == 404 and api.json()["detail"]
