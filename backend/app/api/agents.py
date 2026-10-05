@@ -31,15 +31,16 @@ def _j(v):
 
 class RequestIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    context_product_id: int | None = Field(None, ge=1, description="Konuşmada kesin seçili ürün ('bu ürün' için)")
 
 
 @router.post("/requests")
 def create_request(body: RequestIn, request: Request, user: CurrentUser = Depends(viewer)):
     eng = get_engine()
-    p = orchestrator.plan(eng, body.message)
+    p = orchestrator.plan(eng, body.message, "api", body.context_product_id)
     if p["intent"].startswith("action") and not config.can(user.role, "propose"):
         raise HTTPException(403, "Aksiyon isteği (öneri oluşturma) için operatör yetkisi gerekir.")
-    res = orchestrator.handle(eng, body.message, user_id=user.id, source="api")
+    res = orchestrator.handle(eng, body.message, user_id=user.id, source="api", context_product_id=body.context_product_id)
     with eng.begin() as c:
         log_audit(c, actor=user.username, user_id=user.id, action="agents.request", entity_type="ai_request",
                   entity_id=res["request_id"], ip=client_ip(request), details={"intent": res["intent"], "status": res["status"]})

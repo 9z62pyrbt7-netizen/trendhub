@@ -585,5 +585,6 @@ def test_regression_amount_is_not_read_from_sku(engine, conn):
     create = next(t for t in p["tasks"] if t[1] == "create_campaign")
     assert create[2]["product_id"] == pid and Decimal(create[2]["daily_budget"]) == Decimal("1000.00")
     assert orchestrator.plan(engine, "PRE-1 ürününe 7 bin TL reklam aç")["amount"] == Decimal("7000")
-    assert orchestrator.plan(engine, "PRE-1 ürününe reklam aç")["intent"] == "action.unclear"      # tutar yok → uydurulmaz
+    nm = orchestrator.plan(engine, "PRE-1 ürününe reklam aç")      # tutar yok → uydurulmaz, sorulur
+    assert nm["intent"] == "action.needs_clarification" and nm["decision"] == "NEEDS_CLARIFICATION" and not nm["tasks"]
     assert orchestrator.plan(engine, "PRE-1 fiyatını %5 artır")["new_price"] == Decimal("630.00")

@@ -616,6 +616,7 @@ _hits: dict[int, deque] = defaultdict(deque)
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     conversation_id: str | None = Field(None, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    context_product_id: int | None = Field(None, ge=1)
 
 
 @router.post("/chat")
@@ -635,15 +636,17 @@ def chat_send(body: ChatIn, user: CurrentUser = Depends(viewer), conn: Connectio
                  {"u": user.id, "c": conv, "m": body.message})
     from ..services.ai import orchestrator
     eng = get_engine()
-    p = orchestrator.plan(eng, body.message, "chat")
+    ctx_pid = body.context_product_id or orchestrator.context_product(eng, conv, user.id)
+    p = orchestrator.plan(eng, body.message, "chat", ctx_pid)
     if p["intent"] == "other":
         # Uzman görevi gerektirmeyen soru: mevcut CEO sohbet motoru (konuşma geçmişiyle). Araç izi istek kaydına yazılır.
         res = _chat_with_trace(eng, conn, body.message, history, user.id, conv)
     else:
         if p["intent"].startswith("action") and not config.can(user.role, "propose"):
             raise HTTPException(403, "Aksiyon isteği (öneri oluşturma) için operatör yetkisi gerekir.")
-        o = orchestrator.handle(eng, body.message, user_id=user.id, source="chat", conversation_id=conv)
+        o = orchestrator.handle(eng, body.message, user_id=user.id, source="chat", conversation_id=conv, context_product_id=ctx_pid)
         res = {"answer": o["answer"], "engine": "orchestrator", "request_id": o["request_id"], "status": o["status"],
+               "decision": o.get("decision"), "actions": o.get("actions"), "guards": o.get("guards"),
                "intent": o["intent"], "verification": o["verification"], "usage": {},
                "tools_used": list(dict.fromkeys(c["tool"] for t in o["tasks"] for c in t["tool_calls"])),
                "sources": [f"{t['agent']}.{t['task_type']} ({t['status']})" for t in o["tasks"]]}

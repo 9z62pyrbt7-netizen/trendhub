@@ -56,16 +56,10 @@ def _find_product(engine: Engine, q: str) -> dict | None:
 
 
 def _amount(q: str, prod: dict | None = None) -> Decimal | None:
-    """Para tutarı: ürün kodu/barkodu/adı ve yüzdeler metinden çıkarılır; para birimi (TL/₺/lira/bin) yazılmış sayı esas alınır.
-    Para birimi olmayan çıplak sayı tutar sayılmaz (ör. 'PRE-1' içindeki 1 → 1 TL DEĞİL)."""
-    from .chat import parse_amount
-    s = q
-    for t in ((prod or {}).get("sku"), (prod or {}).get("barcode"), (prod or {}).get("name")):
-        if t:
-            s = re.sub(re.escape(str(t)), " ", s, flags=re.IGNORECASE)
-    s = re.sub(r"%\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*%", " ", s)
-    m = re.search(r"(\d{1,3}(?:[.\s]\d{3})+|\d+(?:[.,]\d+)?)\s*(bin|k)?\s*(tl|₺|lira)\b|(\d+(?:[.,]\d+)?)\s*bin\b", _fold(s))
-    return parse_amount(m.group(0)) if m else None
+    """Varlık-farkındalıklı para ayrıştırma (money.py): ürün kodu/barkodu/adı ve kod benzeri tokenlar para sayılmaz."""
+    from .money import parse_money
+    p = prod or {}
+    return parse_money(q, (p.get("sku"), p.get("barcode"), p.get("name"))).amount
 
 
 def _pct(q: str) -> Decimal | None:
@@ -79,37 +73,84 @@ def _pct(q: str) -> Decimal | None:
 
 
 STATUS_WORDS = ("ne durumday", "durumunu analiz", "durumu analiz", "analiz et", "durum raporu", "genel durum", "durumumuz")
+GROWTH_WORDS = ("satislari artir", "satislarimizi artir", "satisi artir", "satis artir", "satislari nasil", "satislari yukselt",
+                "daha fazla satis", "daha cok sat", "daha fazla sat", "magazayi nasil buyut", "magazayi buyut", "isi nasil buyut",
+                "nasil buyuturuz", "nasil buyutebiliriz", "ciroyu artir", "cironun artmasi")
+AD_VERB = re.compile(r"\b(ac|acalim|acin|acar|ver|verin|verelim|ayir|ayiralim|ayirin|koy|koyalim|koyun|baslat|baslatalim|harca|harcayalim)\b")
+THIS_PRODUCT = re.compile(r"\bbu (urun|urune|urunu|urunun|urunde|urunle|urun icin)\b")
+CHAT_INTENTS = ("status", "growth.strategy")
 
 
-def plan(engine: Engine, message: str, mode: str = "api") -> dict:
-    """mode='chat': yalnızca durum analizi ve açık aksiyon talimatları orkestre edilir; diğer sorular CEO sohbet motoruna gider."""
-    p = _plan(engine, message)
-    if mode == "chat" and not (p["intent"] == "status" or p["intent"].startswith("action")):
+def plan(engine: Engine, message: str, mode: str = "api", context_product_id: int | None = None) -> dict:
+    """mode='chat': durum analizi, büyüme stratejisi ve açık aksiyon talimatları orkestre edilir; diğer sorular CEO sohbet
+    motoruna gider. context_product_id: konuşmada kesin seçili ürün ("bu ürün" için); yoksa ürün TAHMİN EDİLMEZ."""
+    p = _plan(engine, message, context_product_id)
+    if mode == "chat" and not (p["intent"] in CHAT_INTENTS or p["intent"].startswith("action")):
         return {"intent": "other", "tasks": []}
     return p
 
 
-def _plan(engine: Engine, message: str) -> dict:
+def _product_by_id(engine: Engine, pid: int | None) -> dict | None:
+    if not pid:
+        return None
+    with engine.connect() as c:
+        return row(c, "SELECT id, name, sku, barcode, sale_price FROM products WHERE id = :i", i=int(pid))
+
+
+def context_product(engine: Engine, conversation_id: str | None, user_id: int | None) -> int | None:
+    """Konuşmada en son KESİN çözülmüş tek ürün (önceki aksiyon isteğinin ürünü). Birden fazla aday varsa None."""
+    if not conversation_id:
+        return None
+    with engine.connect() as c:
+        r = row(c, """SELECT r.id FROM ai_requests r WHERE r.conversation_id = :c AND r.user_id IS NOT DISTINCT FROM :u
+                         AND r.intent LIKE 'action.%' AND r.plan::text LIKE '%product_id%' ORDER BY r.id DESC LIMIT 1""",
+                c=conversation_id, u=user_id)
+        if r is None:
+            return None
+        ids = {x[0] for x in c.execute(text("""SELECT DISTINCT (input->>'product_id')::bigint FROM ai_agent_tasks
+                                                 WHERE request_id = :r AND input ? 'product_id'"""), {"r": r["id"]})}
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
+def _ad_plan(prod: dict, amount: Decimal, message: str) -> dict:
+    days = 7
+    # Zorunlu güvenlik zinciri: ürün çöz → maliyet/kârlılık + Kâr Koruması → Bütçe Yöneticisi → yazma isteği (risk motoru:
+    # Kâr Koruması + Bütçe Yöneticisi YENİDEN) → onay gereksinimi → Gerçeklik Denetçisi → CEO. Ön kontroller başarısızsa yazma
+    # isteği hiç açılmaz (handle → GUARD_TASKS).
+    return {"intent": "action.ads", "product": prod, "amount": amount,
+            "tasks": [("product_trend", "product_check", {"product_id": prod["id"]}),
+                      ("product_trend", "portfolio", {}),
+                      ("finance", "budget_check", {}),
+                      ("advertising", "create_campaign", {"product_id": prod["id"], "daily_budget": str((amount / days).quantize(Decimal("0.01"))),
+                                                          "days": days, "reason": f"Kullanıcı isteği: {sanitize.clean_text(message, 300)}"})]}
+
+
+def _plan(engine: Engine, message: str, context_product_id: int | None = None) -> dict:
     q = _fold(message)
     has = lambda *w: any(x in q for x in w)  # noqa: E731
-    question = q.rstrip().endswith("?") or has(" mi ", " mi?", "miyim", "misin", "miyiz", "nasil", "neden") or bool(
+    question = q.rstrip().endswith("?") or has(" mi ", " mi?", "miyim", "misin", "miyiz") or bool(
         re.search(r"\b\w+m[ae]li(y\w*)?\b", q))
-    act_ad = not question and has("reklam ac", "kampanya ac", "reklam ver", "reklama koy", "reklama harca", "butceyi reklama",
-                                  "reklam baslat", "kampanya baslat")
+    act_ad = not question and "reklam" in q and bool(AD_VERB.search(q)) and not has("deney", "kreatif", "hook", "gorsel")
+    act_ad = act_ad or (not question and has("butceyi reklama"))
     act_price = not question and has("fiyat") and has("dusur", "indir", "artir", "yukselt", "zam yap")
     act_disc = not question and has("indirim yap", "indirim uygula", "indirime gir")
     if act_ad or act_price or act_disc:
+        refers_this = bool(THIS_PRODUCT.search(q))
         prod = _find_product(engine, message)
+        if prod is None and refers_this:
+            prod = _product_by_id(engine, context_product_id)
+            if prod is None:
+                return {"intent": "action.needs_clarification", "tasks": [], "decision": "NEEDS_CLARIFICATION",
+                        "note": "\"Bu ürün\" ile hangi ürünü kastettiğini bilmiyorum. Ürünün SKU'sunu veya barkodunu yaz "
+                                "(ör. \"SKU-123 ürününe 7.000 TL reklam aç\"). Ürün tahmin edilmez."}
         amount, pct = _amount(message, prod), _pct(message)
         if act_ad and prod and amount:
-            days = 7
-            return {"intent": "action.ads", "product": prod, "amount": amount,
-                    "tasks": [("product_trend", "product_check", {"product_id": prod["id"]}),
-                              ("product_trend", "portfolio", {}),
-                              ("finance", "budget_check", {}),
-                              ("advertising", "create_campaign", {"product_id": prod["id"], "daily_budget": str((amount / days).quantize(Decimal("0.01"))),
-                                                                  "days": days, "reason": f"Kullanıcı isteği: {sanitize.clean_text(message, 300)}"})]}
-        if act_ad and amount:
+            return _ad_plan(prod, amount, message)
+        if act_ad and prod and not amount:
+            return {"intent": "action.needs_clarification", "tasks": [], "decision": "NEEDS_CLARIFICATION",
+                    "note": f"{prod['sku'] or prod['name']} için ne kadarlık reklam bütçesi istediğini anlayamadım. Tutarı TL ile yaz "
+                            "(ör. 7.000 TL veya 7 bin TL). Tutar tahmin edilmez."}
+        if act_ad and amount and not refers_this:
             return {"intent": "action.ad_budget", "amount": amount,
                     "tasks": [("finance", "budget_check", {}), ("advertising", "ads_review", {}), ("product_trend", "portfolio", {})]}
         if (act_price or act_disc) and prod and (pct or amount):
@@ -121,6 +162,13 @@ def _plan(engine: Engine, message: str) -> dict:
                               ("product_trend", "price_change", {"product_id": prod["id"], "new_price": str(new),
                                                                  "reason": f"Kullanıcı isteği: {sanitize.clean_text(message, 300)}"})]}
         return {"intent": "action.unclear", "tasks": [], "note": "Aksiyon için ürün (SKU/ad) ve tutar/yüzde gerekli."}
+    if has(*GROWTH_WORDS) and not has("deney"):
+        tasks = [("analytics", "store_health", {}), ("finance", "profitability", {}), ("product_trend", "portfolio", {}),
+                 ("marketing", "growth_plan", {})]
+        with engine.connect() as c:
+            if c.execute(text("SELECT EXISTS (SELECT 1 FROM ad_campaigns)")).scalar():
+                tasks.append(("advertising", "ads_review", {}))
+        return {"intent": "growth.strategy", "tasks": tasks}
     if has(*STATUS_WORDS):
         return {"intent": "status", "tasks": [(a, t, {}) for a, t in STATUS_PLAN]}
     if has("reklam", "roas", "kampanya"):
@@ -246,8 +294,28 @@ def run_task(engine: Engine, request_id: int, agent: str, task_type: str, inp: d
 
 
 # ------------------------------------------------------------------ istek
+GUARD_TASKS = {"create_campaign": ("product_check", "budget_check"), "price_change": ("product_check",)}
+
+
+def _skip_write(engine: Engine, rid: int, agent: str, task_type: str, inp: dict, missing: list[str]) -> dict:
+    """Ön güvenlik kontrolü tamamlanmadıysa yazma isteği AÇILMAZ; görev 'blocked' olarak kaydedilir."""
+    uid = uuid.uuid4().hex
+    err = "Zorunlu güvenlik kontrolü tamamlanmadı (" + ", ".join(missing) + "); yazma isteği açılmadı."
+    with engine.begin() as c:
+        tid = c.execute(text("""INSERT INTO ai_agent_tasks(task_uid, request_id, agent_code, task_type, objective, input, status, error,
+                                                           finished_at) VALUES (:u, :r, :a, :t, :o, CAST(:i AS JSONB), 'blocked', :e, NOW())
+                                RETURNING id"""),
+                        {"u": uid, "r": rid, "a": agent, "t": task_type, "o": TASK_TR.get(task_type, task_type),
+                         "i": sanitize.to_json(inp), "e": err}).scalar()
+    _act(engine, f"CEO yazma görevini durdurdu: {err}", agent="ceo", request_id=rid, task_id=tid, level="warning")
+    return {"task_id": tid, "task_uid": uid, "agent": agent, "task_type": task_type, "status": "blocked", "error": err, "calls": [],
+            "claims": [], "findings": [], "recommendations": [], "summary": err, "data": {"blocks": [{"code": "guard_incomplete",
+                                                                                                        "message": err}]},
+            "write_status": "blocked"}
+
+
 def handle(engine: Engine, message: str, *, user_id: int | None = None, source: str = "api",
-           conversation_id: str | None = None) -> dict:
+           conversation_id: str | None = None, context_product_id: int | None = None) -> dict:
     from .agents import agent_run
     clean = sanitize.clean_text(message, 2000)
     flags = sanitize.injection_flags(clean)
@@ -266,7 +334,8 @@ def handle(engine: Engine, message: str, *, user_id: int | None = None, source: 
             c.execute(text("UPDATE ai_agent_runs SET request_id = :r WHERE id = :i"), {"r": rid, "i": ceo.run_id})
             c.execute(text("UPDATE ai_requests SET ceo_run_id = :run WHERE id = :r"), {"run": ceo.run_id, "r": rid})
         try:
-            p = plan(engine, clean, "chat" if source == "chat" else "api")
+            ctx_pid = context_product_id or context_product(engine, conversation_id, user_id)
+            p = plan(engine, clean, "chat" if source == "chat" else "api", ctx_pid)
         except Exception as exc:  # noqa: BLE001
             p = {"intent": "error", "tasks": [], "note": f"Plan hatası: {exc.__class__.__name__}"}
         plan_rows = [{"agent": a, "task": t, "input": i} for a, t, i in p["tasks"]]
@@ -275,7 +344,11 @@ def handle(engine: Engine, message: str, *, user_id: int | None = None, source: 
                       {"i": p["intent"], "p": sanitize.to_json(plan_rows), "r": rid})
         _act(engine, f"CEO plan yaptı ({p['intent']}): " + (", ".join(f"{a}.{t}" for a, t, _ in p["tasks"]) or "uzman görevi yok"),
              agent="ceo", request_id=rid, run_id=ceo.run_id)
-        tasks = [run_task(engine, rid, a, t, i, user_id) for a, t, i in p["tasks"]]
+        tasks: list[dict] = []
+        for a, t, i in p["tasks"]:
+            need = GUARD_TASKS.get(t, ())
+            missing = [g for g in need if not any(x["task_type"] == g and x["status"] == "completed" for x in tasks)]
+            tasks.append(_skip_write(engine, rid, a, t, i, missing) if missing else run_task(engine, rid, a, t, i, user_id))
         verification = {"counts": {}, "claims": 0}
         if tasks:
             with engine.begin() as c:
@@ -300,6 +373,7 @@ def handle(engine: Engine, message: str, *, user_id: int | None = None, source: 
     log.info(sanitize.to_json({"event": "agent_request", "request_uid": uid, "intent": p["intent"], "status": st, "ms": ms,
                                "tasks": [(t["agent"], t["status"]) for t in tasks]}))
     return {"request_id": rid, "request_uid": uid, "intent": p["intent"], "status": st, "answer": answer, "duration_ms": ms,
+            "decision": p.get("decision") or extra.get("decision"),
             "tasks": [{k: t[k] for k in ("task_id", "task_uid", "agent", "task_type", "status", "error", "summary")} |
                       {"tool_calls": [{"uid": x.call_uid, "tool": x.tool, "status": x.status} for x in t["calls"]]} for t in tasks],
             "verification": verification, **{k: v for k, v in extra.items() if k != "verification_extra"}}
@@ -345,6 +419,8 @@ def verify_request(engine: Engine, rid: int, tasks: list[dict]) -> dict:
 def _request_status(tasks: list[dict], verification: dict, p: dict) -> str:
     if p["intent"] == "other":
         return "completed"
+    if p.get("decision") == "NEEDS_CLARIFICATION":
+        return "blocked"
     if not tasks:
         return "failed" if p["intent"] in ("error",) else "completed"
     if all(t["status"] in ("failed", "no_evidence") for t in tasks):
@@ -386,6 +462,11 @@ def compose(engine: Engine, rid: int, p: dict, tasks: list[dict]) -> tuple[str, 
     ev = _evidence(engine, rid)
     lines: list[str] = []
     extra: dict = {}
+    if p.get("decision") == "NEEDS_CLARIFICATION":
+        return "**NEEDS_CLARIFICATION** — " + p["note"] + " Hiçbir öneri veya yazma işlemi oluşturulmadı.", \
+            {"decision": "NEEDS_CLARIFICATION"}
+    if p["intent"] == "growth.strategy":
+        return _compose_growth(engine, rid, tasks, ev)
     if p["intent"] == "action.unclear" or (not tasks and p.get("note")):
         return ("Bu isteği uygulamaya hazırlamadım: " + p.get("note", "ne istendiği anlaşılmadı.") +
                 " Örnek: \"SKU-123 ürününe 3.000 TL reklam aç\" veya \"SKU-123 fiyatını %5 artır\". Tutar/ürün tahmin edilmez."), extra
@@ -458,6 +539,7 @@ def _compose_action(engine: Engine, rid: int, p: dict, tasks: list[dict], ev: di
             {"stance": "error"}
     data = write["data"] or {}
     blocks = data.get("blocks") or []
+    chain, guards = _guard_chain(p, tasks, data)
     with engine.connect() as c:
         th = thresholds(c)
         floor = None
@@ -475,6 +557,7 @@ def _compose_action(engine: Engine, rid: int, p: dict, tasks: list[dict], ev: di
         best = next((e for e in ev.get("products.best", [])), None)
         txt = ["**KARŞIYIM.** Bu işlem net kârı korumuyor ve sistem kuralları tarafından engellendi:"]
         txt += [f"- {b['message']}" for b in blocks]
+        txt += chain
         txt.append("**Kanıt:**")
         txt += lines or ["- (ek kanıt yok)"]
         txt.append("**Daha iyi alternatif:**")
@@ -483,17 +566,95 @@ def _compose_action(engine: Engine, rid: int, p: dict, tasks: list[dict], ev: di
             txt.append(f"- Reklam düşünüyorsan önce kanıtlanmış ürüne bak: {best['claim']}")
         txt.append(f"Öneri #{data.get('proposal_id')} BLOCKED olarak kaydedildi; sahip onayı bile bu bloğu aşamaz.")
         _msg(engine, rid, "ceo", "user", "objection", "\n".join(txt[:3]), data={"blocks": [b["code"] for b in blocks]})
-        return "\n".join(txt), {"stance": "oppose", "proposal_id": data.get("proposal_id")}
+        return "\n".join(txt), {"stance": "oppose", "proposal_id": data.get("proposal_id"), "guards": guards}
     warns = data.get("warnings") or []
     stance = "conditional" if warns else "support"
     txt = [("**Şartlı destekliyorum.**" if warns else "**Mantıklı görünüyor**") +
            f" Öneri #{data.get('proposal_id')} oluşturuldu ve risk {str(data.get('risk_level', '')).upper()}: "
            "**henüz hiçbir şey uygulanmadı**, Onaylar ekranında senin onayını bekliyor."]
     txt += [f"- Uyarı: {w['message']}" for w in warns]
+    txt += chain
     txt.append("**Kanıt:**")
     txt += lines or ["- (ek kanıt yok)"]
     txt.append("Onaylansa bile platform bağlantısı yoksa sistem uygulamaz; manuel adımı verir (SKIPPED).")
-    return "\n".join(txt), {"stance": stance, "proposal_id": data.get("proposal_id")}
+    return "\n".join(txt), {"stance": stance, "proposal_id": data.get("proposal_id"), "guards": guards}
+
+
+MAX_GROWTH_ACTIONS = 5
+
+
+def _compose_growth(engine: Engine, rid: int, tasks: list[dict], ev: dict) -> tuple[str, dict]:
+    """En fazla 5 öncelikli aksiyon. Kanıtı doğrulanmayan aksiyonda rakam verilmez, güven düşürülür."""
+    with engine.connect() as c:
+        ver = {r["id"]: r for r in rows(c, "SELECT id, verification FROM ai_evidence WHERE request_id = :r", r=rid)}
+    mk = next((t for t in tasks if t["task_type"] == "growth_plan"), None)
+    opps = ((mk or {}).get("data") or {}).get("opportunities") or []
+    ctx_lines = [f"- {_line(e)}" for m in ("sales.7d.change", "finance.30d.net_profit", "finance.30d.contribution_margin")
+                 for e in ev.get(m, [])]
+    actions, out = [], []
+    for o in opps[:MAX_GROWTH_ACTIONS]:
+        vs = [(ver.get(i) or {}).get("verification") or "UNVERIFIED" for i in o["evidence_ids"]]
+        agg = aggregate(vs)
+        a = dict(o)
+        a["verification"] = agg
+        if agg in ("FAILED", "UNVERIFIED"):
+            a["why"] = "Kanıt doğrulanamadı; rakam verilmiyor."
+            a["profit_effect"] = "Bilinmiyor (kanıt doğrulanamadı)."
+            a["confidence"] = round(o["confidence"] * 0.3, 2)
+        elif agg == "PARTIALLY_VERIFIED":
+            a["confidence"] = round(o["confidence"] * 0.85, 2)
+        actions.append(a)
+    out.append(f"**Satışları ve net kârı artırmak için öncelikli aksiyonlar** (en fazla {MAX_GROWTH_ACTIONS}; "
+               "rakamlar yalnızca Gerçeklik Denetçisi'nin doğruladığı kanıttan)")
+    if ctx_lines:
+        out.append("**Mevcut durum**")
+        out += ctx_lines
+    if not actions:
+        out.append("- Kanıta dayalı aksiyon çıkarılamadı: satış/maliyet verisi yetersiz. Önce veri (maliyet, sipariş senkronu) tamamlanmalı.")
+    for n, a in enumerate(actions, 1):
+        marks = ", ".join(f"#{i} {MARK.get((ver.get(i) or {}).get('verification') or 'UNVERIFIED')}" for i in a["evidence_ids"])
+        out += [f"**{n}. {a['action']}**", f"- Neden: {a['why']}", f"- Kanıt: {marks or 'yok'} ({a['verification']})",
+                f"- Beklenen fayda: {a['benefit']}", f"- Net kâra olası etkisi: {a['profit_effect']}",
+                f"- Tahmini maliyet: {a['cost']}", f"- Risk: {a['risk']}", f"- Uygulanabilirlik: {a['feasibility']}",
+                f"- Güven: {a['confidence']}", f"- Gerekli onay/aksiyon: {a['approval']}"]
+    failed = [t for t in tasks if t["status"] in ("failed", "no_evidence")]
+    if failed:
+        out.append("**Tamamlanamayan görevler**")
+        out += [f"- {t['agent']}: {t['status']} — {t['error']}" for t in failed]
+    out.append("Hiçbir aksiyon uygulanmadı; para/fiyat/reklam gerektirenler yalnızca senin onayınla öneri olarak açılır.")
+    return "\n".join(out), {"actions": actions}
+
+
+def _guard_chain(p: dict, tasks: list[dict], data: dict) -> tuple[list[str], dict]:
+    """Zorunlu güvenlik zincirinin sonucu: ürün → Kâr Koruması → Bütçe Yöneticisi → risk → onay gereksinimi."""
+    chk = next((t for t in tasks if t["task_type"] == "product_check"), None)
+    guard = ((chk or {}).get("data") or {}).get("guard") or {}
+    checks = (data.get("blocks") or []) + (data.get("warnings") or [])
+    pg = [c for c in checks if c["code"].startswith("profit_guard") or c["code"] in ("needs_data", "negative_margin")]
+    gov = [c for c in checks if c["code"].startswith("governor_") or c["code"] in ("budget_limit", "agent_spend_limit",
+                                                                                  "capital_exceeded", "no_cash_data")]
+    prod = p.get("product") or {}
+    blocked_codes = {c["code"] for c in data.get("blocks") or []}
+    guards = {"product": {"id": prod.get("id"), "sku": prod.get("sku")}, "amount": str(p.get("amount") or p.get("new_price") or ""),
+              "profit_guard": {"called": bool(chk and chk["status"] == "completed"), "state": guard.get("state"),
+                               "checks": [c["code"] for c in pg]},
+              "budget_governor": {"called": any(t["task_type"] == "budget_check" and t["status"] == "completed" for t in tasks)
+                                  or p["intent"] != "action.ads",
+                                  "verdict": ("BLOCKED" if any(c["code"] in blocked_codes for c in gov) else "PASSED"),
+                                  "checks": [c["code"] for c in gov]},
+              "risk_level": data.get("risk_level"), "approval_required": data.get("proposal_status") == "pending_approval",
+              "executed": False}
+    out = ["**Güvenlik zinciri:**",
+           f"- Ürün: {prod.get('sku') or '—'} ({sanitize.clean_text(prod.get('name'), 80)})"
+           + (f" · tutar {tl(p['amount'])} (7 gün)" if p.get("amount") else ""),
+           f"- Kâr Koruması: {guard.get('state') or 'çalışmadı'}" + (f" — {'; '.join(guard.get('reasons') or [])}" if guard else "")
+           + (f" · risk motoru: {', '.join(guards['profit_guard']['checks'])}" if pg else ""),
+           f"- Bütçe Yöneticisi: {'ENGELLEDİ' if guards['budget_governor']['verdict'] == 'BLOCKED' else 'geçti'}"
+           + (f" — {'; '.join(c['message'] for c in gov)}" if gov else ""),
+           f"- Risk: {str(data.get('risk_level') or '—').upper()} · Onay: "
+           + ("sahibin onayı gerekli (öneri açıldı, uygulanmadı)" if guards["approval_required"] else
+              "yok — işlem engellendi" if data.get("proposal_status") == "blocked" or blocked_codes else "—")]
+    return out, guards
 
 
 def _compose_budget(engine: Engine, p: dict, tasks: list[dict], lines: list[str]) -> str:

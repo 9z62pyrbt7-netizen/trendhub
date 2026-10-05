@@ -369,6 +369,116 @@ def budget_check(rt: TaskRuntime, inp: dict) -> dict:
     return {"summary": "Bütçe kontrolü", "data": {"budget": b.data if b.ok else None}}
 
 
+# ------------------------------------------------------------------ Büyüme stratejisi (CEO "satışları nasıl artırırız?")
+def marketing_growth_plan(rt: TaskRuntime, inp: dict) -> dict:
+    """Gerçek veriden büyüme fırsatları. Her fırsatın rakamları kanıt iddiasına (claim) bağlıdır; CEO yalnızca doğrulananları
+    rakamla sunar. Beklenen etki HİPOTEZDİR (ölçülmeden kesin değil); kayıp önleme ile kazanç ayrı yazılır."""
+    from .config import thresholds
+    with rt.engine.connect() as c:
+        th = thresholds(c)
+    prods = rt.call("get_products", limit=200)
+    guard = rt.call("get_profit_guard")
+    fin = rt.call("get_profitability", days=30)
+    cx = rt.call("get_customer_signals", days=30)
+    ads = rt.call("get_ad_performance", days=30)
+    opps: list[dict] = []
+
+    def add(priority, action, why, evidence, benefit, profit_effect, cost, risk, feasibility, confidence, approval, kind):
+        opps.append({"priority": priority, "action": action, "why": why, "evidence_ids": evidence, "benefit": benefit,
+                     "profit_effect": profit_effect, "cost": cost, "risk": risk, "feasibility": feasibility,
+                     "confidence": round(confidence, 2), "approval": approval, "kind": kind})
+
+    if guard.ok:
+        items = guard.data["items"]
+        danger = [(i, x) for i, x in enumerate(items) if x["state"] == "DANGER"][:3]
+        if danger:
+            ids = [rt.claim(f"{x['name']}: son {th['analysis_days']} gün net {tl(x['net_profit'])}", x["net_profit"], call=guard,
+                            path=f"items.{i}.net_profit", metric="growth.loss_product", basis="ESTIMATED") for i, x in danger]
+            total = sum((Decimal(str(x["net_profit"])) for _, x in danger), Decimal("0"))
+            add(95, "Zarar eden ürünleri büyütmeyi durdur; fiyat/maliyet/komisyon yapısını düzelt: "
+                + ", ".join(x["name"] for _, x in danger),
+                f"Bu ürünler son {th['analysis_days']} günde toplam {tl(total)} net sonuç verdi (Kâr Koruması: DANGER).", ids,
+                "Satışı artırmadan önce zararlı satışı durdurmak: her ek satış zararı büyütür.",
+                f"Kayıp önleme: aynı tablo sürerse {th['analysis_days']} günde yaklaşık {tl(abs(total))} zarar tekrarlanır (kazanç değil).",
+                "0 TL (iç çalışma)", "LOW", "Hemen: fiyat değişikliği önerisi sahibin onayıyla; Trendyol yazma kapalı → manuel.",
+                0.8, "Fiyat değişikliği HIGH risk: sahibin onayı", "stop_loss")
+    if ads.ok:
+        losing = [(i, c_) for i, c_ in enumerate(ads.data["campaigns"]) if c_["verdict"] == "PAUSE" and c_["ad_net_profit"] is not None][:2]
+        if losing:
+            ids = [rt.claim(f"{c_['name']}: 30 gün reklam sonrası net {tl(c_['ad_net_profit'])}", c_["ad_net_profit"], call=ads,
+                            path=f"campaigns.{i}.ad_net_profit", metric="growth.losing_ad") for i, c_ in losing]
+            loss = sum((Decimal(str(c_["ad_net_profit"])) for _, c_ in losing), Decimal("0"))
+            add(92, "Zarar eden reklamı durdur: " + ", ".join(c_["name"] for _, c_ in losing),
+                f"Reklam sonrası net {tl(loss)} (30 gün); bu bütçe kârlı ürüne kaydırılabilir.", ids,
+                "Reklam bütçesi zarar yerine kârlı ürüne gider.",
+                f"Kayıp önleme: 30 günde yaklaşık {tl(abs(loss))} reklam zararı durur.", "0 TL", "LOW",
+                "Durdurma önerisi (MEDIUM) sahibin onayıyla; reklam platformu bağlı değil → manuel.", 0.75,
+                "Kampanya durdurma: sahibin onayı", "stop_ad_loss")
+    if fin.ok and fin.data["status"] == "DATA_REQUIRED":
+        eid = rt.claim(f"{fin.data['missing_cost_orders']} siparişte ürün maliyeti yok", fin.data["missing_cost_orders"], call=fin,
+                       path="missing_cost_orders", metric="growth.missing_cost")
+        add(90, "Eksik ürün maliyetlerini gir", f"{fin.data['missing_cost_orders']} siparişte maliyet yok; net kâr şu an UNKNOWN.", [eid],
+            "Hangi ürünün gerçekten kâr ettiği ölçülebilir hale gelir; yanlış ürünü büyütme riski kalkar.",
+            "Doğrudan etki yok; karar kalitesini artırır.", "0 TL (veri girişi)", "LOW", "Hemen: Ürünler → maliyet.", 0.9,
+            "Gerekmez (veri girişi)", "data")
+    if prods.ok:
+        plist = prods.data["products"]
+        good = [(i, x) for i, x in enumerate(plist) if x["trend_class"] in ("WINNER", "PROMISING", "NORMAL") and not x["missing_cost"]
+                and Decimal(str(x["net_profit"])) > 0]
+        risky = [(i, x) for i, x in good if x["stockout_risk"]][:2]
+        if risky:
+            ids = [rt.claim(f"{x['name']}: 30 gün net kâr {tl(x['net_profit'])}, kullanılabilir stok {x['available']}", x["net_profit"],
+                            call=prods, path=f"products.{i}.net_profit", metric="growth.stock_risk_winner", basis="ESTIMATED")
+                   for i, x in risky]
+            np_ = sum((Decimal(str(x["net_profit"])) for _, x in risky), Decimal("0"))
+            add(85, "Kârlı ürünlerin stoğunu güvenceye al: " + ", ".join(x["name"] for _, x in risky),
+                "Kârlı ürünlerde stok tükenmek üzere.", ids, "Stoksuzluk nedeniyle kaybedilecek satışı önler.",
+                f"Kayıp önleme: bu ürünler 30 günde {tl(np_)} net kâr getirdi; stok biterse bu katkı durur.",
+                "Dropship: 0 TL · kendi stok: alış maliyeti × adet (Bütçe Yöneticisi)", "LOW",
+                "Tedarikçi stoğu kontrolü manuel (stok yazma TrendHub'da yok).", 0.7, "Stok alımı varsa sahibin onayı", "stock")
+        winners = [(i, x) for i, x in good if not x["stockout_risk"]][:2]
+        for i, x in winners:
+            eid = rt.claim(f"{x['name']} ({x['trend_class']}): 30 gün net kâr {tl(x['net_profit'])}, {x['units']} adet", x["net_profit"],
+                           call=prods, path=f"products.{i}.net_profit", metric="growth.winner", basis="ESTIMATED")
+            base = Decimal(str(x["net_profit"]))
+            small = x["units"] < int(th["min_units_for_data"]) * 2
+            add(70 if x["trend_class"] == "WINNER" else 65,
+                f"{x['name']} için 14 günlük organik içerik + ürün sayfası iyileştirme deneyi",
+                f"{x['trend_class']} sınıfı, son 30 günde {x['units']} adet ve {tl(base)} net kâr.", [eid],
+                "Kârlı üründe talebi artırma (hipotez; sonuç ölçülmeden başarılı sayılmaz).",
+                f"Hipotez: net kârda en az %10 artış ≈ +{tl(base * Decimal('0.10'))} / 30 gün (temel {tl(base)}); garanti değil.",
+                "0 TL (organik içerik)", "LOW", "Hemen; paylaşım manuel (sosyal medya hesabı bağlı değil).",
+                0.4 if small else 0.55, "Gerekmez; deneyi başlatmak sahibin kararı", "promote")
+        if guard.ok:
+            safe = {x["product_id"]: (j_, x) for j_, x in enumerate(guard.data["items"]) if x["state"] == "SAFE"}
+            cand = next(((i, x) for i, x in good if x["product_id"] in safe and not x["stockout_risk"]), None)
+            if cand:
+                gi, gx = safe[cand[1]["product_id"]]
+                daily = (Decimal(str(th["ads_min_spend"])) / Decimal(th["ads_window_days"]) * 2).quantize(Decimal("1"))
+                cost = daily * Decimal(th["ads_window_days"])
+                eid = rt.claim(f"{gx['name']}: Kâr Koruması SAFE, birim net kâr {tl(gx.get('unit_profit'))}", gx.get("unit_profit"),
+                               call=guard, path=f"items.{gi}.unit_profit", metric="growth.ad_test_unit_profit", basis="ESTIMATED")
+                add(60, f"{gx['name']} için küçük reklam testi ({tl(daily)}/gün × {th['ads_window_days']} gün)",
+                    "Kârı doğrulanmış (SAFE) ve stoğu güvenli ürün; reklamın kârlı olup olmadığı henüz ölçülmedi.", [eid],
+                    "Reklamın bu üründe net kâr getirip getirmediğini ölçmek.",
+                    f"Sipariş başına {tl(gx.get('unit_profit'))} üstü reklam maliyeti kârı sıfırlar (başabaş CPA); test zararlı da çıkabilir.",
+                    f"{tl(cost)} (test bütçesi)", "MEDIUM",
+                    "Reklam platformu bağlı değil → kampanya manuel açılır; öneri Bütçe Yöneticisi + Kâr Koruması'ndan geçer.", 0.35,
+                    "CRITICAL: reklam kampanyası önerisi + Bütçe Yöneticisi + sahibin onayı", "ad_test")
+    if cx.ok and cx.data["info_gaps"]:
+        g = cx.data["info_gaps"][0]
+        eid = rt.claim(f"{g['name']}: '{g['label']}' hakkında {g['count']} müşteri sorusu", g["count"], call=cx, path="info_gaps.0.count",
+                       metric="growth.cx_gap")
+        add(55, f"{g['name']} ürün sayfasına '{g['label']}' bilgisini ekle",
+            f"Son 30 günde bu konuda {g['count']} soru geldi.", [eid],
+            "Soru ve iade azalabilir, dönüşüm artabilir (ölçülmedi).", "Doğrudan ölçülemez; dolaylı etki.", "0 TL", "LOW",
+            "Hemen; ürün açıklaması manuel güncellenir (TrendHub yazmaz).", 0.5, "Gerekmez", "cx")
+    if not opps:
+        rt.findings.append("Kanıta dayalı büyüme fırsatı çıkarılamadı (satış/maliyet verisi yetersiz).")
+    opps.sort(key=lambda o: -o["priority"])
+    return {"summary": f"Büyüme: {len(opps)} aday aksiyon (CEO en fazla 5'ini seçer)", "data": {"opportunities": opps}}
+
+
 HANDLERS = {
     ("finance", "profitability"): finance_profitability,
     ("analytics", "store_health"): analytics_store_health,
@@ -380,6 +490,7 @@ HANDLERS = {
     ("advertising", "create_campaign"): advertising_create,
     ("finance", "budget_check"): budget_check,
     ("marketing", "growth_experiments"): marketing_experiments,
+    ("marketing", "growth_plan"): marketing_growth_plan,
     ("creative", "creative_brief"): creative_brief,
     ("social_media", "content_calendar"): social_calendar,
     ("ceo", "memory"): ceo_memory,
@@ -388,7 +499,7 @@ TASK_TR = {"profitability": "kârlılık ve finans metriklerini hesapla", "store
            "portfolio": "ürün performansı ve kâr durumu", "product_check": "ürün kâr durumu kontrolü", "price_change": "fiyat değişikliği",
            "ops_health": "stok ve operasyon sağlığı", "ads_review": "reklam performansı ve platform durumu",
            "create_campaign": "reklam kampanyası isteği", "budget_check": "bütçe ve kanıtlanmış reklam kontrolü",
-           "growth_experiments": "büyüme deneyleri", "creative_brief": "kreatif taslakları", "content_calendar": "içerik takvimi",
+           "growth_experiments": "büyüme deneyleri", "growth_plan": "satış büyütme fırsatları (kanıtlı)", "creative_brief": "kreatif taslakları", "content_calendar": "içerik takvimi",
            "memory": "geçmiş kararlar ve sonuçları"}
 
 
